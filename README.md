@@ -15,7 +15,7 @@ AI-powered audio transcription tool with OpenAI Whisper and intelligent post-pro
 ### From Source
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/fabienpiette/goscribe
 cd transcript
 make build
 sudo make install

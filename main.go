@@ -105,7 +105,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  openai-tech-meeting         Technical meeting summary\n")
 		fmt.Fprintf(os.Stderr, "  openai-one-on-one           1:1 meeting notes\n")
 		fmt.Fprintf(os.Stderr, "  openai-executive-brief      Executive summary\n\n")
-		fmt.Fprintf(os.Stderr, "For more information, visit: https://github.com/yourusername/goscribe\n")
+		fmt.Fprintf(os.Stderr, "For more information, visit: https://github.com/fabienpiette/goscribe\n")
 	}
 
 	flag.Parse()
