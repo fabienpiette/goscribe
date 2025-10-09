@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -460,6 +461,64 @@ func TestGetDefaultConfigContent(t *testing.T) {
 		if !contains(content, expected) {
 			t.Errorf("getDefaultConfigContent() missing expected string: %s", expected)
 		}
+	}
+}
+
+// Test parsing multiple action IDs
+func TestMultipleActions(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "Single action",
+			input:    "action1",
+			expected: []string{"action1"},
+		},
+		{
+			name:     "Two actions",
+			input:    "action1,action2",
+			expected: []string{"action1", "action2"},
+		},
+		{
+			name:     "Three actions",
+			input:    "action1,action2,action3",
+			expected: []string{"action1", "action2", "action3"},
+		},
+		{
+			name:     "Actions with spaces",
+			input:    "action1, action2, action3",
+			expected: []string{"action1", "action2", "action3"},
+		},
+		{
+			name:     "Actions with extra spaces",
+			input:    "action1 , action2 , action3",
+			expected: []string{"action1", "action2", "action3"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Split and trim like in main
+			actionIDs := strings.Split(tt.input, ",")
+			for i, id := range actionIDs {
+				actionIDs[i] = strings.TrimSpace(id)
+			}
+
+			if len(actionIDs) != len(tt.expected) {
+				t.Errorf("got %d actions, want %d", len(actionIDs), len(tt.expected))
+			}
+
+			for i, id := range actionIDs {
+				if i >= len(tt.expected) {
+					break
+				}
+				if id != tt.expected[i] {
+					t.Errorf("action[%d] = %v, want %v", i, id, tt.expected[i])
+				}
+			}
+		})
 	}
 }
 

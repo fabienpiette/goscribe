@@ -60,7 +60,7 @@ func main() {
 	apiKey := flag.String("k", "XXXX", "OpenAI API key")
 	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
 	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
-	postAction := flag.String("action", "", "Post-processing action ID (use -list-actions to see options)")
+	postAction := flag.String("action", "", "Post-processing action ID(s), comma-separated (use -list-actions to see options)")
 	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
@@ -86,6 +86,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -list-actions\n\n")
 		fmt.Fprintf(os.Stderr, "  # Process existing transcript file\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-transcript.txt -action openai-meeting-summary\n\n")
+		fmt.Fprintf(os.Stderr, "  # Multiple post-processing actions\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary,openai-action-items meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Store API key in config file\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -set-key YOUR_API_KEY\n\n")
 		fmt.Fprintf(os.Stderr, "  # Reset config to defaults\n")
@@ -253,43 +255,64 @@ func main() {
 		fmt.Printf("Raw transcript saved to %s\n", transcriptFilename)
 	}
 
-	// Apply post-processing action if specified
+	// Apply post-processing action(s) if specified
+	var processedFiles []string
 	if *postAction != "" {
-		action := findAction(*postAction)
-		if action == nil {
-			fmt.Printf("Error: Unknown action '%s'. Use -list-actions to see available options.\n", *postAction)
-			os.Exit(1)
+		// Split comma-separated action IDs
+		actionIDs := strings.Split(*postAction, ",")
+
+		// Trim whitespace from each action ID
+		for i, id := range actionIDs {
+			actionIDs[i] = strings.TrimSpace(id)
 		}
 
-		fmt.Printf("Applying post-processing: %s...\n", action.Name)
-		processed, err := processWithOpenAI(transcription, action, *apiKey)
-		if err != nil {
-			fmt.Printf("Warning: Post-processing failed: %v\n", err)
-			if *transcriptFile == "" {
-				fmt.Println("Only raw transcript was saved.")
-			}
-		} else {
-			// Generate filename for post-processed output
-			var processedFilename string
-			if *transcriptFile != "" {
-				// For transcript mode, use the transcript filename as base
-				ext := filepath.Ext(*transcriptFile)
-				baseName := strings.TrimSuffix(*transcriptFile, ext)
-				processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
-			} else {
-				// For audio mode, use the audio filename as base
-				ext := filepath.Ext(audioPath)
-				baseName := strings.TrimSuffix(audioPath, ext)
-				processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
+		fmt.Printf("Processing %d action(s)...\n", len(actionIDs))
+
+		for idx, actionID := range actionIDs {
+			if actionID == "" {
+				continue
 			}
 
-			err = os.WriteFile(processedFilename, []byte(processed), 0644)
-			if err != nil {
-				fmt.Printf("Error writing processed file: %v\n", err)
-			} else {
-				fmt.Printf("Post-processed output saved to %s\n", processedFilename)
-				fmt.Println("Post-processing completed successfully!")
+			action := findAction(actionID)
+			if action == nil {
+				fmt.Printf("Error: Unknown action '%s'. Use -list-actions to see available options.\n", actionID)
+				os.Exit(1)
 			}
+
+			fmt.Printf("\n[%d/%d] Applying post-processing: %s...\n", idx+1, len(actionIDs), action.Name)
+			processed, err := processWithOpenAI(transcription, action, *apiKey)
+			if err != nil {
+				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
+				if *transcriptFile == "" && len(actionIDs) == 1 {
+					fmt.Println("Only raw transcript was saved.")
+				}
+			} else {
+				// Generate filename for post-processed output
+				var processedFilename string
+				if *transcriptFile != "" {
+					// For transcript mode, use the transcript filename as base
+					ext := filepath.Ext(*transcriptFile)
+					baseName := strings.TrimSuffix(*transcriptFile, ext)
+					processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
+				} else {
+					// For audio mode, use the audio filename as base
+					ext := filepath.Ext(audioPath)
+					baseName := strings.TrimSuffix(audioPath, ext)
+					processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
+				}
+
+				err = os.WriteFile(processedFilename, []byte(processed), 0644)
+				if err != nil {
+					fmt.Printf("⚠ Error writing processed file: %v\n", err)
+				} else {
+					fmt.Printf("✓ Post-processed output saved to %s\n", processedFilename)
+					processedFiles = append(processedFiles, processedFilename)
+				}
+			}
+		}
+
+		if len(processedFiles) > 0 {
+			fmt.Printf("\n✓ Post-processing completed! Generated %d file(s)\n", len(processedFiles))
 		}
 	}
 
@@ -302,20 +325,10 @@ func main() {
 		fmt.Printf("  Audio file: %s\n", audioPath)
 		fmt.Printf("  Transcript: %s\n", transcriptFilename)
 	}
-	if *postAction != "" {
-		action := findAction(*postAction)
-		if action != nil {
-			var processedFilename string
-			if *transcriptFile != "" {
-				ext := filepath.Ext(*transcriptFile)
-				baseName := strings.TrimSuffix(*transcriptFile, ext)
-				processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
-			} else {
-				ext := filepath.Ext(audioPath)
-				baseName := strings.TrimSuffix(audioPath, ext)
-				processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
-			}
-			fmt.Printf("  Processed:  %s (%s)\n", processedFilename, action.Name)
+	if len(processedFiles) > 0 {
+		fmt.Printf("  Processed files (%d):\n", len(processedFiles))
+		for _, pf := range processedFiles {
+			fmt.Printf("    - %s\n", pf)
 		}
 	}
 	if *apiKey != "XXXX" {

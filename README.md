@@ -52,6 +52,16 @@ goscribe -action openai-meeting-summary meeting.mp3
 goscribe -transcript meeting-transcript.txt -action openai-action-items
 ```
 
+### 4. Multiple Post-Processing Actions
+
+```bash
+# Apply multiple actions to one transcript
+goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
+
+# With spaces (will be trimmed automatically)
+goscribe -action "openai-meeting-summary, openai-action-items, openai-key-insights" meeting.mp3
+```
+
 ## Usage
 
 ```
@@ -62,7 +72,7 @@ goscribe -transcript <transcript_file> -action <action_id>
 ### Options
 
 - `-k` - OpenAI API key (or use config file)
-- `-action` - Post-processing action ID
+- `-action` - Post-processing action ID(s), comma-separated for multiple
 - `-transcript` - Process existing transcript file
 - `-o` - Output file name
 - `-config` - Custom config file path
@@ -158,6 +168,15 @@ goscribe -o my-transcript.txt meeting.mp3
 ### List All Actions
 ```bash
 goscribe -list-actions
+```
+
+### Multiple Actions
+```bash
+# Generate both summary and action items
+goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
+
+# Process transcript with multiple actions
+goscribe -transcript notes.txt -action openai-meeting-summary,openai-action-items,openai-key-insights
 ```
 
 ## Development
