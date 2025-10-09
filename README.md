@@ -222,7 +222,7 @@ Current test coverage: ~21.5%
 
 ## License
 
-[Add your license here]
+Released under the MIT License. See `LICENSE` for details.
 
 ## Contributing
 
