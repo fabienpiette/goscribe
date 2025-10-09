@@ -1,0 +1,79 @@
+post_actions:
+  - id: "custom-sales-call"
+    name: "Sales Call Summary"
+    description: "Summarize sales calls with client needs and follow-ups"
+    type: "openai"
+    prompt: |
+      Analyze this sales call transcript and provide:
+
+      1. **Client Information** (company, contacts, context)
+      2. **Client Needs/Pain Points**
+      3. **Solutions Discussed**
+      4. **Pricing/Budget Mentioned**
+      5. **Objections Raised**
+      6. **Next Steps & Timeline**
+      7. **Follow-up Actions Required**
+
+      Use professional sales language and focus on actionable items.
+    model: "gpt-3.5-turbo"
+    temperature: 0.3
+    max_tokens: 1500
+
+  - id: "custom-bug-triage"
+    name: "Bug Triage Notes"
+    description: "Extract bug details, reproduction steps, and priority"
+    type: "openai"
+    prompt: |
+      Extract bug triage information from this discussion:
+
+      **Bug Description:**
+      - What is broken?
+
+      **Reproduction Steps:**
+      - Step-by-step to reproduce
+
+      **Expected vs Actual Behavior:**
+      - What should happen vs what happens
+
+      **Impact & Severity:**
+      - Who is affected? How critical?
+
+      **Root Cause Analysis:**
+      - Technical cause if discussed
+
+      **Proposed Fix:**
+      - Solution approach
+
+      **Priority & Assignment:**
+      - Priority level and owner
+    model: "gpt-4"
+    temperature: 0.2
+    max_tokens: 1200
+
+  - id: "custom-standup-detailed"
+    name: "Detailed Standup with Metrics"
+    description: "Enhanced standup summary with velocity and blockers"
+    type: "openai"
+    prompt: |
+      Create a detailed standup summary:
+
+      **Team Progress:**
+      - Completed items (with ticket numbers if mentioned)
+      - In-progress items
+      - Velocity/burn rate if discussed
+
+      **Blockers & Dependencies:**
+      - Critical blockers requiring immediate attention
+      - Dependencies on other teams
+
+      **Today's Commitments:**
+      - What each person will work on
+
+      **Risk Factors:**
+      - Anything that might impact sprint goals
+
+      **Team Morale Indicators:**
+      - Any concerns or positive momentum noted
+    model: "gpt-3.5-turbo"
+    temperature: 0.2
+    max_tokens: 1000

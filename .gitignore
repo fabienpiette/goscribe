@@ -1,0 +1,24 @@
+# Binaries
+goscribe
+goscribe-*
+transcribe
+transcribe-*
+
+# Test coverage
+coverage.out
+coverage.html
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.log
