@@ -5,7 +5,7 @@ AI-powered audio transcription tool with OpenAI Whisper and intelligent post-pro
 ## Features
 
 - 🎙️ **Audio Transcription** - Convert audio files to text using OpenAI Whisper
-- 📦 **Large File Support** - Automatic splitting and processing for files >25MB
+- 📦 **Large File Support** - Automatic splitting for audio files >25MB and transcript chunking for long texts
 - 🤖 **AI Post-Processing** - 18 built-in actions for summarizing, extracting action items, and more
 - 📝 **Process Existing Transcripts** - Apply actions to existing transcript files
 - 🔄 **Multiple Actions** - Apply multiple post-processing actions in one command
@@ -237,6 +237,8 @@ Current test coverage: ~21.5%
 
 ## Large File Handling
 
+### Audio Files >25MB
+
 OpenAI Whisper API has a file size limit of 25MB. goscribe automatically handles larger files by:
 
 1. **Automatic Detection** - Checks file size before transcription
@@ -245,8 +247,7 @@ OpenAI Whisper API has a file size limit of 25MB. goscribe automatically handles
 4. **Seamless Merging** - Combines all transcripts into single output
 5. **Auto Cleanup** - Removes temporary chunks after processing
 
-### Example with Large File
-
+**Example:**
 ```bash
 # File is 30MB - automatically split and processed
 goscribe large-meeting.mp3
@@ -260,6 +261,31 @@ goscribe large-meeting.mp3
 # ✓ Chunk 1/4 complete
 # ...
 # ✓ All chunks transcribed successfully
+```
+
+### Long Transcripts Exceeding Context Limits
+
+When transcripts are too long for the model's context window, goscribe automatically handles this:
+
+1. **Token Estimation** - Estimates transcript length (~4 chars per token)
+2. **Smart Chunking** - Splits on sentence boundaries for coherence
+3. **Context Overlap** - Adds overlap between chunks for continuity
+4. **Model-Aware** - Different limits for GPT-3.5 (12K tokens) vs GPT-4 (100K tokens)
+5. **Result Combining** - Merges processed chunks with clear separators
+
+**Example:**
+```bash
+# Long transcript from 60MB audio file
+goscribe -action openai-meeting-summary long-recording.mp3
+
+# Output:
+# [1/2] Applying post-processing: Smart Meeting Summary...
+#   ⚠ Transcript is large (~20000 tokens), processing in chunks...
+#   → Split into 2 chunk(s) for processing
+#   → Processing chunk 1/2...
+#   → Processing chunk 2/2...
+#   ✓ All chunks processed, combining results
+# ✓ Post-processed output saved to file.txt
 ```
 
 ## Requirements
