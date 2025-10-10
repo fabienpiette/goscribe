@@ -338,21 +338,6 @@ func main() {
 		fmt.Printf("  API key:    %s\n", *apiKey)
 	}
 	fmt.Println(strings.Repeat("=", 70))
-
-	// Print the transcript text to console (first 500 chars for transcript mode)
-	if *transcriptFile != "" {
-		fmt.Printf("\nTranscript preview (first 500 chars):\n")
-		fmt.Println(strings.Repeat("-", 70))
-		if len(transcription) > 500 {
-			fmt.Println(transcription[:500] + "...")
-		} else {
-			fmt.Println(transcription)
-		}
-	} else {
-		fmt.Printf("\nRaw transcript:\n")
-		fmt.Println(strings.Repeat("-", 70))
-		fmt.Println(transcription)
-	}
 }
 
 func findAction(id string) *PostAction {
