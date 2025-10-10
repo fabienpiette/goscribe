@@ -58,6 +58,11 @@ var postActions = []PostAction{}
 
 const maxFileSizeBytes = 25 * 1024 * 1024 // 25MB - OpenAI Whisper API limit
 
+// Approximate token limits for different models (leaving room for prompt and response)
+const maxTokensForGPT35 = 12000  // ~16K limit, leaving 4K for prompt/response
+const maxTokensForGPT4 = 100000  // ~128K limit, leaving room
+const avgCharsPerToken = 4       // Rough estimate: 1 token ≈ 4 characters
+
 func main() {
 	// Define command-line flags
 	apiKey := flag.String("k", "XXXX", "OpenAI API key")
@@ -283,7 +288,7 @@ func main() {
 			}
 
 			fmt.Printf("\n[%d/%d] Applying post-processing: %s...\n", idx+1, len(actionIDs), action.Name)
-			processed, err := processWithOpenAI(transcription, action, *apiKey)
+			processed, err := processWithOpenAIChunked(transcription, action, *apiKey)
 			if err != nil {
 				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
 				if *transcriptFile == "" && len(actionIDs) == 1 {
@@ -614,6 +619,121 @@ func processWithOpenAI(transcript string, action *PostAction, apiKey string) (st
 	}
 
 	return chatResp.Choices[0].Message.Content, nil
+}
+
+func processWithOpenAIChunked(transcript string, action *PostAction, apiKey string) (string, error) {
+	// Determine max tokens based on model
+	maxTokens := maxTokensForGPT35
+	if strings.Contains(action.Model, "gpt-4") {
+		maxTokens = maxTokensForGPT4
+	}
+
+	// Estimate transcript tokens
+	estimatedTokens := len(transcript) / avgCharsPerToken
+
+	// If transcript fits in context, process normally
+	if estimatedTokens <= maxTokens {
+		return processWithOpenAI(transcript, action, apiKey)
+	}
+
+	// Transcript is too long, need to chunk
+	fmt.Printf("  ⚠ Transcript is large (~%d tokens), processing in chunks...\n", estimatedTokens)
+
+	// Calculate chunk size (leaving room for overlap)
+	maxCharsPerChunk := maxTokens * avgCharsPerToken
+
+	// Split transcript into sentences for better chunking
+	sentences := splitIntoSentences(transcript)
+
+	var chunks []string
+	var currentChunk strings.Builder
+	currentSize := 0
+
+	for i, sentence := range sentences {
+		sentenceLen := len(sentence)
+
+		// If adding this sentence exceeds chunk size, start new chunk
+		if currentSize > 0 && currentSize+sentenceLen > maxCharsPerChunk {
+			chunks = append(chunks, currentChunk.String())
+			currentChunk.Reset()
+
+			// Add overlap from previous chunk
+			overlapStart := max(0, i-3) // Include last few sentences for context
+			for j := overlapStart; j < i; j++ {
+				currentChunk.WriteString(sentences[j])
+				currentChunk.WriteString(" ")
+			}
+			currentSize = currentChunk.Len()
+		}
+
+		currentChunk.WriteString(sentence)
+		currentChunk.WriteString(" ")
+		currentSize += sentenceLen + 1
+	}
+
+	// Add final chunk
+	if currentChunk.Len() > 0 {
+		chunks = append(chunks, currentChunk.String())
+	}
+
+	fmt.Printf("  → Split into %d chunk(s) for processing\n", len(chunks))
+
+	// Process each chunk
+	var results []string
+	for i, chunk := range chunks {
+		fmt.Printf("  → Processing chunk %d/%d...\n", i+1, len(chunks))
+
+		result, err := processWithOpenAI(chunk, action, apiKey)
+		if err != nil {
+			return "", fmt.Errorf("failed to process chunk %d: %w", i+1, err)
+		}
+		results = append(results, result)
+	}
+
+	// Combine results with clear separators
+	fmt.Printf("  ✓ All chunks processed, combining results\n")
+	combined := strings.Join(results, "\n\n---\n\n")
+	return combined, nil
+}
+
+func splitIntoSentences(text string) []string {
+	// Simple sentence splitter (splits on . ! ? followed by space)
+	var sentences []string
+	var current strings.Builder
+
+	runes := []rune(text)
+	for i := 0; i < len(runes); i++ {
+		current.WriteRune(runes[i])
+
+		// Check for sentence endings
+		if (runes[i] == '.' || runes[i] == '!' || runes[i] == '?') {
+			// Check if followed by space or end of text
+			if i+1 >= len(runes) || runes[i+1] == ' ' || runes[i+1] == '\n' {
+				sentence := strings.TrimSpace(current.String())
+				if len(sentence) > 0 {
+					sentences = append(sentences, sentence)
+				}
+				current.Reset()
+			}
+		}
+	}
+
+	// Add any remaining text
+	if current.Len() > 0 {
+		sentence := strings.TrimSpace(current.String())
+		if len(sentence) > 0 {
+			sentences = append(sentences, sentence)
+		}
+	}
+
+	return sentences
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func transcribeAudio(audioPath, apiKey string) (string, error) {
