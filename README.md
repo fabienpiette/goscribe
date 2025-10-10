@@ -7,6 +7,7 @@ AI-powered audio transcription tool with OpenAI Whisper and intelligent post-pro
 - 🎙️ **Audio Transcription** - Convert audio files to text using OpenAI Whisper
 - 📦 **Large File Support** - Automatic splitting for audio files >25MB and transcript chunking for long texts
 - 🤖 **AI Post-Processing** - 18 built-in actions for summarizing, extracting action items, and more
+- 🧠 **Smart Auto-Selection** - AI automatically selects the best actions based on content
 - 📝 **Process Existing Transcripts** - Apply actions to existing transcript files
 - 🔄 **Multiple Actions** - Apply multiple post-processing actions in one command
 - ⚙️ **Configurable** - Customize actions via YAML configuration
@@ -64,6 +65,16 @@ goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
 goscribe -action "openai-meeting-summary, openai-action-items, openai-key-insights" meeting.mp3
 ```
 
+### 5. Automatic Action Selection
+
+```bash
+# Let AI choose the best actions based on content
+goscribe --auto meeting.mp3
+
+# Works with existing transcripts too
+goscribe -transcript notes.txt --auto
+```
+
 ## Usage
 
 ```
@@ -75,6 +86,7 @@ goscribe -transcript <transcript_file> -action <action_id>
 
 - `-k` - OpenAI API key (or use config file)
 - `-action` - Post-processing action ID(s), comma-separated for multiple
+- `--auto` - Automatically select best actions based on transcript content
 - `-transcript` - Process existing transcript file
 - `-o` - Output file name
 - `-config` - Custom config file path
@@ -179,6 +191,17 @@ goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
 
 # Process transcript with multiple actions
 goscribe -transcript notes.txt -action openai-meeting-summary,openai-action-items,openai-key-insights
+```
+
+### Automatic Action Selection
+```bash
+# AI selects best actions automatically
+goscribe --auto meeting.mp3
+
+# Example output:
+# 🤖 Analyzing transcript to select best actions...
+# ✓ Selected 2 action(s): openai-meeting-summary, openai-action-items
+# Processing 2 action(s)...
 ```
 
 ## Development
