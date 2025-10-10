@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -54,6 +55,8 @@ type Config struct {
 }
 
 var postActions = []PostAction{}
+
+const maxFileSizeBytes = 25 * 1024 * 1024 // 25MB - OpenAI Whisper API limit
 
 func main() {
 	// Define command-line flags
@@ -237,10 +240,10 @@ func main() {
 			transcriptFilename = outputFilename
 		}
 
-		// Transcribe the audio file
+		// Transcribe the audio file (with automatic splitting if needed)
 		fmt.Println("Transcribing audio...")
 		var err error
-		transcription, err = transcribeAudio(audioPath, *apiKey)
+		transcription, err = transcribeAudioWithSplitting(audioPath, *apiKey)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -699,4 +702,115 @@ func transcribeAudio(audioPath, apiKey string) (string, error) {
 	}
 
 	return transcriptionResp.Text, nil
+}
+
+func getFileSize(filePath string) (int64, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func splitAudioFile(audioPath string, chunkDurationSeconds int) ([]string, error) {
+	// Create temporary directory for chunks
+	tmpDir, err := os.MkdirTemp("", "goscribe-chunks-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	baseName := filepath.Base(audioPath)
+	ext := filepath.Ext(baseName)
+	nameWithoutExt := strings.TrimSuffix(baseName, ext)
+
+	outputPattern := filepath.Join(tmpDir, nameWithoutExt+"_chunk_%03d"+ext)
+
+	// Use ffmpeg to split the file
+	cmd := fmt.Sprintf("ffmpeg -i %s -f segment -segment_time %d -c copy -reset_timestamps 1 %s",
+		shellescape(audioPath),
+		chunkDurationSeconds,
+		shellescape(outputPattern))
+
+	output, err := exec.Command("bash", "-c", cmd).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg failed: %w\nOutput: %s", err, string(output))
+	}
+
+	// Find all generated chunk files
+	chunks, err := filepath.Glob(filepath.Join(tmpDir, nameWithoutExt+"_chunk_*"+ext))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find chunk files: %w", err)
+	}
+
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no chunks were created")
+	}
+
+	return chunks, nil
+}
+
+func shellescape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func transcribeAudioWithSplitting(audioPath, apiKey string) (string, error) {
+	// Check file size
+	fileSize, err := getFileSize(audioPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to get file size: %w", err)
+	}
+
+	fileSizeMB := float64(fileSize) / (1024 * 1024)
+
+	// If file is under the limit, transcribe normally
+	if fileSize <= maxFileSizeBytes {
+		return transcribeAudio(audioPath, apiKey)
+	}
+
+	// File is too large, need to split
+	fmt.Printf("⚠ File size (%.1f MB) exceeds OpenAI limit (25 MB)\n", fileSizeMB)
+	fmt.Println("Splitting audio file into chunks...")
+
+	// Split into 10-minute chunks (600 seconds)
+	// This ensures each chunk stays well under 25MB for most audio formats
+	chunkDurationSeconds := 600
+
+	chunks, err := splitAudioFile(audioPath, chunkDurationSeconds)
+	if err != nil {
+		return "", fmt.Errorf("failed to split audio: %w", err)
+	}
+	defer func() {
+		// Clean up chunks
+		for _, chunk := range chunks {
+			os.Remove(chunk)
+		}
+		os.Remove(filepath.Dir(chunks[0]))
+	}()
+
+	fmt.Printf("✓ Created %d chunks\n", len(chunks))
+
+	// Transcribe each chunk
+	var allTranscripts []string
+	for i, chunk := range chunks {
+		fmt.Printf("\n[%d/%d] Transcribing chunk %s...\n", i+1, len(chunks), filepath.Base(chunk))
+
+		// Check chunk size
+		chunkSize, _ := getFileSize(chunk)
+		if chunkSize > maxFileSizeBytes {
+			return "", fmt.Errorf("chunk %d is still too large (%.1f MB) - try a shorter chunk duration",
+				i+1, float64(chunkSize)/(1024*1024))
+		}
+
+		transcript, err := transcribeAudio(chunk, apiKey)
+		if err != nil {
+			return "", fmt.Errorf("failed to transcribe chunk %d: %w", i+1, err)
+		}
+
+		allTranscripts = append(allTranscripts, transcript)
+		fmt.Printf("✓ Chunk %d/%d complete\n", i+1, len(chunks))
+	}
+
+	// Merge all transcripts
+	fmt.Println("\n✓ All chunks transcribed successfully")
+	return strings.Join(allTranscripts, " "), nil
 }

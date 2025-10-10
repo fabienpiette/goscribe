@@ -5,8 +5,10 @@ AI-powered audio transcription tool with OpenAI Whisper and intelligent post-pro
 ## Features
 
 - 🎙️ **Audio Transcription** - Convert audio files to text using OpenAI Whisper
+- 📦 **Large File Support** - Automatic splitting and processing for files >25MB
 - 🤖 **AI Post-Processing** - 18 built-in actions for summarizing, extracting action items, and more
 - 📝 **Process Existing Transcripts** - Apply actions to existing transcript files
+- 🔄 **Multiple Actions** - Apply multiple post-processing actions in one command
 - ⚙️ **Configurable** - Customize actions via YAML configuration
 - 🔑 **API Key Management** - Store your OpenAI API key in config file
 
@@ -233,10 +235,38 @@ Current test coverage: ~21.5%
 - `<filename>-transcript.txt` - Raw transcription
 - `<filename>-<action-id>.txt` - Post-processed output
 
+## Large File Handling
+
+OpenAI Whisper API has a file size limit of 25MB. goscribe automatically handles larger files by:
+
+1. **Automatic Detection** - Checks file size before transcription
+2. **Smart Splitting** - Splits audio into 10-minute chunks using ffmpeg
+3. **Sequential Processing** - Transcribes each chunk with progress indicators
+4. **Seamless Merging** - Combines all transcripts into single output
+5. **Auto Cleanup** - Removes temporary chunks after processing
+
+### Example with Large File
+
+```bash
+# File is 30MB - automatically split and processed
+goscribe large-meeting.mp3
+
+# Output:
+# ⚠ File size (30.5 MB) exceeds OpenAI limit (25 MB)
+# Splitting audio file into chunks...
+# ✓ Created 4 chunks
+#
+# [1/4] Transcribing chunk large-meeting_chunk_000.mp3...
+# ✓ Chunk 1/4 complete
+# ...
+# ✓ All chunks transcribed successfully
+```
+
 ## Requirements
 
 - Go 1.21 or higher
 - OpenAI API key
+- ffmpeg (for files >25MB)
 - Supported audio formats: mp3, mp4, mpeg, mpga, m4a, wav, webm
 
 ## License

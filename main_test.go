@@ -522,6 +522,122 @@ func TestMultipleActions(t *testing.T) {
 	}
 }
 
+// Test getFileSize function
+func TestGetFileSize(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name     string
+		fileSize int64
+		wantErr  bool
+	}{
+		{
+			name:     "Empty file",
+			fileSize: 0,
+			wantErr:  false,
+		},
+		{
+			name:     "Small file (1KB)",
+			fileSize: 1024,
+			wantErr:  false,
+		},
+		{
+			name:     "Medium file (1MB)",
+			fileSize: 1024 * 1024,
+			wantErr:  false,
+		},
+		{
+			name:     "Large file (26MB)",
+			fileSize: 26 * 1024 * 1024,
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create test file with specific size
+			testFile := filepath.Join(tmpDir, "test.dat")
+			f, err := os.Create(testFile)
+			if err != nil {
+				t.Fatalf("Failed to create test file: %v", err)
+			}
+
+			// Write data to reach desired size
+			if tt.fileSize > 0 {
+				if err := f.Truncate(tt.fileSize); err != nil {
+					t.Fatalf("Failed to truncate file: %v", err)
+				}
+			}
+			f.Close()
+
+			// Test getFileSize
+			size, err := getFileSize(testFile)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("getFileSize() error = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			if err == nil && size != tt.fileSize {
+				t.Errorf("getFileSize() = %d, want %d", size, tt.fileSize)
+			}
+
+			// Clean up for next iteration
+			os.Remove(testFile)
+		})
+	}
+}
+
+// Test getFileSize with non-existent file
+func TestGetFileSizeNonExistent(t *testing.T) {
+	_, err := getFileSize("/non/existent/path/file.mp3")
+	if err == nil {
+		t.Error("getFileSize() expected error for non-existent file, got nil")
+	}
+}
+
+// Test shellescape function
+func TestShellescape(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Simple string",
+			input:    "hello",
+			expected: "'hello'",
+		},
+		{
+			name:     "String with space",
+			input:    "hello world",
+			expected: "'hello world'",
+		},
+		{
+			name:     "String with single quote",
+			input:    "it's",
+			expected: "'it'\\''s'",
+		},
+		{
+			name:     "String with special chars",
+			input:    "test$file",
+			expected: "'test$file'",
+		},
+		{
+			name:     "Empty string",
+			input:    "",
+			expected: "''",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellescape(tt.input)
+			if got != tt.expected {
+				t.Errorf("shellescape(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
 // Helper function
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsSubstring(s, substr))
