@@ -69,6 +69,7 @@ func main() {
 	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
 	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
 	postAction := flag.String("action", "", "Post-processing action ID(s), comma-separated (use -list-actions to see options)")
+	autoSelect := flag.Bool("auto", false, "Automatically select best post-processing actions based on transcript content")
 	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
@@ -96,6 +97,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-transcript.txt -action openai-meeting-summary\n\n")
 		fmt.Fprintf(os.Stderr, "  # Multiple post-processing actions\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary,openai-action-items meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Automatically select best actions\n")
+		fmt.Fprintf(os.Stderr, "  goscribe --auto meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Store API key in config file\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -set-key YOUR_API_KEY\n\n")
 		fmt.Fprintf(os.Stderr, "  # Reset config to defaults\n")
@@ -195,8 +198,8 @@ func main() {
 	// Handle transcript file mode
 	if *transcriptFile != "" {
 		// Process existing transcript file
-		if *postAction == "" {
-			fmt.Println("Error: -action is required when using -transcript")
+		if *postAction == "" && !*autoSelect {
+			fmt.Println("Error: -action or --auto is required when using -transcript")
 			os.Exit(1)
 		}
 
@@ -265,16 +268,32 @@ func main() {
 
 	// Apply post-processing action(s) if specified
 	var processedFiles []string
-	if *postAction != "" {
-		// Split comma-separated action IDs
-		actionIDs := strings.Split(*postAction, ",")
+	var actionIDs []string
 
-		// Trim whitespace from each action ID
-		for i, id := range actionIDs {
-			actionIDs[i] = strings.TrimSpace(id)
+	// Handle automatic action selection
+	if *autoSelect {
+		fmt.Println("\n🤖 Analyzing transcript to select best actions...")
+		selectedActions, err := selectBestActions(transcription, *apiKey)
+		if err != nil {
+			fmt.Printf("⚠ Warning: Auto-selection failed: %v\n", err)
+			fmt.Println("Continuing without post-processing.")
+		} else {
+			actionIDs = selectedActions
+			fmt.Printf("✓ Selected %d action(s): %s\n", len(actionIDs), strings.Join(actionIDs, ", "))
 		}
+	} else if *postAction != "" {
+		// Split comma-separated action IDs
+		actionIDs = strings.Split(*postAction, ",")
+	}
 
-		fmt.Printf("Processing %d action(s)...\n", len(actionIDs))
+	// Trim whitespace from action IDs
+	for i, id := range actionIDs {
+		actionIDs[i] = strings.TrimSpace(id)
+	}
+
+	// Process selected actions
+	if len(actionIDs) > 0 {
+		fmt.Printf("\nProcessing %d action(s)...\n", len(actionIDs))
 
 		for idx, actionID := range actionIDs {
 			if actionID == "" {
@@ -694,6 +713,104 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 	fmt.Printf("  ✓ All chunks processed, combining results\n")
 	combined := strings.Join(results, "\n\n---\n\n")
 	return combined, nil
+}
+
+func selectBestActions(transcript string, apiKey string) ([]string, error) {
+	// Build list of available actions for AI to choose from
+	var actionDescriptions []string
+	for _, action := range postActions {
+		actionDescriptions = append(actionDescriptions, fmt.Sprintf("- %s: %s", action.ID, action.Description))
+	}
+
+	prompt := fmt.Sprintf(`Analyze the following transcript and select the 2-3 most appropriate post-processing actions from the list below.
+
+Available actions:
+%s
+
+Transcript preview (first 2000 chars):
+%s
+
+Based on the content, which actions would provide the most value? Reply ONLY with a comma-separated list of action IDs (e.g., "openai-meeting-summary,openai-action-items"). Do not include any explanation.`,
+		strings.Join(actionDescriptions, "\n"),
+		truncateString(transcript, 2000))
+
+	reqBody := ChatCompletionRequest{
+		Model: "gpt-3.5-turbo",
+		Messages: []Message{
+			{
+				Role:    "user",
+				Content: prompt,
+			},
+		},
+		Temperature: 0.3,
+		MaxTokens:   100,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp ChatCompletionResponse
+	err = json.Unmarshal(respBody, &chatResp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from API")
+	}
+
+	// Parse the response (comma-separated action IDs)
+	response := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	selectedIDs := strings.Split(response, ",")
+
+	// Trim and validate each ID
+	var validIDs []string
+	for _, id := range selectedIDs {
+		id = strings.TrimSpace(id)
+		// Verify the action exists
+		if findAction(id) != nil {
+			validIDs = append(validIDs, id)
+		}
+	}
+
+	if len(validIDs) == 0 {
+		return nil, fmt.Errorf("no valid actions selected by AI")
+	}
+
+	return validIDs, nil
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func splitIntoSentences(text string) []string {

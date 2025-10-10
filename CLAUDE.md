@@ -1,0 +1,1 @@
+- For commit use only one line and never reference Claude
