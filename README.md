@@ -290,11 +290,12 @@ goscribe large-meeting.mp3
 
 When transcripts are too long for the model's context window, goscribe automatically handles this:
 
-1. **Token Estimation** - Estimates transcript length (~4 chars per token)
-2. **Smart Chunking** - Splits on sentence boundaries for coherence
-3. **Context Overlap** - Adds overlap between chunks for continuity
-4. **Model-Aware** - Different limits for GPT-3.5 (12K tokens) vs GPT-4 (100K tokens)
-5. **Result Combining** - Merges processed chunks with clear separators
+1. **Model-Specific Limits** - Accurate limits per model (gpt-4: 6K, gpt-4-turbo: 100K, etc.)
+2. **Token Estimation** - Estimates transcript + prompt tokens (~4 chars per token)
+3. **Smart Chunking** - Splits on sentence boundaries for coherence
+4. **Context Overlap** - Adds overlap between chunks for continuity
+5. **Intelligent Merging** - AI merges chunk results, removing duplicates and consolidating
+6. **Hierarchical Merging** - Handles very large transcripts by merging in pairs
 
 **Example:**
 ```bash
@@ -303,11 +304,11 @@ goscribe -action openai-meeting-summary long-recording.mp3
 
 # Output:
 # [1/2] Applying post-processing: Smart Meeting Summary...
-#   ⚠ Transcript is large (~20000 tokens), processing in chunks...
+#   ⚠ Transcript is large (~8000 tokens), processing in chunks...
 #   → Split into 2 chunk(s) for processing
 #   → Processing chunk 1/2...
 #   → Processing chunk 2/2...
-#   ✓ All chunks processed, combining results
+#   ✓ All chunks processed, merging results intelligently
 # ✓ Post-processed output saved to file.txt
 ```
 

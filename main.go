@@ -59,9 +59,25 @@ var postActions = []PostAction{}
 const maxFileSizeBytes = 25 * 1024 * 1024 // 25MB - OpenAI Whisper API limit
 
 // Approximate token limits for different models (leaving room for prompt and response)
-const maxTokensForGPT35 = 12000  // ~16K limit, leaving 4K for prompt/response
-const maxTokensForGPT4 = 100000  // ~128K limit, leaving room
-const avgCharsPerToken = 4       // Rough estimate: 1 token ≈ 4 characters
+const avgCharsPerToken = 4 // Rough estimate: 1 token ≈ 4 characters
+
+// getModelContextLimit returns the safe context limit for a model (input tokens only)
+func getModelContextLimit(model string) int {
+	switch {
+	case model == "gpt-4":
+		return 6000 // 8K total, leaving 2K for completion
+	case model == "gpt-4-32k":
+		return 24000 // 32K total, leaving 8K for completion
+	case strings.HasPrefix(model, "gpt-4-turbo") || model == "gpt-4-1106-preview" || model == "gpt-4-0125-preview":
+		return 100000 // 128K total, leaving 28K for completion
+	case strings.HasPrefix(model, "gpt-4o"):
+		return 100000 // 128K total
+	case strings.HasPrefix(model, "gpt-3.5-turbo"):
+		return 12000 // 16K total, leaving 4K for completion
+	default:
+		return 6000 // Conservative default
+	}
+}
 
 func main() {
 	// Define command-line flags
@@ -641,14 +657,13 @@ func processWithOpenAI(transcript string, action *PostAction, apiKey string) (st
 }
 
 func processWithOpenAIChunked(transcript string, action *PostAction, apiKey string) (string, error) {
-	// Determine max tokens based on model
-	maxTokens := maxTokensForGPT35
-	if strings.Contains(action.Model, "gpt-4") {
-		maxTokens = maxTokensForGPT4
-	}
+	// Get model-specific context limit
+	maxTokens := getModelContextLimit(action.Model)
 
-	// Estimate transcript tokens
-	estimatedTokens := len(transcript) / avgCharsPerToken
+	// Estimate transcript + prompt tokens
+	promptTokens := len(action.Prompt) / avgCharsPerToken
+	transcriptTokens := len(transcript) / avgCharsPerToken
+	estimatedTokens := promptTokens + transcriptTokens
 
 	// If transcript fits in context, process normally
 	if estimatedTokens <= maxTokens {
@@ -658,8 +673,9 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 	// Transcript is too long, need to chunk
 	fmt.Printf("  ⚠ Transcript is large (~%d tokens), processing in chunks...\n", estimatedTokens)
 
-	// Calculate chunk size (leaving room for overlap)
-	maxCharsPerChunk := maxTokens * avgCharsPerToken
+	// Calculate chunk size (leaving room for prompt and overlap)
+	maxTranscriptTokensPerChunk := maxTokens - promptTokens - 500 // 500 token buffer
+	maxCharsPerChunk := maxTranscriptTokensPerChunk * avgCharsPerToken
 
 	// Split transcript into sentences for better chunking
 	sentences := splitIntoSentences(transcript)
@@ -709,10 +725,135 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 		results = append(results, result)
 	}
 
-	// Combine results with clear separators
-	fmt.Printf("  ✓ All chunks processed, combining results\n")
-	combined := strings.Join(results, "\n\n---\n\n")
-	return combined, nil
+	// Intelligently merge chunk results using AI
+	fmt.Printf("  ✓ All chunks processed, merging results intelligently\n")
+	merged, err := mergeChunkResults(results, action, apiKey)
+	if err != nil {
+		fmt.Printf("  ⚠ Merge failed, falling back to simple concatenation: %v\n", err)
+		return strings.Join(results, "\n\n---\n\n"), nil
+	}
+	return merged, nil
+}
+
+func mergeChunkResults(chunkResults []string, action *PostAction, apiKey string) (string, error) {
+	// If only 1 chunk, no merge needed
+	if len(chunkResults) == 1 {
+		return chunkResults[0], nil
+	}
+
+	// Combine all chunk results into a single text for merging
+	combinedChunks := strings.Join(chunkResults, "\n\n--- CHUNK BOUNDARY ---\n\n")
+
+	// Estimate tokens for merge prompt
+	estimatedTokens := len(combinedChunks) / avgCharsPerToken
+	maxTokens := getModelContextLimit(action.Model)
+
+	// If merge would exceed limits, do hierarchical merge
+	if estimatedTokens > maxTokens/2 { // Leave room for prompt + response
+		fmt.Printf("  → Chunk results too large, using hierarchical merge\n")
+		return hierarchicalMerge(chunkResults, action, apiKey)
+	}
+
+	// Create a merge prompt that understands the original action's intent
+	mergePrompt := fmt.Sprintf(`You are merging multiple partial results from the same analysis that was split into chunks.
+
+Original task: %s
+
+Below are %d separate results from processing different parts of a transcript. Your job is to merge them into a single, coherent, comprehensive result that:
+1. Removes duplicate information
+2. Consolidates related points
+3. Maintains the structure and format requested in the original task
+4. Preserves all unique insights and details
+5. Creates a unified narrative without chunk boundaries
+
+Chunk results to merge:
+%s
+
+Provide the final merged result:`, action.Name, len(chunkResults), combinedChunks)
+
+	// Use same model as the action for consistency
+	reqBody := ChatCompletionRequest{
+		Model: action.Model,
+		Messages: []Message{
+			{
+				Role:    "user",
+				Content: mergePrompt,
+			},
+		},
+		Temperature: 0.3, // Lower temperature for consistency
+		MaxTokens:   action.MaxTokens,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal merge request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create merge request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send merge request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read merge response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("merge API request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp ChatCompletionResponse
+	err = json.Unmarshal(respBody, &chatResp)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse merge response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("no merge response from API")
+	}
+
+	return chatResp.Choices[0].Message.Content, nil
+}
+
+func hierarchicalMerge(chunkResults []string, action *PostAction, apiKey string) (string, error) {
+	// Merge in pairs until we have a single result
+	currentLevel := chunkResults
+
+	for len(currentLevel) > 1 {
+		var nextLevel []string
+		fmt.Printf("  → Hierarchical merge: processing %d results\n", len(currentLevel))
+
+		// Process in pairs
+		for i := 0; i < len(currentLevel); i += 2 {
+			if i+1 < len(currentLevel) {
+				// Merge pair
+				pair := []string{currentLevel[i], currentLevel[i+1]}
+				merged, err := mergeChunkResults(pair, action, apiKey)
+				if err != nil {
+					return "", fmt.Errorf("hierarchical merge failed at level: %w", err)
+				}
+				nextLevel = append(nextLevel, merged)
+			} else {
+				// Odd one out, pass through
+				nextLevel = append(nextLevel, currentLevel[i])
+			}
+		}
+
+		currentLevel = nextLevel
+	}
+
+	return currentLevel[0], nil
 }
 
 func selectBestActions(transcript string, apiKey string) ([]string, error) {
