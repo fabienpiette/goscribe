@@ -54,6 +54,28 @@ type Config struct {
 	PostActions  []PostAction `yaml:"post_actions"`
 }
 
+type multiStringFlag []string
+
+func (m *multiStringFlag) String() string {
+	return strings.Join(*m, ",")
+}
+
+func (m *multiStringFlag) Set(value string) error {
+	if value == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			*m = append(*m, trimmed)
+		}
+	}
+
+	return nil
+}
+
 var postActions = []PostAction{}
 
 const maxFileSizeBytes = 25 * 1024 * 1024 // 25MB - OpenAI Whisper API limit
@@ -80,6 +102,47 @@ func getModelContextLimit(model string) int {
 }
 
 func main() {
+	// Preprocess arguments to allow multiple values after -transcript without repeating the flag
+	if len(os.Args) > 1 {
+		rawArgs := os.Args[1:]
+		normalized := make([]string, 0, len(rawArgs))
+
+		for i := 0; i < len(rawArgs); i++ {
+			arg := rawArgs[i]
+
+			if arg == "-transcript" {
+				normalized = append(normalized, arg)
+				i++
+				if i >= len(rawArgs) {
+					fmt.Println("Error: -transcript flag requires at least one value")
+					os.Exit(1)
+				}
+				values := []string{rawArgs[i]}
+				for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
+					i++
+					values = append(values, rawArgs[i])
+				}
+				normalized = append(normalized, strings.Join(values, ","))
+				continue
+			}
+
+			if strings.HasPrefix(arg, "-transcript=") {
+				value := strings.TrimPrefix(arg, "-transcript=")
+				values := []string{value}
+				for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
+					i++
+					values = append(values, rawArgs[i])
+				}
+				normalized = append(normalized, "-transcript="+strings.Join(values, ","))
+				continue
+			}
+
+			normalized = append(normalized, arg)
+		}
+
+		os.Args = append([]string{os.Args[0]}, normalized...)
+	}
+
 	// Define command-line flags
 	apiKey := flag.String("k", "XXXX", "OpenAI API key")
 	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
@@ -89,7 +152,8 @@ func main() {
 	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
-	transcriptFile := flag.String("transcript", "", "Process existing transcript file (skips transcription)")
+	var transcriptFiles multiStringFlag
+	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
 
 	// Custom usage message
 	flag.Usage = func() {
@@ -111,6 +175,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -list-actions\n\n")
 		fmt.Fprintf(os.Stderr, "  # Process existing transcript file\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-transcript.txt -action openai-meeting-summary\n\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-day1.txt -transcript meeting-day2.txt -action openai-meeting-summary\n\n")
 		fmt.Fprintf(os.Stderr, "  # Multiple post-processing actions\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary,openai-action-items meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Automatically select best actions\n")
@@ -212,28 +277,44 @@ func main() {
 	var transcriptFilename string
 
 	// Handle transcript file mode
-	if *transcriptFile != "" {
+	if len(transcriptFiles) > 0 {
 		// Process existing transcript file
 		if *postAction == "" && !*autoSelect {
 			fmt.Println("Error: -action or --auto is required when using -transcript")
 			os.Exit(1)
 		}
 
-		// Check if transcript file exists
-		if _, err := os.Stat(*transcriptFile); os.IsNotExist(err) {
-			fmt.Printf("Error: Transcript file '%s' not found.\n", *transcriptFile)
-			os.Exit(1)
+		var combined strings.Builder
+		for idx, file := range transcriptFiles {
+			// Check if transcript file exists
+			if _, err := os.Stat(file); os.IsNotExist(err) {
+				fmt.Printf("Error: Transcript file '%s' not found.\n", file)
+				os.Exit(1)
+			}
+
+			// Read the transcript file
+			data, err := os.ReadFile(file)
+			if err != nil {
+				fmt.Printf("Error reading transcript file '%s': %v\n", file, err)
+				os.Exit(1)
+			}
+
+			content := string(data)
+			if len(transcriptFiles) == 1 {
+				transcription = content
+			} else {
+				fmt.Fprintf(&combined, "Transcript %d (%s):\n\n%s", idx+1, file, content)
+				if idx < len(transcriptFiles)-1 {
+					combined.WriteString("\n\n" + strings.Repeat("-", 70) + "\n\n")
+				}
+			}
+
+			fmt.Printf("Loaded transcript from %s\n", file)
 		}
 
-		// Read the transcript file
-		data, err := os.ReadFile(*transcriptFile)
-		if err != nil {
-			fmt.Printf("Error reading transcript file: %v\n", err)
-			os.Exit(1)
+		if len(transcriptFiles) > 1 {
+			transcription = combined.String()
 		}
-		transcription = string(data)
-		transcriptFilename = *transcriptFile
-		fmt.Printf("Loaded transcript from %s\n", transcriptFilename)
 	} else {
 		// Standard audio transcription mode
 		// Get the audio file path from remaining arguments
@@ -326,17 +407,22 @@ func main() {
 			processed, err := processWithOpenAIChunked(transcription, action, *apiKey)
 			if err != nil {
 				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
-				if *transcriptFile == "" && len(actionIDs) == 1 {
+				if len(transcriptFiles) == 0 && len(actionIDs) == 1 {
 					fmt.Println("Only raw transcript was saved.")
 				}
 			} else {
 				// Generate filename for post-processed output
 				var processedFilename string
-				if *transcriptFile != "" {
-					// For transcript mode, use the transcript filename as base
-					ext := filepath.Ext(*transcriptFile)
-					baseName := strings.TrimSuffix(*transcriptFile, ext)
-					processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
+				if len(transcriptFiles) > 0 {
+					// For transcript mode, use the transcript filename(s) as base
+					first := transcriptFiles[0]
+					ext := filepath.Ext(first)
+					baseName := strings.TrimSuffix(first, ext)
+					if len(transcriptFiles) == 1 {
+						processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
+					} else {
+						processedFilename = fmt.Sprintf("%s+%d-%s.txt", baseName, len(transcriptFiles)-1, action.ID)
+					}
 				} else {
 					// For audio mode, use the audio filename as base
 					ext := filepath.Ext(audioPath)
@@ -362,8 +448,15 @@ func main() {
 	// Print confirmation summary
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("Summary:\n")
-	if *transcriptFile != "" {
-		fmt.Printf("  Transcript: %s\n", transcriptFilename)
+	if len(transcriptFiles) > 0 {
+		if len(transcriptFiles) == 1 {
+			fmt.Printf("  Transcript: %s\n", transcriptFiles[0])
+		} else {
+			fmt.Printf("  Transcripts (%d):\n", len(transcriptFiles))
+			for _, tf := range transcriptFiles {
+				fmt.Printf("    - %s\n", tf)
+			}
+		}
 	} else {
 		fmt.Printf("  Audio file: %s\n", audioPath)
 		fmt.Printf("  Transcript: %s\n", transcriptFilename)
@@ -964,7 +1057,7 @@ func splitIntoSentences(text string) []string {
 		current.WriteRune(runes[i])
 
 		// Check for sentence endings
-		if (runes[i] == '.' || runes[i] == '!' || runes[i] == '?') {
+		if runes[i] == '.' || runes[i] == '!' || runes[i] == '?' {
 			// Check if followed by space or end of text
 			if i+1 >= len(runes) || runes[i+1] == ' ' || runes[i+1] == '\n' {
 				sentence := strings.TrimSpace(current.String())
