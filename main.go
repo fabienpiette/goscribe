@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,7 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,6 +42,44 @@ type ChatCompletionResponse struct {
 	} `json:"choices"`
 }
 
+// Gemini API types
+type GeminiRequest struct {
+	Contents []GeminiContent `json:"contents"`
+}
+
+type GeminiContent struct {
+	Parts []GeminiPart `json:"parts"`
+}
+
+type GeminiPart struct {
+	Text       string           `json:"text,omitempty"`
+	InlineData *GeminiInlineData `json:"inlineData,omitempty"`
+}
+
+type GeminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // base64 encoded
+}
+
+type GeminiResponse struct {
+	Candidates []GeminiCandidate `json:"candidates"`
+	Error      *GeminiError      `json:"error,omitempty"`
+}
+
+type GeminiCandidate struct {
+	Content struct {
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	} `json:"content"`
+}
+
+type GeminiError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Status  string `json:"status"`
+}
+
 type PostAction struct {
 	ID          string  `yaml:"id"`
 	Name        string  `yaml:"name"`
@@ -50,7 +92,10 @@ type PostAction struct {
 }
 
 type Config struct {
+	Provider     string       `yaml:"provider"`       // "openai" or "gemini" (default: openai)
 	OpenAIAPIKey string       `yaml:"openai_api_key"`
+	GeminiAPIKey string       `yaml:"gemini_api_key"`
+	GeminiModel  string       `yaml:"gemini_model"`   // default Gemini model
 	PostActions  []PostAction `yaml:"post_actions"`
 }
 
@@ -86,6 +131,7 @@ const avgCharsPerToken = 4 // Rough estimate: 1 token ≈ 4 characters
 // getModelContextLimit returns the safe context limit for a model (input tokens only)
 func getModelContextLimit(model string) int {
 	switch {
+	// OpenAI models
 	case model == "gpt-4":
 		return 6000 // 8K total, leaving 2K for completion
 	case model == "gpt-4-32k":
@@ -96,6 +142,15 @@ func getModelContextLimit(model string) int {
 		return 100000 // 128K total
 	case strings.HasPrefix(model, "gpt-3.5-turbo"):
 		return 12000 // 16K total, leaving 4K for completion
+	// Gemini models
+	case strings.HasPrefix(model, "gemini-2"):
+		return 900000 // 1M context, leaving room for response
+	case strings.HasPrefix(model, "gemini-1.5"):
+		return 900000 // 1M context
+	case strings.HasPrefix(model, "gemini-1.0"):
+		return 28000 // 32K context
+	case strings.HasPrefix(model, "gemini"):
+		return 28000 // Conservative default for unknown Gemini models
 	default:
 		return 6000 // Conservative default
 	}
@@ -145,6 +200,9 @@ func main() {
 
 	// Define command-line flags
 	apiKey := flag.String("k", "XXXX", "OpenAI API key")
+	geminiKey := flag.String("gemini-key", "", "Gemini API key")
+	provider := flag.String("provider", "", "AI provider: openai or gemini (default: from config or openai)")
+	noFallback := flag.Bool("no-fallback", false, "Disable automatic fallback to alternate provider on failure")
 	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
 	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
 	postAction := flag.String("action", "", "Post-processing action ID(s), comma-separated (use -list-actions to see options)")
@@ -152,53 +210,56 @@ func main() {
 	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
+	setGeminiKey := flag.String("set-gemini-key", "", "Store Gemini API key in config file")
+	setProvider := flag.String("set-provider", "", "Set default AI provider in config file (openai or gemini)")
 	var transcriptFiles multiStringFlag
 	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
 
 	// Custom usage message
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI Whisper\n\n")
+		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI or Gemini\n\n")
 		fmt.Fprintf(os.Stderr, "USAGE:\n")
 		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nEXAMPLES:\n")
-		fmt.Fprintf(os.Stderr, "  # Basic transcription\n")
+		fmt.Fprintf(os.Stderr, "  # Basic transcription (OpenAI)\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Transcription with Gemini\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -gemini-key YOUR_KEY -provider gemini meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Transcribe with meeting summary\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY -action openai-meeting-summary meeting.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # Transcribe technical meeting\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY -action openai-tech-meeting standup.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Custom output file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY -o transcript.txt audio.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -o transcript.txt audio.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # List all available post-processing actions\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -list-actions\n\n")
 		fmt.Fprintf(os.Stderr, "  # Process existing transcript file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-transcript.txt -action openai-meeting-summary\n\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-day1.txt -transcript meeting-day2.txt -action openai-meeting-summary\n\n")
-		fmt.Fprintf(os.Stderr, "  # Multiple post-processing actions\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary,openai-action-items meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting.txt -action openai-meeting-summary\n\n")
 		fmt.Fprintf(os.Stderr, "  # Automatically select best actions\n")
 		fmt.Fprintf(os.Stderr, "  goscribe --auto meeting.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # Store API key in config file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -set-key YOUR_API_KEY\n\n")
+		fmt.Fprintf(os.Stderr, "  # Store API keys in config file\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -set-key YOUR_OPENAI_KEY\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -set-gemini-key YOUR_GEMINI_KEY\n\n")
+		fmt.Fprintf(os.Stderr, "  # Set default provider\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -set-provider gemini\n\n")
 		fmt.Fprintf(os.Stderr, "  # Reset config to defaults\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -init\n\n")
-		fmt.Fprintf(os.Stderr, "  # Use custom config file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -config my-actions.yml -action custom-action audio.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "OUTPUT FILES:\n")
 		fmt.Fprintf(os.Stderr, "  <filename>-transcript.txt              Raw transcription\n")
-		fmt.Fprintf(os.Stderr, "  <filename>-<action-id>.txt             Post-processed output (if -action used)\n\n")
+		fmt.Fprintf(os.Stderr, "  <filename>-<action-id>.txt             Post-processed output\n\n")
 		fmt.Fprintf(os.Stderr, "CONFIGURATION:\n")
 		fmt.Fprintf(os.Stderr, "  Config file: ~/.goscribe/config.yml\n")
-		fmt.Fprintf(os.Stderr, "  - Store your OpenAI API key (openai_api_key field)\n")
-		fmt.Fprintf(os.Stderr, "  - Customize or add your own post-processing actions\n\n")
-		fmt.Fprintf(os.Stderr, "POPULAR ACTIONS:\n")
-		fmt.Fprintf(os.Stderr, "  openai-meeting-summary      Comprehensive meeting summary\n")
-		fmt.Fprintf(os.Stderr, "  openai-action-items         Extract action items and tasks\n")
-		fmt.Fprintf(os.Stderr, "  openai-tech-meeting         Technical meeting summary\n")
-		fmt.Fprintf(os.Stderr, "  openai-one-on-one           1:1 meeting notes\n")
-		fmt.Fprintf(os.Stderr, "  openai-executive-brief      Executive summary\n\n")
+		fmt.Fprintf(os.Stderr, "  - provider: default AI provider (openai or gemini)\n")
+		fmt.Fprintf(os.Stderr, "  - openai_api_key: your OpenAI API key\n")
+		fmt.Fprintf(os.Stderr, "  - gemini_api_key: your Gemini API key\n")
+		fmt.Fprintf(os.Stderr, "  - gemini_model: default Gemini model\n\n")
+		fmt.Fprintf(os.Stderr, "PROVIDERS:\n")
+		fmt.Fprintf(os.Stderr, "  openai    OpenAI Whisper (transcription) + GPT (processing)\n")
+		fmt.Fprintf(os.Stderr, "  gemini    Google Gemini (transcription + processing)\n\n")
+		fmt.Fprintf(os.Stderr, "FALLBACK:\n")
+		fmt.Fprintf(os.Stderr, "  When both API keys are configured, goscribe automatically\n")
+		fmt.Fprintf(os.Stderr, "  falls back to the other provider if one fails.\n")
+		fmt.Fprintf(os.Stderr, "  Use -no-fallback to disable this behavior.\n\n")
 		fmt.Fprintf(os.Stderr, "For more information, visit: https://github.com/fabienpiette/goscribe\n")
 	}
 
@@ -209,6 +270,26 @@ func main() {
 		err := storeAPIKey(*setKey)
 		if err != nil {
 			fmt.Printf("Error storing API key: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Store Gemini API key if requested
+	if *setGeminiKey != "" {
+		err := storeGeminiAPIKey(*setGeminiKey)
+		if err != nil {
+			fmt.Printf("Error storing Gemini API key: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Set default provider if requested
+	if *setProvider != "" {
+		err := setDefaultProvider(*setProvider)
+		if err != nil {
+			fmt.Printf("Error setting provider: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -246,17 +327,39 @@ func main() {
 	}
 
 	// Always load config file (required for actions)
-	configAPIKey, err := loadConfigActions(configPath)
+	config, err := loadConfigActions(configPath)
 	if err != nil {
 		fmt.Printf("Error loading config file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Use config API key if command-line key is default
-	if *apiKey == "XXXX" && configAPIKey != "" {
-		*apiKey = configAPIKey
+	// Use config OpenAI API key if command-line key is default
+	if *apiKey == "XXXX" && config.OpenAIAPIKey != "" {
+		*apiKey = config.OpenAIAPIKey
 		fmt.Println("Using API key from config file")
 	}
+
+	// Use config Gemini API key if not provided via flag
+	if *geminiKey == "" && config.GeminiAPIKey != "" {
+		*geminiKey = config.GeminiAPIKey
+	}
+
+	// Determine active provider: flag > config > default
+	activeProvider := "openai"
+	if *provider != "" {
+		activeProvider = *provider
+	} else if config.Provider != "" {
+		activeProvider = config.Provider
+	}
+
+	// Get Gemini model from config
+	geminiModel := config.GeminiModel
+	if geminiModel == "" {
+		geminiModel = "gemini-2.0-flash"
+	}
+
+	// Determine if fallback is enabled
+	enableFallback := !*noFallback
 
 	// List actions and exit if requested
 	if *listActions {
@@ -346,9 +449,9 @@ func main() {
 		}
 
 		// Transcribe the audio file (with automatic splitting if needed)
-		fmt.Println("Transcribing audio...")
+		fmt.Printf("Transcribing audio with %s...\n", activeProvider)
 		var err error
-		transcription, err = transcribeAudioWithSplitting(audioPath, *apiKey)
+		transcription, err = transcribeAudioWithProvider(audioPath, activeProvider, *apiKey, *geminiKey, geminiModel, enableFallback)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -369,8 +472,8 @@ func main() {
 
 	// Handle automatic action selection
 	if *autoSelect {
-		fmt.Println("\n🤖 Analyzing transcript to select best actions...")
-		selectedActions, err := selectBestActions(transcription, *apiKey)
+		fmt.Printf("\n🤖 Analyzing transcript with %s to select best actions...\n", activeProvider)
+		selectedActions, err := selectBestActionsWithProvider(transcription, activeProvider, *apiKey, *geminiKey, geminiModel)
 		if err != nil {
 			fmt.Printf("⚠ Warning: Auto-selection failed: %v\n", err)
 			fmt.Println("Continuing without post-processing.")
@@ -403,8 +506,8 @@ func main() {
 				os.Exit(1)
 			}
 
-			fmt.Printf("\n[%d/%d] Applying post-processing: %s...\n", idx+1, len(actionIDs), action.Name)
-			processed, err := processWithOpenAIChunked(transcription, action, *apiKey)
+			fmt.Printf("\n[%d/%d] Applying post-processing with %s: %s...\n", idx+1, len(actionIDs), activeProvider, action.Name)
+			processed, err := processWithProviderChunked(transcription, action, activeProvider, *apiKey, *geminiKey, geminiModel, enableFallback)
 			if err != nil {
 				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
 				if len(transcriptFiles) == 0 && len(actionIDs) == 1 {
@@ -482,37 +585,64 @@ func findAction(id string) *PostAction {
 	return nil
 }
 
-func loadConfigActions(configPath string) (string, error) {
+func loadConfigActions(configPath string) (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read config file: %w", err)
+		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	var config Config
 	err = yaml.Unmarshal(data, &config)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse YAML config: %w", err)
+		return nil, fmt.Errorf("failed to parse YAML config: %w", err)
 	}
 
 	// Validate config
 	if err := validateConfig(&config); err != nil {
-		return "", fmt.Errorf("config validation failed: %w", err)
+		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
 	// Load actions from config file
 	postActions = config.PostActions
 	fmt.Printf("Loaded %d action(s) from config file\n", len(config.PostActions))
 
-	return config.OpenAIAPIKey, nil
+	return &config, nil
 }
 
 func validateConfig(config *Config) error {
+	// Validate provider if set
+	if config.Provider != "" && config.Provider != "openai" && config.Provider != "gemini" {
+		return fmt.Errorf("invalid provider '%s' (valid: openai, gemini)", config.Provider)
+	}
+
 	if len(config.PostActions) == 0 {
 		return fmt.Errorf("no post-processing actions defined in config")
 	}
 
 	// Track unique IDs
 	seenIDs := make(map[string]bool)
+
+	// Valid types and models
+	validTypes := map[string]bool{
+		"openai": true,
+		"gemini": true,
+	}
+
+	validOpenAIModels := map[string]bool{
+		"gpt-3.5-turbo": true,
+		"gpt-4":         true,
+		"gpt-4-turbo":   true,
+		"gpt-4o":        true,
+		"gpt-4o-mini":   true,
+	}
+
+	validGeminiModels := map[string]bool{
+		"gemini-2.0-flash":    true,
+		"gemini-1.5-pro":      true,
+		"gemini-1.5-flash":    true,
+		"gemini-1.5-flash-8b": true,
+		"gemini-1.0-pro":      true,
+	}
 
 	for i, action := range config.PostActions {
 		// Check required fields
@@ -539,11 +669,8 @@ func validateConfig(config *Config) error {
 		seenIDs[action.ID] = true
 
 		// Validate type
-		validTypes := map[string]bool{
-			"openai": true,
-		}
 		if !validTypes[action.Type] {
-			return fmt.Errorf("action '%s' has invalid type '%s' (valid: openai)", action.ID, action.Type)
+			return fmt.Errorf("action '%s' has invalid type '%s' (valid: openai, gemini)", action.ID, action.Type)
 		}
 
 		// Validate temperature range
@@ -556,16 +683,12 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("action '%s' has invalid max_tokens %d (must be > 0)", action.ID, action.MaxTokens)
 		}
 
-		// Validate model names (basic check for OpenAI models)
-		validModels := map[string]bool{
-			"gpt-3.5-turbo": true,
-			"gpt-4":         true,
-			"gpt-4-turbo":   true,
-			"gpt-4o":        true,
-			"gpt-4o-mini":   true,
+		// Validate model names based on type
+		if action.Type == "openai" && !validOpenAIModels[action.Model] {
+			fmt.Printf("Warning: action '%s' uses model '%s' which may not be a recognized OpenAI model\n", action.ID, action.Model)
 		}
-		if action.Type == "openai" && !validModels[action.Model] {
-			fmt.Printf("Warning: action '%s' uses model '%s' which may not be valid\n", action.ID, action.Model)
+		if action.Type == "gemini" && !validGeminiModels[action.Model] {
+			fmt.Printf("Warning: action '%s' uses model '%s' which may not be a recognized Gemini model\n", action.ID, action.Model)
 		}
 	}
 
@@ -690,6 +813,760 @@ func storeAPIKey(apiKey string) error {
 	return nil
 }
 
+func storeGeminiAPIKey(apiKey string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	configDir := filepath.Join(homeDir, ".goscribe")
+	configFile := filepath.Join(configDir, "config.yml")
+
+	// Create default config if it doesn't exist
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Println("Config file not found. Creating default config...")
+		if err := createDefaultConfig(); err != nil {
+			return fmt.Errorf("failed to create default config: %w", err)
+		}
+	}
+
+	// Read existing config
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var config Config
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Update Gemini API key
+	config.GeminiAPIKey = apiKey
+
+	// Marshal back to YAML
+	updatedData, err := yaml.Marshal(&config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	// Write updated config
+	err = os.WriteFile(configFile, updatedData, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	fmt.Printf("✓ Gemini API key stored successfully in: %s\n", configFile)
+	fmt.Println("\nYou can now use goscribe with Gemini:")
+	fmt.Println("  goscribe -provider gemini audio.mp3")
+	fmt.Println("  goscribe -provider gemini -action openai-meeting-summary meeting.mp3")
+
+	return nil
+}
+
+func setDefaultProvider(providerName string) error {
+	if providerName != "openai" && providerName != "gemini" {
+		return fmt.Errorf("invalid provider '%s' (valid: openai, gemini)", providerName)
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	configDir := filepath.Join(homeDir, ".goscribe")
+	configFile := filepath.Join(configDir, "config.yml")
+
+	// Create default config if it doesn't exist
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Println("Config file not found. Creating default config...")
+		if err := createDefaultConfig(); err != nil {
+			return fmt.Errorf("failed to create default config: %w", err)
+		}
+	}
+
+	// Read existing config
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var config Config
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Update provider
+	config.Provider = providerName
+
+	// Marshal back to YAML
+	updatedData, err := yaml.Marshal(&config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	// Write updated config
+	err = os.WriteFile(configFile, updatedData, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	fmt.Printf("✓ Default provider set to '%s' in: %s\n", providerName, configFile)
+
+	return nil
+}
+
+// parseRateLimitWaitTime extracts the wait time from OpenAI rate limit error messages
+// Example: "Please try again in 9.798s" -> 9.798
+func parseRateLimitWaitTime(errorBody string) time.Duration {
+	// Try to parse "Please try again in X.XXXs" pattern
+	re := regexp.MustCompile(`try again in ([\d.]+)s`)
+	matches := re.FindStringSubmatch(errorBody)
+	if len(matches) >= 2 {
+		if seconds, err := strconv.ParseFloat(matches[1], 64); err == nil {
+			return time.Duration(seconds*1000) * time.Millisecond
+		}
+	}
+	// Default fallback: 10 seconds if parsing fails
+	return 10 * time.Second
+}
+
+// makeOpenAIRequest makes an HTTP request to OpenAI API with retry logic
+func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries int) (*ChatCompletionResponse, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		jsonData, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to send request: %w", err)
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				fmt.Printf("  ⚠ Request failed, retrying in %v (attempt %d/%d)...\n",
+					backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return nil, lastErr
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		// Handle rate limiting (429)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			waitTime := parseRateLimitWaitTime(string(respBody))
+			lastErr = fmt.Errorf("API request failed with status 429: %s", string(respBody))
+
+			if attempt < maxRetries {
+				fmt.Printf("  ⏳ Rate limit hit, waiting %.1f seconds before retry %d/%d...\n",
+					waitTime.Seconds(), attempt+1, maxRetries)
+				time.Sleep(waitTime)
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Handle other non-OK status codes
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				fmt.Printf("  ⚠ Request failed, retrying in %v (attempt %d/%d)...\n",
+					backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Success! Parse and return response
+		var chatResp ChatCompletionResponse
+		err = json.Unmarshal(respBody, &chatResp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse response: %w", err)
+		}
+
+		if len(chatResp.Choices) == 0 {
+			return nil, fmt.Errorf("no response from API")
+		}
+
+		return &chatResp, nil
+	}
+
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// makeGeminiRequest makes an HTTP request to Gemini API with retry logic
+func makeGeminiRequest(model string, contents []GeminiContent, apiKey string, maxRetries int) (*GeminiResponse, error) {
+	var lastErr error
+	endpoint := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		reqBody := GeminiRequest{Contents: contents}
+		jsonData, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("x-goog-api-key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to send request: %w", err)
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				fmt.Printf("  ⚠ Request failed, retrying in %v (attempt %d/%d)...\n",
+					backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return nil, lastErr
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		// Handle rate limiting (429)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			waitTime := parseRateLimitWaitTime(string(respBody))
+			lastErr = fmt.Errorf("Gemini API rate limit: %s", string(respBody))
+
+			if attempt < maxRetries {
+				fmt.Printf("  ⏳ Rate limit hit, waiting %.1f seconds before retry %d/%d...\n",
+					waitTime.Seconds(), attempt+1, maxRetries)
+				time.Sleep(waitTime)
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Handle other non-OK status codes
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("Gemini API error (status %d): %s", resp.StatusCode, string(respBody))
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				fmt.Printf("  ⚠ Request failed, retrying in %v (attempt %d/%d)...\n",
+					backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Success! Parse and return response
+		var geminiResp GeminiResponse
+		err = json.Unmarshal(respBody, &geminiResp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse Gemini response: %w", err)
+		}
+
+		if geminiResp.Error != nil {
+			return nil, fmt.Errorf("Gemini API error: %s", geminiResp.Error.Message)
+		}
+
+		if len(geminiResp.Candidates) == 0 || len(geminiResp.Candidates[0].Content.Parts) == 0 {
+			return nil, fmt.Errorf("no response from Gemini API")
+		}
+
+		return &geminiResp, nil
+	}
+
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// getMimeType returns the MIME type for an audio file extension
+func getMimeType(ext string) string {
+	mimeTypes := map[string]string{
+		".wav":  "audio/wav",
+		".mp3":  "audio/mp3",
+		".aiff": "audio/aiff",
+		".aac":  "audio/aac",
+		".ogg":  "audio/ogg",
+		".flac": "audio/flac",
+		".m4a":  "audio/mp4",
+		".mp4":  "audio/mp4",
+		".mpeg": "audio/mpeg",
+		".mpga": "audio/mpeg",
+		".webm": "audio/webm",
+	}
+	return mimeTypes[strings.ToLower(ext)]
+}
+
+// transcribeWithGemini transcribes audio using Gemini API
+func transcribeWithGemini(audioPath, apiKey, model string) (string, error) {
+	// Read and encode audio file
+	audioData, err := os.ReadFile(audioPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read audio file: %w", err)
+	}
+
+	// Check file size (20MB limit for inline data)
+	const geminiMaxInlineSize = 20 * 1024 * 1024
+	if len(audioData) > geminiMaxInlineSize {
+		return "", fmt.Errorf("audio file too large for Gemini inline upload (max 20MB, got %dMB)", len(audioData)/(1024*1024))
+	}
+
+	// Determine MIME type from extension
+	ext := filepath.Ext(audioPath)
+	mimeType := getMimeType(ext)
+	if mimeType == "" {
+		return "", fmt.Errorf("unsupported audio format: %s (supported: wav, mp3, aiff, aac, ogg, flac, m4a, webm)", ext)
+	}
+
+	// Base64 encode the audio
+	base64Audio := base64.StdEncoding.EncodeToString(audioData)
+
+	contents := []GeminiContent{
+		{
+			Parts: []GeminiPart{
+				{Text: "Transcribe this audio file accurately. Output only the transcription text, no additional commentary or formatting."},
+				{
+					InlineData: &GeminiInlineData{
+						MimeType: mimeType,
+						Data:     base64Audio,
+					},
+				},
+			},
+		},
+	}
+
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
+
+	resp, err := makeGeminiRequest(model, contents, apiKey, 3)
+	if err != nil {
+		return "", err
+	}
+
+	return resp.Candidates[0].Content.Parts[0].Text, nil
+}
+
+// transcribeWithGeminiWithSplitting handles large audio files by splitting them
+func transcribeWithGeminiWithSplitting(audioPath, apiKey, model string) (string, error) {
+	fileSize, err := getFileSize(audioPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to get file size: %w", err)
+	}
+
+	// Gemini inline limit is 20MB
+	const geminiMaxInlineSize = 20 * 1024 * 1024
+
+	if fileSize <= geminiMaxInlineSize {
+		return transcribeWithGemini(audioPath, apiKey, model)
+	}
+
+	// File is too large, need to split
+	fmt.Printf("Audio file is large (%dMB), splitting into chunks...\n", fileSize/(1024*1024))
+
+	// Split into 5-minute chunks (should be well under 20MB for most formats)
+	chunks, err := splitAudioFile(audioPath, 300)
+	if err != nil {
+		return "", fmt.Errorf("failed to split audio: %w", err)
+	}
+	defer func() {
+		// Clean up temp files
+		if len(chunks) > 0 {
+			os.RemoveAll(filepath.Dir(chunks[0]))
+		}
+	}()
+
+	fmt.Printf("Split into %d chunk(s)\n", len(chunks))
+
+	var allTranscripts []string
+	for i, chunk := range chunks {
+		fmt.Printf("Transcribing chunk %d/%d with Gemini...\n", i+1, len(chunks))
+		transcript, err := transcribeWithGemini(chunk, apiKey, model)
+		if err != nil {
+			return "", fmt.Errorf("failed to transcribe chunk %d: %w", i+1, err)
+		}
+		allTranscripts = append(allTranscripts, transcript)
+
+		// Add delay between chunks to avoid rate limits
+		if i < len(chunks)-1 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	return strings.Join(allTranscripts, " "), nil
+}
+
+// processWithGemini processes transcript with Gemini API
+func processWithGemini(transcript string, action *PostAction, apiKey, model string) (string, error) {
+	basePrompt := "You are a helpful assistant that processes transcribed text according to user instructions.\n\nTranscript:\n%s\n\nPlease process this transcript according to the instructions above."
+	fullPrompt := action.Prompt + "\n\n" + fmt.Sprintf(basePrompt, transcript)
+
+	contents := []GeminiContent{
+		{
+			Parts: []GeminiPart{
+				{Text: fullPrompt},
+			},
+		},
+	}
+
+	// Use provided model or default
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
+
+	resp, err := makeGeminiRequest(model, contents, apiKey, 3)
+	if err != nil {
+		return "", err
+	}
+
+	return resp.Candidates[0].Content.Parts[0].Text, nil
+}
+
+// processWithGeminiChunked processes large transcripts with Gemini in chunks
+func processWithGeminiChunked(transcript string, action *PostAction, apiKey, model string) (string, error) {
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
+
+	maxTokens := getModelContextLimit(model)
+	promptTokens := len(action.Prompt) / avgCharsPerToken
+	transcriptTokens := len(transcript) / avgCharsPerToken
+	estimatedTokens := promptTokens + transcriptTokens
+
+	// If transcript fits in context, process normally
+	if estimatedTokens <= maxTokens {
+		return processWithGemini(transcript, action, apiKey, model)
+	}
+
+	// Transcript is too long, need to chunk
+	fmt.Printf("  ⚠ Transcript is large (~%d tokens), processing in chunks...\n", estimatedTokens)
+
+	// Calculate chunk size (leaving room for prompt and overlap)
+	maxChunkChars := (maxTokens - promptTokens - 1000) * avgCharsPerToken
+	_ = 500 // Overlap chars - reserved for future use
+
+	// Split into sentences first for better boundaries
+	sentences := splitIntoSentences(transcript)
+
+	// Group sentences into chunks
+	var chunks []string
+	var currentChunk strings.Builder
+	var lastSentences []string // Keep track of last few sentences for overlap
+
+	for _, sentence := range sentences {
+		// Check if adding this sentence would exceed the limit
+		if currentChunk.Len()+len(sentence) > maxChunkChars && currentChunk.Len() > 0 {
+			chunks = append(chunks, currentChunk.String())
+
+			// Start new chunk with overlap (last few sentences)
+			currentChunk.Reset()
+			for _, s := range lastSentences {
+				currentChunk.WriteString(s)
+				currentChunk.WriteString(" ")
+			}
+		}
+
+		currentChunk.WriteString(sentence)
+		currentChunk.WriteString(" ")
+
+		// Update overlap buffer
+		lastSentences = append(lastSentences, sentence)
+		if len(lastSentences) > 3 {
+			lastSentences = lastSentences[1:]
+		}
+	}
+
+	// Add final chunk
+	if currentChunk.Len() > 0 {
+		chunks = append(chunks, currentChunk.String())
+	}
+
+	fmt.Printf("  → Split into %d chunk(s) for processing\n", len(chunks))
+
+	// Process each chunk
+	var results []string
+	for i, chunk := range chunks {
+		fmt.Printf("  → Processing chunk %d/%d...\n", i+1, len(chunks))
+
+		result, err := processWithGemini(chunk, action, apiKey, model)
+		if err != nil {
+			return "", fmt.Errorf("failed to process chunk %d: %w", i+1, err)
+		}
+		results = append(results, result)
+
+		// Add delay between chunks
+		if i < len(chunks)-1 {
+			fmt.Printf("  ⏸ Waiting 2 seconds before next chunk...\n")
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	// Merge results
+	fmt.Printf("  ✓ All chunks processed, merging results\n")
+	return mergeChunkResultsWithGemini(results, action, apiKey, model)
+}
+
+// mergeChunkResultsWithGemini merges chunk results using Gemini
+func mergeChunkResultsWithGemini(chunkResults []string, action *PostAction, apiKey, model string) (string, error) {
+	if len(chunkResults) == 1 {
+		return chunkResults[0], nil
+	}
+
+	combinedChunks := strings.Join(chunkResults, "\n\n--- CHUNK BOUNDARY ---\n\n")
+
+	mergePrompt := fmt.Sprintf(`You are merging multiple partial results from the same analysis that was split into chunks.
+
+Original task: %s
+
+Below are %d separate results from processing different parts of a transcript. Your job is to merge them into a single, coherent, comprehensive result that:
+1. Removes duplicate information
+2. Consolidates related points
+3. Maintains the structure and format requested in the original task
+4. Preserves all unique insights and details
+5. Creates a unified narrative without chunk boundaries
+
+Chunk results to merge:
+%s
+
+Provide the final merged result:`, action.Name, len(chunkResults), combinedChunks)
+
+	contents := []GeminiContent{
+		{
+			Parts: []GeminiPart{
+				{Text: mergePrompt},
+			},
+		},
+	}
+
+	resp, err := makeGeminiRequest(model, contents, apiKey, 3)
+	if err != nil {
+		// Fall back to simple concatenation
+		fmt.Printf("  ⚠ Merge failed, falling back to simple concatenation: %v\n", err)
+		return strings.Join(chunkResults, "\n\n---\n\n"), nil
+	}
+
+	return resp.Candidates[0].Content.Parts[0].Text, nil
+}
+
+// Provider dispatcher functions with fallback support
+
+// transcribeAudioWithProvider transcribes audio using the specified provider with optional fallback
+func transcribeAudioWithProvider(audioPath, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
+	var primaryErr error
+	var result string
+
+	switch provider {
+	case "gemini":
+		if geminiKey == "" {
+			return "", fmt.Errorf("Gemini API key required. Use -gemini-key or -set-gemini-key")
+		}
+		result, primaryErr = transcribeWithGeminiWithSplitting(audioPath, geminiKey, geminiModel)
+	case "openai":
+		fallthrough
+	default:
+		if openaiKey == "" || openaiKey == "XXXX" {
+			return "", fmt.Errorf("OpenAI API key required. Use -k or -set-key")
+		}
+		result, primaryErr = transcribeAudioWithSplitting(audioPath, openaiKey)
+	}
+
+	// If primary succeeded, return result
+	if primaryErr == nil {
+		return result, nil
+	}
+
+	// Try fallback if enabled and alternate key is available
+	if enableFallback {
+		altProvider := ""
+		altKey := ""
+		if provider == "gemini" && openaiKey != "" && openaiKey != "XXXX" {
+			altProvider = "openai"
+			altKey = openaiKey
+		} else if provider != "gemini" && geminiKey != "" {
+			altProvider = "gemini"
+			altKey = geminiKey
+		}
+
+		if altProvider != "" {
+			fmt.Printf("  ⚠ %s failed, trying fallback provider %s...\n", provider, altProvider)
+
+			var fallbackErr error
+			if altProvider == "gemini" {
+				result, fallbackErr = transcribeWithGeminiWithSplitting(audioPath, altKey, geminiModel)
+			} else {
+				result, fallbackErr = transcribeAudioWithSplitting(audioPath, altKey)
+			}
+
+			if fallbackErr == nil {
+				fmt.Printf("  ✓ Fallback to %s succeeded\n", altProvider)
+				return result, nil
+			}
+
+			return "", fmt.Errorf("primary (%s): %v; fallback (%s): %v", provider, primaryErr, altProvider, fallbackErr)
+		}
+	}
+
+	return "", primaryErr
+}
+
+// processWithProviderChunked processes transcript using the specified provider with optional fallback
+func processWithProviderChunked(transcript string, action *PostAction, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
+	var primaryErr error
+	var result string
+
+	switch provider {
+	case "gemini":
+		if geminiKey == "" {
+			return "", fmt.Errorf("Gemini API key required")
+		}
+		result, primaryErr = processWithGeminiChunked(transcript, action, geminiKey, geminiModel)
+	case "openai":
+		fallthrough
+	default:
+		if openaiKey == "" || openaiKey == "XXXX" {
+			return "", fmt.Errorf("OpenAI API key required")
+		}
+		result, primaryErr = processWithOpenAIChunked(transcript, action, openaiKey)
+	}
+
+	// If primary succeeded, return result
+	if primaryErr == nil {
+		return result, nil
+	}
+
+	// Try fallback if enabled and alternate key is available
+	if enableFallback {
+		altProvider := ""
+		altKey := ""
+		if provider == "gemini" && openaiKey != "" && openaiKey != "XXXX" {
+			altProvider = "openai"
+			altKey = openaiKey
+		} else if provider != "gemini" && geminiKey != "" {
+			altProvider = "gemini"
+			altKey = geminiKey
+		}
+
+		if altProvider != "" {
+			fmt.Printf("  ⚠ %s failed, trying fallback provider %s...\n", provider, altProvider)
+
+			var fallbackErr error
+			if altProvider == "gemini" {
+				result, fallbackErr = processWithGeminiChunked(transcript, action, altKey, geminiModel)
+			} else {
+				result, fallbackErr = processWithOpenAIChunked(transcript, action, altKey)
+			}
+
+			if fallbackErr == nil {
+				fmt.Printf("  ✓ Fallback to %s succeeded\n", altProvider)
+				return result, nil
+			}
+
+			return "", fmt.Errorf("primary (%s): %v; fallback (%s): %v", provider, primaryErr, altProvider, fallbackErr)
+		}
+	}
+
+	return "", primaryErr
+}
+
+// selectBestActionsWithProvider selects best actions using the specified provider
+func selectBestActionsWithProvider(transcript, provider, openaiKey, geminiKey, geminiModel string) ([]string, error) {
+	switch provider {
+	case "gemini":
+		if geminiKey == "" {
+			return nil, fmt.Errorf("Gemini API key required for auto-selection")
+		}
+		return selectBestActionsWithGemini(transcript, geminiKey, geminiModel)
+	default:
+		if openaiKey == "" || openaiKey == "XXXX" {
+			return nil, fmt.Errorf("OpenAI API key required for auto-selection")
+		}
+		return selectBestActions(transcript, openaiKey)
+	}
+}
+
+// selectBestActionsWithGemini uses Gemini to select best actions
+func selectBestActionsWithGemini(transcript, apiKey, model string) ([]string, error) {
+	var actionDescriptions []string
+	for _, action := range postActions {
+		actionDescriptions = append(actionDescriptions, fmt.Sprintf("- %s: %s", action.ID, action.Description))
+	}
+
+	prompt := fmt.Sprintf(`Analyze the following transcript and select the 2-3 most appropriate post-processing actions from the list below.
+
+Available actions:
+%s
+
+Transcript preview (first 2000 chars):
+%s
+
+Based on the content, which actions would provide the most value? Reply ONLY with a comma-separated list of action IDs (e.g., "openai-meeting-summary,openai-action-items"). Do not include any explanation.`,
+		strings.Join(actionDescriptions, "\n"),
+		truncateString(transcript, 2000))
+
+	contents := []GeminiContent{
+		{
+			Parts: []GeminiPart{
+				{Text: prompt},
+			},
+		},
+	}
+
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
+
+	resp, err := makeGeminiRequest(model, contents, apiKey, 3)
+	if err != nil {
+		return nil, fmt.Errorf("action selection failed: %w", err)
+	}
+
+	// Parse the response
+	response := strings.TrimSpace(resp.Candidates[0].Content.Parts[0].Text)
+	selectedIDs := strings.Split(response, ",")
+
+	// Validate each ID
+	var validIDs []string
+	for _, id := range selectedIDs {
+		id = strings.TrimSpace(id)
+		for _, action := range postActions {
+			if action.ID == id {
+				validIDs = append(validIDs, id)
+				break
+			}
+		}
+	}
+
+	if len(validIDs) == 0 {
+		return nil, fmt.Errorf("no valid action IDs selected by AI: %s", response)
+	}
+
+	return validIDs, nil
+}
+
 func processWithOpenAI(transcript string, action *PostAction, apiKey string) (string, error) {
 	basePrompt := "You are a helpful assistant that processes transcribed text according to user instructions.\n\nTranscript:\n%s\n\nPlease process this transcript according to the instructions above."
 
@@ -707,43 +1584,10 @@ func processWithOpenAI(transcript string, action *PostAction, apiKey string) (st
 		MaxTokens:   action.MaxTokens,
 	}
 
-	jsonData, err := json.Marshal(reqBody)
+	// Use the retry-enabled request helper (3 max retries)
+	chatResp, err := makeOpenAIRequest(reqBody, apiKey, 3)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp ChatCompletionResponse
-	err = json.Unmarshal(respBody, &chatResp)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("no response from API")
+		return "", err
 	}
 
 	return chatResp.Choices[0].Message.Content, nil
@@ -806,16 +1650,25 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 
 	fmt.Printf("  → Split into %d chunk(s) for processing\n", len(chunks))
 
-	// Process each chunk
+	// Process each chunk with retry logic
 	var results []string
 	for i, chunk := range chunks {
 		fmt.Printf("  → Processing chunk %d/%d...\n", i+1, len(chunks))
 
+		// processWithOpenAI now has built-in retry logic
 		result, err := processWithOpenAI(chunk, action, apiKey)
 		if err != nil {
 			return "", fmt.Errorf("failed to process chunk %d: %w", i+1, err)
 		}
 		results = append(results, result)
+
+		// Add a small delay between chunks to avoid hitting rate limits
+		// Skip delay after the last chunk
+		if i < len(chunks)-1 {
+			delaySeconds := 2
+			fmt.Printf("  ⏸ Waiting %d seconds before next chunk...\n", delaySeconds)
+			time.Sleep(time.Duration(delaySeconds) * time.Second)
+		}
 	}
 
 	// Intelligently merge chunk results using AI
@@ -877,43 +1730,10 @@ Provide the final merged result:`, action.Name, len(chunkResults), combinedChunk
 		MaxTokens:   action.MaxTokens,
 	}
 
-	jsonData, err := json.Marshal(reqBody)
+	// Use the retry-enabled request helper (3 max retries)
+	chatResp, err := makeOpenAIRequest(reqBody, apiKey, 3)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal merge request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create merge request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send merge request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read merge response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("merge API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp ChatCompletionResponse
-	err = json.Unmarshal(respBody, &chatResp)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse merge response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("no merge response from API")
+		return "", fmt.Errorf("merge request failed: %w", err)
 	}
 
 	return chatResp.Choices[0].Message.Content, nil
@@ -980,43 +1800,10 @@ Based on the content, which actions would provide the most value? Reply ONLY wit
 		MaxTokens:   100,
 	}
 
-	jsonData, err := json.Marshal(reqBody)
+	// Use the retry-enabled request helper (3 max retries)
+	chatResp, err := makeOpenAIRequest(reqBody, apiKey, 3)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp ChatCompletionResponse
-	err = json.Unmarshal(respBody, &chatResp)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("no response from API")
+		return nil, fmt.Errorf("action selection failed: %w", err)
 	}
 
 	// Parse the response (comma-separated action IDs)
@@ -1088,76 +1875,115 @@ func max(a, b int) int {
 }
 
 func transcribeAudio(audioPath, apiKey string) (string, error) {
-	// Open the audio file
-	file, err := os.Open(audioPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open audio file: %w", err)
+	maxRetries := 3
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Open the audio file
+		file, err := os.Open(audioPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to open audio file: %w", err)
+		}
+
+		// Create a multipart form
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+
+		// Add the file to the form
+		part, err := writer.CreateFormFile("file", filepath.Base(audioPath))
+		if err != nil {
+			file.Close()
+			return "", fmt.Errorf("failed to create form file: %w", err)
+		}
+		_, err = io.Copy(part, file)
+		if err != nil {
+			file.Close()
+			return "", fmt.Errorf("failed to copy file: %w", err)
+		}
+		file.Close()
+
+		// Add the model field
+		err = writer.WriteField("model", "whisper-1")
+		if err != nil {
+			return "", fmt.Errorf("failed to write model field: %w", err)
+		}
+
+		// Close the writer
+		err = writer.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to close writer: %w", err)
+		}
+
+		// Create the HTTP request
+		req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", body)
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
+
+		// Set headers
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+
+		// Send the request
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to send request: %w", err)
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				fmt.Printf("  ⚠ Request failed, retrying in %v (attempt %d/%d)...\n",
+					backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return "", lastErr
+		}
+		defer resp.Body.Close()
+
+		// Read the response
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		// Handle rate limiting (429)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			waitTime := parseRateLimitWaitTime(string(respBody))
+			lastErr = fmt.Errorf("API request failed with status 429: %s", string(respBody))
+
+			if attempt < maxRetries {
+				fmt.Printf("  ⏳ Rate limit hit, waiting %.1f seconds before retry %d/%d...\n",
+					waitTime.Seconds(), attempt+1, maxRetries)
+				time.Sleep(waitTime)
+				continue
+			}
+			return "", lastErr
+		}
+
+		// Check for other errors
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				fmt.Printf("  ⚠ Request failed, retrying in %v (attempt %d/%d)...\n",
+					backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return "", lastErr
+		}
+
+		// Parse the response
+		var transcriptionResp TranscriptionResponse
+		err = json.Unmarshal(respBody, &transcriptionResp)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse response: %w", err)
+		}
+
+		return transcriptionResp.Text, nil
 	}
-	defer file.Close()
 
-	// Create a multipart form
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	// Add the file to the form
-	part, err := writer.CreateFormFile("file", filepath.Base(audioPath))
-	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %w", err)
-	}
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return "", fmt.Errorf("failed to copy file: %w", err)
-	}
-
-	// Add the model field
-	err = writer.WriteField("model", "whisper-1")
-	if err != nil {
-		return "", fmt.Errorf("failed to write model field: %w", err)
-	}
-
-	// Close the writer
-	err = writer.Close()
-	if err != nil {
-		return "", fmt.Errorf("failed to close writer: %w", err)
-	}
-
-	// Create the HTTP request
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", body)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read the response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Check for errors
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	// Parse the response
-	var transcriptionResp TranscriptionResponse
-	err = json.Unmarshal(respBody, &transcriptionResp)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return transcriptionResp.Text, nil
+	return "", fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }
 
 func getFileSize(filePath string) (int64, error) {

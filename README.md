@@ -1,17 +1,19 @@
 # goscribe
 
-AI-powered audio transcription tool with OpenAI Whisper and intelligent post-processing actions.
+AI-powered audio transcription tool with OpenAI Whisper, Google Gemini, and intelligent post-processing actions.
 
 ## Features
 
-- 🎙️ **Audio Transcription** - Convert audio files to text using OpenAI Whisper
-- 📦 **Large File Support** - Automatic splitting for audio files >25MB and transcript chunking for long texts
+- 🎙️ **Audio Transcription** - Convert audio files to text using OpenAI Whisper or Google Gemini
+- 🔄 **Multiple AI Providers** - Choose between OpenAI and Gemini for transcription and processing
+- 🛡️ **Automatic Fallback** - Falls back to alternate provider if primary fails
+- 📦 **Large File Support** - Automatic splitting for audio files >25MB (OpenAI) or >20MB (Gemini)
 - 🤖 **AI Post-Processing** - 18 built-in actions for summarizing, extracting action items, and more
 - 🧠 **Smart Auto-Selection** - AI automatically selects the best actions based on content
 - 📝 **Process Existing Transcripts** - Apply actions to existing transcript files
 - 🔄 **Multiple Actions** - Apply multiple post-processing actions in one command
 - ⚙️ **Configurable** - Customize actions via YAML configuration
-- 🔑 **API Key Management** - Store your OpenAI API key in config file
+- 🔑 **API Key Management** - Store your API keys in config file
 
 ## Installation
 
@@ -36,26 +38,43 @@ mv goscribe /usr/local/bin/
 ### 1. Store Your API Key (Recommended)
 
 ```bash
+# For OpenAI (default provider)
 goscribe -set-key YOUR_OPENAI_API_KEY
+
+# For Gemini
+goscribe -set-gemini-key YOUR_GEMINI_API_KEY
 ```
 
-### 2. Transcribe Audio
+### 2. Set Default Provider (Optional)
 
 ```bash
-# Basic transcription
+# Use Gemini as default
+goscribe -set-provider gemini
+
+# Use OpenAI as default (this is the default)
+goscribe -set-provider openai
+```
+
+### 3. Transcribe Audio
+
+```bash
+# Basic transcription (uses default provider)
 goscribe meeting.mp3
+
+# Transcribe with specific provider
+goscribe -provider gemini meeting.mp3
 
 # Transcribe with post-processing
 goscribe -action openai-meeting-summary meeting.mp3
 ```
 
-### 3. Process Existing Transcript
+### 4. Process Existing Transcript
 
 ```bash
 goscribe -transcript meeting-transcript.txt -action openai-action-items
 ```
 
-### 4. Multiple Post-Processing Actions
+### 5. Multiple Post-Processing Actions
 
 ```bash
 # Apply multiple actions to one transcript
@@ -65,7 +84,7 @@ goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
 goscribe -action "openai-meeting-summary, openai-action-items, openai-key-insights" meeting.mp3
 ```
 
-### 5. Automatic Action Selection
+### 6. Automatic Action Selection
 
 ```bash
 # Let AI choose the best actions based on content
@@ -84,15 +103,55 @@ goscribe -transcript <transcript_file> -action <action_id>
 
 ### Options
 
-- `-k` - OpenAI API key (or use config file)
-- `-action` - Post-processing action ID(s), comma-separated for multiple
-- `--auto` - Automatically select best actions based on transcript content
-- `-transcript` - Process existing transcript file
-- `-o` - Output file name
-- `-config` - Custom config file path
-- `-list-actions` - List all available actions
-- `-set-key` - Store API key in config
-- `-init` - Reset config to defaults
+| Option | Description |
+|--------|-------------|
+| `-k` | OpenAI API key (or use config file) |
+| `-gemini-key` | Gemini API key (or use config file) |
+| `-provider` | AI provider: `openai` or `gemini` (default: from config or openai) |
+| `-no-fallback` | Disable automatic fallback to alternate provider |
+| `-action` | Post-processing action ID(s), comma-separated for multiple |
+| `--auto` | Automatically select best actions based on transcript content |
+| `-transcript` | Process existing transcript file |
+| `-o` | Output file name |
+| `-config` | Custom config file path |
+| `-list-actions` | List all available actions |
+| `-set-key` | Store OpenAI API key in config |
+| `-set-gemini-key` | Store Gemini API key in config |
+| `-set-provider` | Set default AI provider in config |
+| `-init` | Reset config to defaults |
+
+## AI Providers
+
+### OpenAI (Default)
+
+- **Transcription**: OpenAI Whisper API
+- **Processing**: GPT-3.5-turbo, GPT-4, GPT-4-turbo, GPT-4o
+- **File Limit**: 25MB per file
+- **Get API Key**: https://platform.openai.com/api-keys
+
+### Gemini
+
+- **Transcription**: Gemini native audio understanding
+- **Processing**: gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
+- **File Limit**: 20MB inline (larger files automatically split)
+- **Context**: Up to 1M tokens
+- **Get API Key**: https://aistudio.google.com/app/apikey
+
+### Provider Fallback
+
+When both API keys are configured, goscribe automatically falls back to the alternate provider if the primary fails (rate limits, API errors, etc.):
+
+```bash
+# Configure both keys
+goscribe -set-key YOUR_OPENAI_KEY
+goscribe -set-gemini-key YOUR_GEMINI_KEY
+
+# Now if OpenAI fails, Gemini will be tried automatically
+goscribe meeting.mp3
+
+# Disable fallback if needed
+goscribe -no-fallback meeting.mp3
+```
 
 ## Built-in Actions
 
@@ -128,22 +187,30 @@ goscribe -transcript <transcript_file> -action <action_id>
 
 Config file location: `~/.goscribe/config.yml`
 
-### Example Custom Action
+### Full Configuration Example
 
 ```yaml
-openai_api_key: "your-api-key-here"
+# Default AI provider: "openai" or "gemini"
+provider: "openai"
+
+# API Keys
+openai_api_key: "your-openai-key-here"
+gemini_api_key: "your-gemini-key-here"
+
+# Default Gemini model (used when provider is "gemini")
+gemini_model: "gemini-2.0-flash"
 
 post_actions:
   - id: "custom-summary"
     name: "Custom Summary"
     description: "My custom summary action"
-    type: "openai"
+    type: "openai"  # or "gemini"
     prompt: |
       Summarize this transcript focusing on:
       - Key decisions
       - Action items
       - Next steps
-    model: "gpt-3.5-turbo"
+    model: "gpt-3.5-turbo"  # or "gemini-2.0-flash"
     temperature: 0.3
     max_tokens: 1500
 ```
@@ -159,6 +226,12 @@ goscribe -init
 ### Basic Transcription
 ```bash
 goscribe meeting.mp3
+# Output: meeting-transcript.txt
+```
+
+### Transcription with Gemini
+```bash
+goscribe -provider gemini meeting.mp3
 # Output: meeting-transcript.txt
 ```
 
@@ -199,7 +272,7 @@ goscribe -transcript notes.txt -action openai-meeting-summary,openai-action-item
 goscribe --auto meeting.mp3
 
 # Example output:
-# 🤖 Analyzing transcript to select best actions...
+# 🤖 Analyzing transcript with openai to select best actions...
 # ✓ Selected 2 action(s): openai-meeting-summary, openai-action-items
 # Processing 2 action(s)...
 ```
@@ -241,8 +314,10 @@ The project includes comprehensive unit tests covering:
 - Configuration validation
 - Action management
 - Config file operations
-- API key storage
+- API key storage (OpenAI and Gemini)
 - Default config generation
+- Provider selection
+- MIME type detection
 
 Run tests:
 ```bash
@@ -251,8 +326,6 @@ make test-short        # Quick test run
 make test-coverage     # Generate HTML coverage report
 ```
 
-Current test coverage: ~21.5%
-
 ## Output Files
 
 - `<filename>-transcript.txt` - Raw transcription
@@ -260,12 +333,12 @@ Current test coverage: ~21.5%
 
 ## Large File Handling
 
-### Audio Files >25MB
+### Audio Files >25MB (OpenAI) or >20MB (Gemini)
 
-OpenAI Whisper API has a file size limit of 25MB. goscribe automatically handles larger files by:
+goscribe automatically handles larger files by:
 
 1. **Automatic Detection** - Checks file size before transcription
-2. **Smart Splitting** - Splits audio into 10-minute chunks using ffmpeg
+2. **Smart Splitting** - Splits audio into chunks using ffmpeg
 3. **Sequential Processing** - Transcribes each chunk with progress indicators
 4. **Seamless Merging** - Combines all transcripts into single output
 5. **Auto Cleanup** - Removes temporary chunks after processing
@@ -290,7 +363,10 @@ goscribe large-meeting.mp3
 
 When transcripts are too long for the model's context window, goscribe automatically handles this:
 
-1. **Model-Specific Limits** - Accurate limits per model (gpt-4: 6K, gpt-4-turbo: 100K, etc.)
+1. **Model-Specific Limits** - Accurate limits per model:
+   - GPT-4: 6K tokens
+   - GPT-4-turbo: 100K tokens
+   - Gemini 1.5/2.0: 900K tokens
 2. **Token Estimation** - Estimates transcript + prompt tokens (~4 chars per token)
 3. **Smart Chunking** - Splits on sentence boundaries for coherence
 4. **Context Overlap** - Adds overlap between chunks for continuity
@@ -303,7 +379,7 @@ When transcripts are too long for the model's context window, goscribe automatic
 goscribe -action openai-meeting-summary long-recording.mp3
 
 # Output:
-# [1/2] Applying post-processing: Smart Meeting Summary...
+# [1/2] Applying post-processing with openai: Smart Meeting Summary...
 #   ⚠ Transcript is large (~8000 tokens), processing in chunks...
 #   → Split into 2 chunk(s) for processing
 #   → Processing chunk 1/2...
@@ -312,12 +388,21 @@ goscribe -action openai-meeting-summary long-recording.mp3
 # ✓ Post-processed output saved to file.txt
 ```
 
+## Rate Limit Handling
+
+goscribe includes robust rate limit handling:
+
+- **Automatic Retry** - Retries failed requests with exponential backoff
+- **Smart Wait Times** - Parses wait time from API error responses
+- **Inter-Chunk Delays** - Adds delays between chunk processing to prevent rate limits
+- **Provider Fallback** - Automatically switches to alternate provider on rate limit (when both keys configured)
+
 ## Requirements
 
 - Go 1.21 or higher
-- OpenAI API key
-- ffmpeg (for files >25MB)
-- Supported audio formats: mp3, mp4, mpeg, mpga, m4a, wav, webm
+- OpenAI API key and/or Gemini API key
+- ffmpeg (for large audio files)
+- Supported audio formats: mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg, flac, aac, aiff
 
 ## License
 

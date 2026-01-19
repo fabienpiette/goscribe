@@ -296,13 +296,13 @@ post_actions:
 		t.Fatalf("Failed to write test config: %v", err)
 	}
 
-	apiKey, err := loadConfigActions(configPath)
+	config, err := loadConfigActions(configPath)
 	if err != nil {
 		t.Errorf("loadConfigActions() error = %v, want nil", err)
 	}
 
-	if apiKey != "test-api-key" {
-		t.Errorf("loadConfigActions() apiKey = %v, want test-api-key", apiKey)
+	if config.OpenAIAPIKey != "test-api-key" {
+		t.Errorf("loadConfigActions() apiKey = %v, want test-api-key", config.OpenAIAPIKey)
 	}
 
 	if len(postActions) != 1 {
@@ -393,13 +393,13 @@ func TestStoreAPIKey(t *testing.T) {
 
 	// Verify the key was stored
 	configPath := filepath.Join(tmpHome, ".goscribe", "config.yml")
-	apiKey, err := loadConfigActions(configPath)
+	config, err := loadConfigActions(configPath)
 	if err != nil {
 		t.Errorf("Failed to load config after storing key: %v", err)
 	}
 
-	if apiKey != testKey {
-		t.Errorf("Stored API key = %v, want %v", apiKey, testKey)
+	if config.OpenAIAPIKey != testKey {
+		t.Errorf("Stored API key = %v, want %v", config.OpenAIAPIKey, testKey)
 	}
 }
 
@@ -425,14 +425,14 @@ func TestCreateDefaultConfig(t *testing.T) {
 	}
 
 	// Verify config is valid and loads correctly
-	apiKey, err := loadConfigActions(configPath)
+	config, err := loadConfigActions(configPath)
 	if err != nil {
 		t.Errorf("Failed to load default config: %v", err)
 	}
 
 	// Default config should have empty API key
-	if apiKey != "" {
-		t.Errorf("Default config API key = %v, want empty string", apiKey)
+	if config.OpenAIAPIKey != "" {
+		t.Errorf("Default config API key = %v, want empty string", config.OpenAIAPIKey)
 	}
 
 	// Should have multiple actions
@@ -633,6 +633,481 @@ func TestShellescape(t *testing.T) {
 			got := shellescape(tt.input)
 			if got != tt.expected {
 				t.Errorf("shellescape(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+// Test getMimeType function
+func TestGetMimeType(t *testing.T) {
+	tests := []struct {
+		name     string
+		ext      string
+		expected string
+	}{
+		{
+			name:     "MP3 file",
+			ext:      ".mp3",
+			expected: "audio/mp3",
+		},
+		{
+			name:     "WAV file",
+			ext:      ".wav",
+			expected: "audio/wav",
+		},
+		{
+			name:     "M4A file",
+			ext:      ".m4a",
+			expected: "audio/mp4",
+		},
+		{
+			name:     "OGG file",
+			ext:      ".ogg",
+			expected: "audio/ogg",
+		},
+		{
+			name:     "FLAC file",
+			ext:      ".flac",
+			expected: "audio/flac",
+		},
+		{
+			name:     "AAC file",
+			ext:      ".aac",
+			expected: "audio/aac",
+		},
+		{
+			name:     "AIFF file",
+			ext:      ".aiff",
+			expected: "audio/aiff",
+		},
+		{
+			name:     "WebM file",
+			ext:      ".webm",
+			expected: "audio/webm",
+		},
+		{
+			name:     "MPEG file",
+			ext:      ".mpeg",
+			expected: "audio/mpeg",
+		},
+		{
+			name:     "Uppercase extension",
+			ext:      ".MP3",
+			expected: "audio/mp3",
+		},
+		{
+			name:     "Unknown extension",
+			ext:      ".xyz",
+			expected: "",
+		},
+		{
+			name:     "Empty extension",
+			ext:      "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getMimeType(tt.ext)
+			if got != tt.expected {
+				t.Errorf("getMimeType(%q) = %q, want %q", tt.ext, got, tt.expected)
+			}
+		})
+	}
+}
+
+// Test getModelContextLimit function
+func TestGetModelContextLimit(t *testing.T) {
+	tests := []struct {
+		name     string
+		model    string
+		expected int
+	}{
+		// OpenAI models
+		{
+			name:     "GPT-4",
+			model:    "gpt-4",
+			expected: 6000,
+		},
+		{
+			name:     "GPT-4-turbo",
+			model:    "gpt-4-turbo",
+			expected: 100000,
+		},
+		{
+			name:     "GPT-4o",
+			model:    "gpt-4o",
+			expected: 100000,
+		},
+		{
+			name:     "GPT-3.5-turbo",
+			model:    "gpt-3.5-turbo",
+			expected: 12000,
+		},
+		// Gemini models
+		{
+			name:     "Gemini 2.0 flash",
+			model:    "gemini-2.0-flash",
+			expected: 900000,
+		},
+		{
+			name:     "Gemini 1.5 pro",
+			model:    "gemini-1.5-pro",
+			expected: 900000,
+		},
+		{
+			name:     "Gemini 1.5 flash",
+			model:    "gemini-1.5-flash",
+			expected: 900000,
+		},
+		{
+			name:     "Gemini 1.0 pro",
+			model:    "gemini-1.0-pro",
+			expected: 28000,
+		},
+		{
+			name:     "Unknown Gemini model",
+			model:    "gemini-unknown",
+			expected: 28000,
+		},
+		{
+			name:     "Unknown model",
+			model:    "unknown-model",
+			expected: 6000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getModelContextLimit(tt.model)
+			if got != tt.expected {
+				t.Errorf("getModelContextLimit(%q) = %d, want %d", tt.model, got, tt.expected)
+			}
+		})
+	}
+}
+
+// Test validateConfig with Gemini provider
+func TestValidateConfigGemini(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantErr bool
+	}{
+		{
+			name: "Valid Gemini config",
+			config: &Config{
+				Provider:     "gemini",
+				GeminiAPIKey: "test-gemini-key",
+				PostActions: []PostAction{
+					{
+						ID:          "gemini-test-action",
+						Name:        "Gemini Test Action",
+						Type:        "gemini",
+						Prompt:      "Test prompt",
+						Model:       "gemini-2.0-flash",
+						Temperature: 0.5,
+						MaxTokens:   1000,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Invalid provider",
+			config: &Config{
+				Provider: "invalid-provider",
+				PostActions: []PostAction{
+					{
+						ID:          "test-action",
+						Name:        "Test Action",
+						Type:        "openai",
+						Prompt:      "Test prompt",
+						Model:       "gpt-3.5-turbo",
+						Temperature: 0.5,
+						MaxTokens:   1000,
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid action type",
+			config: &Config{
+				Provider: "gemini",
+				PostActions: []PostAction{
+					{
+						ID:          "test-action",
+						Name:        "Test Action",
+						Type:        "invalid-type",
+						Prompt:      "Test prompt",
+						Model:       "gemini-2.0-flash",
+						Temperature: 0.5,
+						MaxTokens:   1000,
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Mixed OpenAI and Gemini actions",
+			config: &Config{
+				Provider: "openai",
+				PostActions: []PostAction{
+					{
+						ID:          "openai-action",
+						Name:        "OpenAI Action",
+						Type:        "openai",
+						Prompt:      "Test prompt",
+						Model:       "gpt-3.5-turbo",
+						Temperature: 0.5,
+						MaxTokens:   1000,
+					},
+					{
+						ID:          "gemini-action",
+						Name:        "Gemini Action",
+						Type:        "gemini",
+						Prompt:      "Test prompt",
+						Model:       "gemini-2.0-flash",
+						Temperature: 0.5,
+						MaxTokens:   1000,
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateConfig(tt.config)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// Test storeGeminiAPIKey function
+func TestStoreGeminiAPIKey(t *testing.T) {
+	// Save original HOME
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+
+	// Create temporary home directory
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	// First, create a default config
+	err := createDefaultConfig()
+	if err != nil {
+		t.Fatalf("Failed to create default config: %v", err)
+	}
+
+	// Store Gemini API key
+	testKey := "test-gemini-api-key-12345"
+	err = storeGeminiAPIKey(testKey)
+	if err != nil {
+		t.Errorf("storeGeminiAPIKey() error = %v, want nil", err)
+	}
+
+	// Verify the key was stored
+	configPath := filepath.Join(tmpHome, ".goscribe", "config.yml")
+	config, err := loadConfigActions(configPath)
+	if err != nil {
+		t.Errorf("Failed to load config after storing Gemini key: %v", err)
+	}
+
+	if config.GeminiAPIKey != testKey {
+		t.Errorf("Stored Gemini API key = %v, want %v", config.GeminiAPIKey, testKey)
+	}
+}
+
+// Test setDefaultProvider function
+func TestSetDefaultProvider(t *testing.T) {
+	// Save original HOME
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+
+	// Create temporary home directory
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+
+	// First, create a default config
+	err := createDefaultConfig()
+	if err != nil {
+		t.Fatalf("Failed to create default config: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		provider string
+		wantErr  bool
+	}{
+		{
+			name:     "Set to gemini",
+			provider: "gemini",
+			wantErr:  false,
+		},
+		{
+			name:     "Set to openai",
+			provider: "openai",
+			wantErr:  false,
+		},
+		{
+			name:     "Invalid provider",
+			provider: "invalid",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := setDefaultProvider(tt.provider)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("setDefaultProvider(%q) error = %v, wantErr %v", tt.provider, err, tt.wantErr)
+			}
+
+			if !tt.wantErr {
+				// Verify the provider was set
+				configPath := filepath.Join(tmpHome, ".goscribe", "config.yml")
+				config, err := loadConfigActions(configPath)
+				if err != nil {
+					t.Errorf("Failed to load config after setting provider: %v", err)
+				}
+
+				if config.Provider != tt.provider {
+					t.Errorf("Stored provider = %v, want %v", config.Provider, tt.provider)
+				}
+			}
+		})
+	}
+}
+
+// Test loadConfigActions with Gemini config
+func TestLoadConfigActionsGemini(t *testing.T) {
+	// Create a temporary config file with Gemini settings
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "test-config.yml")
+
+	geminiConfig := `provider: "gemini"
+openai_api_key: "test-openai-key"
+gemini_api_key: "test-gemini-key"
+gemini_model: "gemini-1.5-pro"
+
+post_actions:
+  - id: "gemini-test-action"
+    name: "Gemini Test Action"
+    description: "Test description"
+    type: "gemini"
+    prompt: "Test prompt"
+    model: "gemini-2.0-flash"
+    temperature: 0.3
+    max_tokens: 1000
+`
+
+	err := os.WriteFile(configPath, []byte(geminiConfig), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	config, err := loadConfigActions(configPath)
+	if err != nil {
+		t.Errorf("loadConfigActions() error = %v, want nil", err)
+	}
+
+	// Verify Gemini-specific fields
+	if config.Provider != "gemini" {
+		t.Errorf("Provider = %v, want gemini", config.Provider)
+	}
+	if config.GeminiAPIKey != "test-gemini-key" {
+		t.Errorf("GeminiAPIKey = %v, want test-gemini-key", config.GeminiAPIKey)
+	}
+	if config.GeminiModel != "gemini-1.5-pro" {
+		t.Errorf("GeminiModel = %v, want gemini-1.5-pro", config.GeminiModel)
+	}
+	if config.OpenAIAPIKey != "test-openai-key" {
+		t.Errorf("OpenAIAPIKey = %v, want test-openai-key", config.OpenAIAPIKey)
+	}
+
+	// Verify action was loaded
+	if len(postActions) != 1 {
+		t.Errorf("loadConfigActions() loaded %d actions, want 1", len(postActions))
+	}
+
+	if len(postActions) > 0 {
+		action := postActions[0]
+		if action.Type != "gemini" {
+			t.Errorf("Action Type = %v, want gemini", action.Type)
+		}
+		if action.Model != "gemini-2.0-flash" {
+			t.Errorf("Action Model = %v, want gemini-2.0-flash", action.Model)
+		}
+	}
+}
+
+// Test getDefaultConfigContent includes Gemini fields
+func TestGetDefaultConfigContentGemini(t *testing.T) {
+	content := getDefaultConfigContent()
+
+	// Check for Gemini-specific content
+	expectedStrings := []string{
+		"provider:",
+		"gemini_api_key:",
+		"gemini_model:",
+		"gemini-2.0-flash",
+	}
+
+	for _, expected := range expectedStrings {
+		if !contains(content, expected) {
+			t.Errorf("getDefaultConfigContent() missing expected Gemini field: %s", expected)
+		}
+	}
+}
+
+// Test parseRateLimitWaitTime function
+func TestParseRateLimitWaitTime(t *testing.T) {
+	tests := []struct {
+		name        string
+		errorBody   string
+		expectedMin float64 // minimum expected seconds
+		expectedMax float64 // maximum expected seconds
+	}{
+		{
+			name:        "Standard rate limit message",
+			errorBody:   "Rate limit exceeded. Please try again in 9.798s",
+			expectedMin: 9.0,
+			expectedMax: 10.0,
+		},
+		{
+			name:        "Short wait time",
+			errorBody:   "Please try again in 1.5s",
+			expectedMin: 1.0,
+			expectedMax: 2.0,
+		},
+		{
+			name:        "No wait time in message",
+			errorBody:   "Some other error message",
+			expectedMin: 10.0, // Default fallback
+			expectedMax: 10.0,
+		},
+		{
+			name:        "Empty message",
+			errorBody:   "",
+			expectedMin: 10.0, // Default fallback
+			expectedMax: 10.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			duration := parseRateLimitWaitTime(tt.errorBody)
+			seconds := duration.Seconds()
+
+			if seconds < tt.expectedMin || seconds > tt.expectedMax {
+				t.Errorf("parseRateLimitWaitTime(%q) = %.2f seconds, want between %.2f and %.2f",
+					tt.errorBody, seconds, tt.expectedMin, tt.expectedMax)
 			}
 		})
 	}
