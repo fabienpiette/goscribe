@@ -44,34 +44,21 @@ and chunking text.
 
 ## Source Map
 
-All code lives in a single `main` package across three files:
+All code lives in a single `main` package, organized by concern:
 
 | File                 | Lines | Responsibility |
 |----------------------|-------|----------------|
-| `main.go`            | ~2100 | Everything: CLI, config management, API clients, chunking, splitting |
+| `main.go`            | ~450  | CLI entry point (`main`, `run`, `normalizeArgs`), flag parsing, `runOptions` |
+| `types.go`           | ~85   | All struct types (OpenAI/Gemini API request/response, `Config`, `PostAction`) |
+| `config.go`          | ~345  | Config loading, validation, creation, API key storage |
+| `openai.go`          | ~530  | OpenAI API client, transcription, chunked processing, merge logic |
+| `gemini.go`          | ~415  | Gemini API client, transcription, chunked processing, merge logic |
+| `provider.go`        | ~140  | Provider dispatch with automatic fallback |
+| `util.go`            | ~190  | Utilities (string ops, file ops, audio splitting, model context limits), constants, shared state |
 | `default_config.go`  | ~430  | Default YAML config template with 18 built-in post-actions |
-| `main_test.go`       | ~1130 | Unit tests (config validation, helpers, provider logic) |
+| `main_test.go`       | ~3340 | Table-driven unit tests with httptest-based API mocking |
 
-There are no internal packages. Functions are organized by concern within `main.go`:
-
-```
-main.go layout (by line range):
-  23-100    Type definitions (API request/response structs, Config, PostAction)
-  102-122   multiStringFlag (custom flag type for -transcript)
-  126-157   Constants and getModelContextLimit()
-  159-577   main() + CLI flow
-  579-696   Config: findAction, loadConfigActions, validateConfig, createDefaultConfig
-  697-919   Config persistence: resetConfig, storeAPIKey, storeGeminiAPIKey, setDefaultProvider
-  921-934   parseRateLimitWaitTime
-  937-1104  API clients: makeOpenAIRequest, makeGeminiRequest (with retry)
-  1106-1122 getMimeType
-  1124-1373 Gemini pipeline: transcribe, split, process, chunk, merge
-  1375-1509 Provider dispatchers with fallback
-  1511-1568 Auto-select actions (Gemini)
-  1570-1770 OpenAI pipeline: process, chunk, merge, hierarchical merge
-  1772-1868 Auto-select actions (OpenAI), truncateString, splitIntoSentences
-  1870-2099 OpenAI transcription: transcribeAudio, getFileSize, splitAudioFile, shellescape
-```
+There are no internal packages. Each file groups related functions:
 
 ## Key Design Decisions
 
@@ -146,9 +133,11 @@ This means:
 
 ### Global Mutable State
 
-`postActions` is a package-level `[]PostAction` that `loadConfigActions()` writes
-to and `findAction()` reads from. This is the only piece of global mutable state.
-Tests must set it explicitly before assertions.
+`postActions` is a package-level `[]PostAction` (declared in `util.go`) that
+`loadConfigActions()` writes to and `findAction()` reads from. `openAIBaseURL`
+and `geminiBaseURL` are package-level vars (also in `util.go`) that default to
+production endpoints but can be overridden in tests to point at `httptest.Server`
+instances. Tests must set these explicitly before assertions.
 
 ## Invariants
 
@@ -189,13 +178,19 @@ orphaned temp dirs may remain in the OS temp directory.
 
 ## Testing
 
-Tests live in `main_test.go` and cover config validation, helper functions, and
-provider-specific logic. All tests are unit-level — no integration tests hit
-real APIs.
+Tests live in `main_test.go` (~3340 lines, ~73% coverage) and cover:
+- Pure function tests (string utils, flag parsing, model context limits)
+- HTTP-mocked API tests via `httptest.Server` (OpenAI and Gemini request/response)
+- Provider dispatch tests (success paths, fallback in both directions, both-fail)
+- Chunked processing and merge logic
+- Integration tests for `run()` (list actions, transcript mode, error paths)
+
+No tests hit real APIs.
 
 Key patterns:
 - Table-driven sub-tests with `t.Run`
 - `t.TempDir()` for filesystem isolation
+- `overrideBaseURLs(t, openAI, gemini)` helper to redirect API calls to test servers
 - `os.Setenv("HOME", tmpDir)` to isolate config operations (restored via `defer`)
 - The global `postActions` slice is set directly in tests that need it
 
