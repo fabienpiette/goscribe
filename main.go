@@ -123,6 +123,10 @@ func (m *multiStringFlag) Set(value string) error {
 
 var postActions = []PostAction{}
 
+// Base URLs for API endpoints (overridable in tests)
+var openAIBaseURL = "https://api.openai.com/v1"
+var geminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
+
 const maxFileSizeBytes = 25 * 1024 * 1024 // 25MB - OpenAI Whisper API limit
 
 // Approximate token limits for different models (leaving room for prompt and response)
@@ -945,7 +949,7 @@ func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries 
 			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
 
-		req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
+		req, err := http.NewRequest("POST", openAIBaseURL+"/chat/completions", bytes.NewBuffer(jsonData))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -1020,7 +1024,7 @@ func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries 
 // makeGeminiRequest makes an HTTP request to Gemini API with retry logic
 func makeGeminiRequest(model string, contents []GeminiContent, apiKey string, maxRetries int) (*GeminiResponse, error) {
 	var lastErr error
-	endpoint := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
+	endpoint := fmt.Sprintf("%s/models/%s:generateContent", geminiBaseURL, model)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		reqBody := GeminiRequest{Contents: contents}
@@ -1917,7 +1921,7 @@ func transcribeAudio(audioPath, apiKey string) (string, error) {
 		}
 
 		// Create the HTTP request
-		req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", body)
+		req, err := http.NewRequest("POST", openAIBaseURL+"/audio/transcriptions", body)
 		if err != nil {
 			return "", fmt.Errorf("failed to create request: %w", err)
 		}

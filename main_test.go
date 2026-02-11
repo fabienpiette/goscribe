@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1125,4 +1129,513 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- Pure function tests ---
+
+func TestTruncateString(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		maxLen int
+		want   string
+	}{
+		{"short string unchanged", "hello", 10, "hello"},
+		{"exact length unchanged", "hello", 5, "hello"},
+		{"long string truncated", "hello world", 5, "hello..."},
+		{"empty string", "", 5, ""},
+		{"zero max len", "hello", 0, "..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateString(tt.input, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncateString(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSplitIntoSentences(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"single sentence", "Hello world.", []string{"Hello world."}},
+		{"multiple sentences", "First. Second! Third?", []string{"First.", "Second!", "Third?"}},
+		{"no punctuation", "just some text", []string{"just some text"}},
+		{"trailing text after sentence", "Hello. world", []string{"Hello.", "world"}},
+		{"empty string", "", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitIntoSentences(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitIntoSentences(%q) returned %d sentences, want %d: %v", tt.input, len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("sentence[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMax(t *testing.T) {
+	tests := []struct {
+		a, b, want int
+	}{
+		{5, 3, 5},
+		{3, 5, 5},
+		{5, 5, 5},
+		{-1, -5, -1},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d,%d", tt.a, tt.b), func(t *testing.T) {
+			if got := max(tt.a, tt.b); got != tt.want {
+				t.Errorf("max(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMultiStringFlag(t *testing.T) {
+	t.Run("String", func(t *testing.T) {
+		f := multiStringFlag{"a", "b", "c"}
+		if got := f.String(); got != "a,b,c" {
+			t.Errorf("String() = %q, want %q", got, "a,b,c")
+		}
+	})
+
+	t.Run("Set single", func(t *testing.T) {
+		var f multiStringFlag
+		if err := f.Set("hello"); err != nil {
+			t.Fatalf("Set() error: %v", err)
+		}
+		if len(f) != 1 || f[0] != "hello" {
+			t.Errorf("after Set(\"hello\"), flag = %v", f)
+		}
+	})
+
+	t.Run("Set comma-separated", func(t *testing.T) {
+		var f multiStringFlag
+		if err := f.Set("a, b, c"); err != nil {
+			t.Fatalf("Set() error: %v", err)
+		}
+		if len(f) != 3 || f[0] != "a" || f[1] != "b" || f[2] != "c" {
+			t.Errorf("after Set(\"a, b, c\"), flag = %v", f)
+		}
+	})
+
+	t.Run("Set empty", func(t *testing.T) {
+		var f multiStringFlag
+		if err := f.Set(""); err != nil {
+			t.Fatalf("Set() error: %v", err)
+		}
+		if len(f) != 0 {
+			t.Errorf("after Set(\"\"), flag = %v, want empty", f)
+		}
+	})
+}
+
+// --- HTTP-mocked tests ---
+
+// helper to write JSON responses in test handlers
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// helper to save/restore base URLs
+func overrideBaseURLs(t *testing.T, openAI, gemini string) {
+	t.Helper()
+	origOpenAI := openAIBaseURL
+	origGemini := geminiBaseURL
+	openAIBaseURL = openAI
+	geminiBaseURL = gemini
+	t.Cleanup(func() {
+		openAIBaseURL = origOpenAI
+		geminiBaseURL = origGemini
+	})
+}
+
+func TestMakeOpenAIRequest(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer test-key" {
+				t.Errorf("unexpected auth header: %s", r.Header.Get("Authorization"))
+			}
+			resp := ChatCompletionResponse{
+				Choices: []struct {
+					Message Message `json:"message"`
+				}{
+					{Message: Message{Role: "assistant", Content: "Hello!"}},
+				},
+			}
+			writeJSON(w, resp)
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		reqBody := ChatCompletionRequest{
+			Model:    "gpt-4",
+			Messages: []Message{{Role: "user", Content: "Hi"}},
+		}
+		got, err := makeOpenAIRequest(reqBody, "test-key", 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Choices[0].Message.Content != "Hello!" {
+			t.Errorf("got content %q, want %q", got.Choices[0].Message.Content, "Hello!")
+		}
+	})
+
+	t.Run("429 rate limit no retry", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("rate limited"))
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		_, err := makeOpenAIRequest(ChatCompletionRequest{}, "key", 0)
+		if err == nil {
+			t.Fatal("expected error for 429")
+		}
+		if !strings.Contains(err.Error(), "429") {
+			t.Errorf("error should mention 429: %v", err)
+		}
+	})
+
+	t.Run("500 error no retry", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("server error"))
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		_, err := makeOpenAIRequest(ChatCompletionRequest{}, "key", 0)
+		if err == nil {
+			t.Fatal("expected error for 500")
+		}
+		if !strings.Contains(err.Error(), "500") {
+			t.Errorf("error should mention 500: %v", err)
+		}
+	})
+
+	t.Run("empty choices", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, ChatCompletionResponse{})
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		_, err := makeOpenAIRequest(ChatCompletionRequest{}, "key", 0)
+		if err == nil {
+			t.Fatal("expected error for empty choices")
+		}
+		if !strings.Contains(err.Error(), "no response") {
+			t.Errorf("error should mention no response: %v", err)
+		}
+	})
+}
+
+func TestMakeGeminiRequest(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("x-goog-api-key") != "test-key" {
+				t.Errorf("unexpected api key header: %s", r.Header.Get("x-goog-api-key"))
+			}
+			if !strings.Contains(r.URL.Path, "gemini-2.0-flash") {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
+			resp := GeminiResponse{
+				Candidates: []GeminiCandidate{
+					{Content: struct {
+						Parts []struct {
+							Text string `json:"text"`
+						} `json:"parts"`
+					}{
+						Parts: []struct {
+							Text string `json:"text"`
+						}{{Text: "Gemini says hello"}},
+					}},
+				},
+			}
+			writeJSON(w, resp)
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		contents := []GeminiContent{{Parts: []GeminiPart{{Text: "Hi"}}}}
+		got, err := makeGeminiRequest("gemini-2.0-flash", contents, "test-key", 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Candidates[0].Content.Parts[0].Text != "Gemini says hello" {
+			t.Errorf("got %q, want %q", got.Candidates[0].Content.Parts[0].Text, "Gemini says hello")
+		}
+	})
+
+	t.Run("429 rate limit", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("rate limited"))
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		_, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 0)
+		if err == nil {
+			t.Fatal("expected error for 429")
+		}
+		if !strings.Contains(err.Error(), "rate limit") {
+			t.Errorf("error should mention rate limit: %v", err)
+		}
+	})
+
+	t.Run("API error in body", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			resp := GeminiResponse{
+				Error: &GeminiError{Code: 400, Message: "bad request", Status: "INVALID_ARGUMENT"},
+			}
+			writeJSON(w, resp)
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		_, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 0)
+		if err == nil {
+			t.Fatal("expected error for API error in body")
+		}
+		if !strings.Contains(err.Error(), "bad request") {
+			t.Errorf("error should contain message: %v", err)
+		}
+	})
+
+	t.Run("empty candidates", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, GeminiResponse{})
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		_, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 0)
+		if err == nil {
+			t.Fatal("expected error for empty candidates")
+		}
+		if !strings.Contains(err.Error(), "no response") {
+			t.Errorf("error should mention no response: %v", err)
+		}
+	})
+}
+
+func TestProcessWithOpenAI(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ChatCompletionResponse{
+			Choices: []struct {
+				Message Message `json:"message"`
+			}{
+				{Message: Message{Role: "assistant", Content: "Summary: meeting notes"}},
+			},
+		}
+		writeJSON(w, resp)
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	action := &PostAction{
+		Model:       "gpt-4",
+		Prompt:      "Summarize this",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+	got, err := processWithOpenAI("transcript text", action, "test-key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "Summary: meeting notes" {
+		t.Errorf("got %q, want %q", got, "Summary: meeting notes")
+	}
+}
+
+func TestProcessWithGemini(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := GeminiResponse{
+			Candidates: []GeminiCandidate{
+				{Content: struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				}{
+					Parts: []struct {
+						Text string `json:"text"`
+					}{{Text: "Gemini summary"}},
+				}},
+			},
+		}
+		writeJSON(w, resp)
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	action := &PostAction{
+		Model:       "gemini-2.0-flash",
+		Prompt:      "Summarize this",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+	got, err := processWithGemini("transcript text", action, "test-key", "gemini-2.0-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "Gemini summary" {
+		t.Errorf("got %q, want %q", got, "Gemini summary")
+	}
+}
+
+func TestTranscribeWithGemini(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := GeminiResponse{
+			Candidates: []GeminiCandidate{
+				{Content: struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				}{
+					Parts: []struct {
+						Text string `json:"text"`
+					}{{Text: "transcribed audio text"}},
+				}},
+			},
+		}
+		writeJSON(w, resp)
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	// Create a small temp audio file
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("fake audio data"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeWithGemini(tmpFile, "test-key", "gemini-2.0-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "transcribed audio text" {
+		t.Errorf("got %q, want %q", got, "transcribed audio text")
+	}
+}
+
+func TestTranscribeAudio(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify it's a multipart request
+		if !strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
+			t.Errorf("expected multipart request, got %s", r.Header.Get("Content-Type"))
+		}
+		resp := TranscriptionResponse{Text: "whisper transcription"}
+		writeJSON(w, resp)
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("fake audio data"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeAudio(tmpFile, "test-key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "whisper transcription" {
+		t.Errorf("got %q, want %q", got, "whisper transcription")
+	}
+}
+
+// --- Provider dispatch error tests ---
+
+func TestTranscribeAudioWithProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		openai   string
+		gemini   string
+		wantErr  string
+	}{
+		{"gemini missing key", "gemini", "openai-key", "", "Gemini API key required"},
+		{"openai missing key", "openai", "", "gemini-key", "OpenAI API key required"},
+		{"openai XXXX key", "openai", "XXXX", "gemini-key", "OpenAI API key required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := transcribeAudioWithProvider("dummy.mp3", tt.provider, tt.openai, tt.gemini, "", false)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestProcessWithProviderChunked(t *testing.T) {
+	action := &PostAction{
+		Model:       "gpt-4",
+		Prompt:      "test",
+		Temperature: 0.3,
+		MaxTokens:   100,
+	}
+	tests := []struct {
+		name     string
+		provider string
+		openai   string
+		gemini   string
+		wantErr  string
+	}{
+		{"gemini missing key", "gemini", "openai-key", "", "Gemini API key required"},
+		{"openai missing key", "openai", "", "gemini-key", "OpenAI API key required"},
+		{"openai XXXX key", "openai", "XXXX", "gemini-key", "OpenAI API key required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := processWithProviderChunked("transcript", action, tt.provider, tt.openai, tt.gemini, "", false)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSelectBestActionsWithProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		openai   string
+		gemini   string
+		wantErr  string
+	}{
+		{"gemini missing key", "gemini", "openai-key", "", "Gemini API key required"},
+		{"openai missing key", "openai", "", "gemini-key", "OpenAI API key required"},
+		{"openai XXXX key", "openai", "XXXX", "gemini-key", "OpenAI API key required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := selectBestActionsWithProvider("transcript", tt.provider, tt.openai, tt.gemini, "")
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
 }
