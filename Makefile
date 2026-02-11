@@ -1,4 +1,4 @@
-.PHONY: build install clean test test-coverage test-short help
+.PHONY: build install clean test test-coverage test-short lint help
 
 BINARY_NAME=goscribe
 GO=go
@@ -13,6 +13,7 @@ help:
 	@echo "  test-short     - Run tests without verbose output"
 	@echo "  test-coverage  - Run tests with coverage report"
 	@echo "  build-all      - Build for multiple platforms"
+	@echo "  lint           - Run golangci-lint"
 	@echo "  help           - Show this help"
 
 build:
@@ -48,6 +49,9 @@ test-coverage:
 	$(GO) test -v -coverprofile=coverage.out ./...
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
+
+lint:
+	$(GO) run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run ./...
 
 run:
 	$(GO) run .

@@ -4,9 +4,21 @@ func getDefaultConfigContent() string {
 	return `# goscribe configuration file
 # All built-in post-processing actions for audio transcription
 
+# AI Provider: "openai" or "gemini" (default: openai)
+# The provider determines both transcription and post-processing
+provider: "openai"
+
 # OpenAI API Key (optional - can also be passed via -k flag)
 # If set here, you don't need to provide -k flag every time
 openai_api_key: ""
+
+# Gemini API Key (optional - can also be passed via -gemini-key flag)
+# Get your API key from: https://aistudio.google.com/app/apikey
+gemini_api_key: ""
+
+# Default Gemini model (used when provider is "gemini")
+# Options: gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
+gemini_model: "gemini-2.0-flash"
 
 post_actions:
   - id: "openai-meeting-summary"
