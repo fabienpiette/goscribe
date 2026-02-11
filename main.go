@@ -742,7 +742,9 @@ func resetConfig() error {
 		fmt.Print("Continue? [y/N] ")
 
 		var response string
-		fmt.Scanln(&response)
+		if _, err := fmt.Scanln(&response); err != nil {
+			return fmt.Errorf("failed to read input: %w", err)
+		}
 		response = strings.ToLower(strings.TrimSpace(response))
 
 		if response != "y" && response != "yes" {
