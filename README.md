@@ -1,328 +1,167 @@
 # goscribe
 
-AI-powered audio transcription tool with OpenAI Whisper and intelligent post-processing actions.
+AI-powered audio transcription with post-processing — supports OpenAI Whisper/GPT and Google Gemini with automatic fallback.
 
-## Features
+---
 
-- 🎙️ **Audio Transcription** - Convert audio files to text using OpenAI Whisper
-- 📦 **Large File Support** - Automatic splitting for audio files >25MB and transcript chunking for long texts
-- 🤖 **AI Post-Processing** - 18 built-in actions for summarizing, extracting action items, and more
-- 🧠 **Smart Auto-Selection** - AI automatically selects the best actions based on content
-- 📝 **Process Existing Transcripts** - Apply actions to existing transcript files
-- 🔄 **Multiple Actions** - Apply multiple post-processing actions in one command
-- ⚙️ **Configurable** - Customize actions via YAML configuration
-- 🔑 **API Key Management** - Store your OpenAI API key in config file
+<p align="center">
+  <img src="docs/demo.gif" alt="goscribe demo" width="800">
+</p>
 
-## Installation
-
-### From Source
-
-```bash
-git clone https://github.com/fabienpiette/goscribe
-cd transcript
-make build
-sudo make install
-```
-
-### Manual Build
-
-```bash
-go build -o goscribe
-mv goscribe /usr/local/bin/
-```
+<p align="center">
+<a href="https://buymeacoffee.com/fabienpiette" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60"></a>
+</p>
 
 ## Quick Start
 
-### 1. Store Your API Key (Recommended)
-
 ```bash
+# Install
+git clone https://github.com/fabienpiette/goscribe && cd goscribe
+make build && sudo make install
+
+# Store your API key once
 goscribe -set-key YOUR_OPENAI_API_KEY
-```
 
-### 2. Transcribe Audio
-
-```bash
-# Basic transcription
+# Transcribe
 goscribe meeting.mp3
 
-# Transcribe with post-processing
+# Transcribe + summarize in one go
 goscribe -action openai-meeting-summary meeting.mp3
 ```
 
-### 3. Process Existing Transcript
+## Features
+
+- **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
+- **18 built-in actions** — meeting summaries, action items, technical notes, retrospectives, and more
+- **Auto-select mode** — let the AI pick the most relevant actions for your transcript
+- **Large file handling** — audio splitting and transcript chunking happen transparently
+- **Multi-transcript** — process multiple transcript files in a single run
+- **Custom actions** — define your own post-processing prompts in YAML config
+
+## Install
+
+**Prerequisites:** Go 1.21+, ffmpeg (only for files exceeding provider size limits)
+
+### From source
 
 ```bash
-goscribe -transcript meeting-transcript.txt -action openai-action-items
+git clone https://github.com/fabienpiette/goscribe
+cd goscribe
+make build && sudo make install
 ```
 
-### 4. Multiple Post-Processing Actions
+### Build manually
 
 ```bash
-# Apply multiple actions to one transcript
-goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
-
-# With spaces (will be trimmed automatically)
-goscribe -action "openai-meeting-summary, openai-action-items, openai-key-insights" meeting.mp3
-```
-
-### 5. Automatic Action Selection
-
-```bash
-# Let AI choose the best actions based on content
-goscribe --auto meeting.mp3
-
-# Works with existing transcripts too
-goscribe -transcript notes.txt --auto
+go build -o goscribe
+sudo mv goscribe /usr/local/bin/
 ```
 
 ## Usage
 
-```
-goscribe [options] <audio_file>
-goscribe -transcript <transcript_file> -action <action_id>
+```bash
+# Use Gemini instead of OpenAI
+goscribe -set-gemini-key YOUR_GEMINI_KEY
+goscribe -provider gemini meeting.mp3
+
+# Run multiple actions at once
+goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
+
+# Let AI pick the best actions
+goscribe --auto meeting.mp3
+
+# Process an existing transcript
+goscribe -transcript meeting-transcript.txt -action openai-action-items
+
+# Process multiple transcripts together
+goscribe -transcript call1.txt call2.txt -action openai-meeting-summary
 ```
 
-### Options
+## Options
 
-- `-k` - OpenAI API key (or use config file)
-- `-action` - Post-processing action ID(s), comma-separated for multiple
-- `--auto` - Automatically select best actions based on transcript content
-- `-transcript` - Process existing transcript file
-- `-o` - Output file name
-- `-config` - Custom config file path
-- `-list-actions` - List all available actions
-- `-set-key` - Store API key in config
-- `-init` - Reset config to defaults
+| Flag | Description |
+|------|-------------|
+| `-k` | OpenAI API key |
+| `-gemini-key` | Gemini API key |
+| `-provider` | `openai` or `gemini` |
+| `-no-fallback` | Disable automatic provider fallback |
+| `-action` | Action ID(s), comma-separated |
+| `--auto` | AI picks the best actions |
+| `-transcript` | Process existing transcript file(s) |
+| `-o` | Output file name |
+| `-config` | Custom config file path |
+| `-list-actions` | Show all available actions |
+| `-set-key` | Save OpenAI key to config |
+| `-set-gemini-key` | Save Gemini key to config |
+| `-set-provider` | Save default provider to config |
+| `-init` | Reset config to defaults |
+
+## Providers
+
+**OpenAI** (default) — Whisper for transcription, GPT for post-processing. 25 MB file limit. [Get an API key](https://platform.openai.com/api-keys).
+
+**Gemini** — native audio understanding for transcription and processing. 20 MB inline limit, up to 1M token context. [Get an API key](https://aistudio.google.com/app/apikey).
+
+When both keys are configured, goscribe automatically falls back to the other provider on failure. Disable with `-no-fallback`.
 
 ## Built-in Actions
 
-### Meeting & Communication
-- `openai-meeting-summary` - Comprehensive meeting summary
-- `openai-action-items` - Extract action items and tasks
-- `openai-standup` - Daily standup summary
-- `openai-one-on-one` - 1:1 meeting notes
-- `openai-client-meeting` - Client meeting notes
+18 actions ship by default. Run `goscribe -list-actions` to see them all.
 
-### Technical & Development
-- `openai-tech-meeting` - Technical meeting summary
-- `openai-decision-record` - Architecture Decision Record (ADR)
-- `openai-retrospective` - Sprint retrospective
-- `openai-incident-postmortem` - Incident analysis
-
-### Business & Strategy
-- `openai-executive-brief` - Executive summary
-- `openai-project-kickoff` - Project kickoff summary
-- `openai-key-insights` - Strategic insights
-
-### Learning & Analysis
-- `openai-training-session` - Training session notes
-- `openai-interview-notes` - Interview summary
-- `openai-brainstorm` - Brainstorming session
-- `openai-qa-format` - Q&A generator
-
-### HR & Internal
-- `openai-hr-meeting` - HR meeting summary
-- `openai-company-webinar` - Company webinar summary
+| Category | Actions |
+|----------|---------|
+| Meetings | `openai-meeting-summary` `openai-action-items` `openai-standup` `openai-one-on-one` `openai-client-meeting` |
+| Technical | `openai-tech-meeting` `openai-decision-record` `openai-retrospective` `openai-incident-postmortem` |
+| Business | `openai-executive-brief` `openai-project-kickoff` `openai-key-insights` |
+| Learning | `openai-training-session` `openai-interview-notes` `openai-brainstorm` `openai-qa-format` |
+| HR | `openai-hr-meeting` `openai-company-webinar` |
 
 ## Configuration
 
-Config file location: `~/.goscribe/config.yml`
-
-### Example Custom Action
+Config lives at `~/.goscribe/config.yml`. Define custom actions:
 
 ```yaml
-openai_api_key: "your-api-key-here"
+provider: "openai"
+openai_api_key: ""
+gemini_api_key: ""
+gemini_model: "gemini-2.0-flash"
 
 post_actions:
   - id: "custom-summary"
     name: "Custom Summary"
-    description: "My custom summary action"
-    type: "openai"
+    description: "My custom summary"
+    type: "openai"          # or "gemini"
     prompt: |
-      Summarize this transcript focusing on:
-      - Key decisions
-      - Action items
-      - Next steps
-    model: "gpt-3.5-turbo"
+      Summarize focusing on key decisions and next steps.
+    model: "gpt-3.5-turbo"  # or "gemini-2.0-flash"
     temperature: 0.3
     max_tokens: 1500
 ```
 
-### Reset Config
-
-```bash
-goscribe -init
-```
-
-## Examples
-
-### Basic Transcription
-```bash
-goscribe meeting.mp3
-# Output: meeting-transcript.txt
-```
-
-### Transcription with Action
-```bash
-goscribe -action openai-meeting-summary interview.mp3
-# Output: interview-transcript.txt, interview-openai-meeting-summary.txt
-```
-
-### Process Existing Transcript
-```bash
-goscribe -transcript notes.txt -action openai-action-items
-# Output: notes-openai-action-items.txt
-```
-
-### Custom Output File
-```bash
-goscribe -o my-transcript.txt meeting.mp3
-```
-
-### List All Actions
-```bash
-goscribe -list-actions
-```
-
-### Multiple Actions
-```bash
-# Generate both summary and action items
-goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
-
-# Process transcript with multiple actions
-goscribe -transcript notes.txt -action openai-meeting-summary,openai-action-items,openai-key-insights
-```
-
-### Automatic Action Selection
-```bash
-# AI selects best actions automatically
-goscribe --auto meeting.mp3
-
-# Example output:
-# 🤖 Analyzing transcript to select best actions...
-# ✓ Selected 2 action(s): openai-meeting-summary, openai-action-items
-# Processing 2 action(s)...
-```
-
-## Development
-
-### Build
-
-```bash
-make build              # Standard build
-make build-optimized    # Optimized build with size reduction
-make build-all          # Build for all platforms
-```
-
-### Testing
-
-```bash
-make test               # Run tests with verbose output
-make test-short         # Run tests without verbose output
-make test-coverage      # Generate coverage report (coverage.html)
-```
-
-### Project Structure
-
-```
-.
-├── main.go              # Main application logic
-├── main_test.go         # Unit tests
-├── default_config.go    # Default configuration template
-├── Makefile            # Build and test commands
-├── go.mod              # Go module definition
-└── README.md           # This file
-```
-
-## Testing
-
-The project includes comprehensive unit tests covering:
-
-- Configuration validation
-- Action management
-- Config file operations
-- API key storage
-- Default config generation
-
-Run tests:
-```bash
-make test              # Verbose output
-make test-short        # Quick test run
-make test-coverage     # Generate HTML coverage report
-```
-
-Current test coverage: ~21.5%
+Reset to defaults: `goscribe -init`.
 
 ## Output Files
 
-- `<filename>-transcript.txt` - Raw transcription
-- `<filename>-<action-id>.txt` - Post-processed output
-
-## Large File Handling
-
-### Audio Files >25MB
-
-OpenAI Whisper API has a file size limit of 25MB. goscribe automatically handles larger files by:
-
-1. **Automatic Detection** - Checks file size before transcription
-2. **Smart Splitting** - Splits audio into 10-minute chunks using ffmpeg
-3. **Sequential Processing** - Transcribes each chunk with progress indicators
-4. **Seamless Merging** - Combines all transcripts into single output
-5. **Auto Cleanup** - Removes temporary chunks after processing
-
-**Example:**
-```bash
-# File is 30MB - automatically split and processed
-goscribe large-meeting.mp3
-
-# Output:
-# ⚠ File size (30.5 MB) exceeds OpenAI limit (25 MB)
-# Splitting audio file into chunks...
-# ✓ Created 4 chunks
-#
-# [1/4] Transcribing chunk large-meeting_chunk_000.mp3...
-# ✓ Chunk 1/4 complete
-# ...
-# ✓ All chunks transcribed successfully
+```
+<filename>-transcript.txt       Raw transcription
+<filename>-<action-id>.txt      Post-processed output
 ```
 
-### Long Transcripts Exceeding Context Limits
+## Documentation
 
-When transcripts are too long for the model's context window, goscribe automatically handles this:
+- [Architecture](docs/ARCHITECTURE.md)
+- Supported formats: mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg, flac, aac, aiff
 
-1. **Model-Specific Limits** - Accurate limits per model (gpt-4: 6K, gpt-4-turbo: 100K, etc.)
-2. **Token Estimation** - Estimates transcript + prompt tokens (~4 chars per token)
-3. **Smart Chunking** - Splits on sentence boundaries for coherence
-4. **Context Overlap** - Adds overlap between chunks for continuity
-5. **Intelligent Merging** - AI merges chunk results, removing duplicates and consolidating
-6. **Hierarchical Merging** - Handles very large transcripts by merging in pairs
+## Development
 
-**Example:**
 ```bash
-# Long transcript from 60MB audio file
-goscribe -action openai-meeting-summary long-recording.mp3
-
-# Output:
-# [1/2] Applying post-processing: Smart Meeting Summary...
-#   ⚠ Transcript is large (~8000 tokens), processing in chunks...
-#   → Split into 2 chunk(s) for processing
-#   → Processing chunk 1/2...
-#   → Processing chunk 2/2...
-#   ✓ All chunks processed, merging results intelligently
-# ✓ Post-processed output saved to file.txt
+make build              # standard build
+make build-optimized    # smaller binary (-ldflags="-s -w")
+make build-all          # cross-compile all platforms
+make test               # run tests (verbose)
+make test-coverage      # generate coverage.html
 ```
-
-## Requirements
-
-- Go 1.21 or higher
-- OpenAI API key
-- ffmpeg (for files >25MB)
-- Supported audio formats: mp3, mp4, mpeg, mpga, m4a, wav, webm
 
 ## License
 
-Released under the MIT License. See `LICENSE` for details.
-
-## Contributing
-
-Contributions welcome! Please feel free to submit a Pull Request.
+[MIT](LICENSE)

@@ -1,58 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
-
-type TranscriptionResponse struct {
-	Text string `json:"text"`
-}
-
-type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-}
-
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type ChatCompletionResponse struct {
-	Choices []struct {
-		Message Message `json:"message"`
-	} `json:"choices"`
-}
-
-type PostAction struct {
-	ID          string  `yaml:"id"`
-	Name        string  `yaml:"name"`
-	Description string  `yaml:"description"`
-	Type        string  `yaml:"type"`
-	Prompt      string  `yaml:"prompt"`
-	Model       string  `yaml:"model"`
-	Temperature float64 `yaml:"temperature"`
-	MaxTokens   int     `yaml:"max_tokens"`
-}
-
-type Config struct {
-	OpenAIAPIKey string       `yaml:"openai_api_key"`
-	PostActions  []PostAction `yaml:"post_actions"`
-}
 
 type multiStringFlag []string
 
@@ -76,190 +30,114 @@ func (m *multiStringFlag) Set(value string) error {
 	return nil
 }
 
-var postActions = []PostAction{}
+// normalizeArgs preprocesses CLI arguments to allow multiple values after -transcript
+// without repeating the flag. Returns normalized args and an error if -transcript has no value.
+func normalizeArgs(rawArgs []string) ([]string, error) {
+	normalized := make([]string, 0, len(rawArgs))
 
-const maxFileSizeBytes = 25 * 1024 * 1024 // 25MB - OpenAI Whisper API limit
+	for i := 0; i < len(rawArgs); i++ {
+		arg := rawArgs[i]
 
-// Approximate token limits for different models (leaving room for prompt and response)
-const avgCharsPerToken = 4 // Rough estimate: 1 token ≈ 4 characters
+		if arg == "-transcript" {
+			normalized = append(normalized, arg)
+			i++
+			if i >= len(rawArgs) {
+				return nil, fmt.Errorf("-transcript flag requires at least one value")
+			}
+			values := []string{rawArgs[i]}
+			for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
+				i++
+				values = append(values, rawArgs[i])
+			}
+			normalized = append(normalized, strings.Join(values, ","))
+			continue
+		}
 
-// getModelContextLimit returns the safe context limit for a model (input tokens only)
-func getModelContextLimit(model string) int {
-	switch {
-	case model == "gpt-4":
-		return 6000 // 8K total, leaving 2K for completion
-	case model == "gpt-4-32k":
-		return 24000 // 32K total, leaving 8K for completion
-	case strings.HasPrefix(model, "gpt-4-turbo") || model == "gpt-4-1106-preview" || model == "gpt-4-0125-preview":
-		return 100000 // 128K total, leaving 28K for completion
-	case strings.HasPrefix(model, "gpt-4o"):
-		return 100000 // 128K total
-	case strings.HasPrefix(model, "gpt-3.5-turbo"):
-		return 12000 // 16K total, leaving 4K for completion
-	default:
-		return 6000 // Conservative default
+		if strings.HasPrefix(arg, "-transcript=") {
+			value := strings.TrimPrefix(arg, "-transcript=")
+			values := []string{value}
+			for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
+				i++
+				values = append(values, rawArgs[i])
+			}
+			normalized = append(normalized, "-transcript="+strings.Join(values, ","))
+			continue
+		}
+
+		normalized = append(normalized, arg)
 	}
+
+	return normalized, nil
 }
 
-func main() {
-	// Preprocess arguments to allow multiple values after -transcript without repeating the flag
-	if len(os.Args) > 1 {
-		rawArgs := os.Args[1:]
-		normalized := make([]string, 0, len(rawArgs))
+// runOptions holds all resolved CLI options for the run function
+type runOptions struct {
+	apiKey          string
+	geminiKey       string
+	provider        string
+	enableFallback  bool
+	output          string
+	listActions     bool
+	postAction      string
+	autoSelect      bool
+	configFile      string
+	transcriptFiles []string
+	args            []string // remaining positional args
+}
 
-		for i := 0; i < len(rawArgs); i++ {
-			arg := rawArgs[i]
-
-			if arg == "-transcript" {
-				normalized = append(normalized, arg)
-				i++
-				if i >= len(rawArgs) {
-					fmt.Println("Error: -transcript flag requires at least one value")
-					os.Exit(1)
-				}
-				values := []string{rawArgs[i]}
-				for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
-					i++
-					values = append(values, rawArgs[i])
-				}
-				normalized = append(normalized, strings.Join(values, ","))
-				continue
-			}
-
-			if strings.HasPrefix(arg, "-transcript=") {
-				value := strings.TrimPrefix(arg, "-transcript=")
-				values := []string{value}
-				for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
-					i++
-					values = append(values, rawArgs[i])
-				}
-				normalized = append(normalized, "-transcript="+strings.Join(values, ","))
-				continue
-			}
-
-			normalized = append(normalized, arg)
-		}
-
-		os.Args = append([]string{os.Args[0]}, normalized...)
-	}
-
-	// Define command-line flags
-	apiKey := flag.String("k", "XXXX", "OpenAI API key")
-	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
-	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
-	postAction := flag.String("action", "", "Post-processing action ID(s), comma-separated (use -list-actions to see options)")
-	autoSelect := flag.Bool("auto", false, "Automatically select best post-processing actions based on transcript content")
-	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
-	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
-	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
-	var transcriptFiles multiStringFlag
-	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
-
-	// Custom usage message
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI Whisper\n\n")
-		fmt.Fprintf(os.Stderr, "USAGE:\n")
-		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n\n")
-		fmt.Fprintf(os.Stderr, "OPTIONS:\n")
-		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nEXAMPLES:\n")
-		fmt.Fprintf(os.Stderr, "  # Basic transcription\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY meeting.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # Transcribe with meeting summary\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY -action openai-meeting-summary meeting.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # Transcribe technical meeting\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY -action openai-tech-meeting standup.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # Custom output file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY -o transcript.txt audio.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # List all available post-processing actions\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -list-actions\n\n")
-		fmt.Fprintf(os.Stderr, "  # Process existing transcript file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-transcript.txt -action openai-meeting-summary\n\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting-day1.txt -transcript meeting-day2.txt -action openai-meeting-summary\n\n")
-		fmt.Fprintf(os.Stderr, "  # Multiple post-processing actions\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary,openai-action-items meeting.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # Automatically select best actions\n")
-		fmt.Fprintf(os.Stderr, "  goscribe --auto meeting.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "  # Store API key in config file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -set-key YOUR_API_KEY\n\n")
-		fmt.Fprintf(os.Stderr, "  # Reset config to defaults\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -init\n\n")
-		fmt.Fprintf(os.Stderr, "  # Use custom config file\n")
-		fmt.Fprintf(os.Stderr, "  goscribe -config my-actions.yml -action custom-action audio.mp3\n\n")
-		fmt.Fprintf(os.Stderr, "OUTPUT FILES:\n")
-		fmt.Fprintf(os.Stderr, "  <filename>-transcript.txt              Raw transcription\n")
-		fmt.Fprintf(os.Stderr, "  <filename>-<action-id>.txt             Post-processed output (if -action used)\n\n")
-		fmt.Fprintf(os.Stderr, "CONFIGURATION:\n")
-		fmt.Fprintf(os.Stderr, "  Config file: ~/.goscribe/config.yml\n")
-		fmt.Fprintf(os.Stderr, "  - Store your OpenAI API key (openai_api_key field)\n")
-		fmt.Fprintf(os.Stderr, "  - Customize or add your own post-processing actions\n\n")
-		fmt.Fprintf(os.Stderr, "POPULAR ACTIONS:\n")
-		fmt.Fprintf(os.Stderr, "  openai-meeting-summary      Comprehensive meeting summary\n")
-		fmt.Fprintf(os.Stderr, "  openai-action-items         Extract action items and tasks\n")
-		fmt.Fprintf(os.Stderr, "  openai-tech-meeting         Technical meeting summary\n")
-		fmt.Fprintf(os.Stderr, "  openai-one-on-one           1:1 meeting notes\n")
-		fmt.Fprintf(os.Stderr, "  openai-executive-brief      Executive summary\n\n")
-		fmt.Fprintf(os.Stderr, "For more information, visit: https://github.com/fabienpiette/goscribe\n")
-	}
-
-	flag.Parse()
-
-	// Store API key if requested
-	if *setKey != "" {
-		err := storeAPIKey(*setKey)
-		if err != nil {
-			fmt.Printf("Error storing API key: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// Reset config if requested
-	if *initConfig {
-		err := resetConfig()
-		if err != nil {
-			fmt.Printf("Error resetting config: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
+// run contains the core application logic, separated from main for testability
+func run(opts runOptions) error {
 	// Determine which config file to use
-	configPath := *configFile
+	configPath := opts.configFile
 	if configPath == "" {
-		// Get default config location
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Printf("Error getting home directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("getting home directory: %w", err)
 		}
 		configPath = filepath.Join(homeDir, ".goscribe", "config.yml")
 
-		// Create default config if it doesn't exist
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			fmt.Println("Config file not found. Creating default config...")
 			if err := createDefaultConfig(); err != nil {
-				fmt.Printf("Error creating default config: %v\n", err)
-				os.Exit(1)
+				return fmt.Errorf("creating default config: %w", err)
 			}
 		}
 	}
 
-	// Always load config file (required for actions)
-	configAPIKey, err := loadConfigActions(configPath)
+	config, err := loadConfigActions(configPath)
 	if err != nil {
-		fmt.Printf("Error loading config file: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("loading config file: %w", err)
 	}
 
-	// Use config API key if command-line key is default
-	if *apiKey == "XXXX" && configAPIKey != "" {
-		*apiKey = configAPIKey
+	// Resolve API keys from config
+	apiKey := opts.apiKey
+	if apiKey == "XXXX" && config.OpenAIAPIKey != "" {
+		apiKey = config.OpenAIAPIKey
 		fmt.Println("Using API key from config file")
 	}
 
+	geminiKey := opts.geminiKey
+	if geminiKey == "" && config.GeminiAPIKey != "" {
+		geminiKey = config.GeminiAPIKey
+	}
+
+	// Determine active provider: flag > config > default
+	activeProvider := "openai"
+	if opts.provider != "" {
+		activeProvider = opts.provider
+	} else if config.Provider != "" {
+		activeProvider = config.Provider
+	}
+
+	geminiModel := config.GeminiModel
+	if geminiModel == "" {
+		geminiModel = "gemini-2.0-flash"
+	}
+
+	enableFallback := opts.enableFallback
+
 	// List actions and exit if requested
-	if *listActions {
+	if opts.listActions {
 		fmt.Println("Available post-processing actions:")
 		fmt.Println()
 		for _, action := range postActions {
@@ -269,7 +147,7 @@ func main() {
 			fmt.Printf("Model: %s\n", action.Model)
 			fmt.Println(strings.Repeat("-", 70))
 		}
-		return
+		return nil
 	}
 
 	var transcription string
@@ -277,34 +155,28 @@ func main() {
 	var transcriptFilename string
 
 	// Handle transcript file mode
-	if len(transcriptFiles) > 0 {
-		// Process existing transcript file
-		if *postAction == "" && !*autoSelect {
-			fmt.Println("Error: -action or --auto is required when using -transcript")
-			os.Exit(1)
+	if len(opts.transcriptFiles) > 0 {
+		if opts.postAction == "" && !opts.autoSelect {
+			return fmt.Errorf("-action or --auto is required when using -transcript")
 		}
 
 		var combined strings.Builder
-		for idx, file := range transcriptFiles {
-			// Check if transcript file exists
+		for idx, file := range opts.transcriptFiles {
 			if _, err := os.Stat(file); os.IsNotExist(err) {
-				fmt.Printf("Error: Transcript file '%s' not found.\n", file)
-				os.Exit(1)
+				return fmt.Errorf("transcript file '%s' not found", file)
 			}
 
-			// Read the transcript file
 			data, err := os.ReadFile(file)
 			if err != nil {
-				fmt.Printf("Error reading transcript file '%s': %v\n", file, err)
-				os.Exit(1)
+				return fmt.Errorf("reading transcript file '%s': %w", file, err)
 			}
 
 			content := string(data)
-			if len(transcriptFiles) == 1 {
+			if len(opts.transcriptFiles) == 1 {
 				transcription = content
 			} else {
 				fmt.Fprintf(&combined, "Transcript %d (%s):\n\n%s", idx+1, file, content)
-				if idx < len(transcriptFiles)-1 {
+				if idx < len(opts.transcriptFiles)-1 {
 					combined.WriteString("\n\n" + strings.Repeat("-", 70) + "\n\n")
 				}
 			}
@@ -312,65 +184,47 @@ func main() {
 			fmt.Printf("Loaded transcript from %s\n", file)
 		}
 
-		if len(transcriptFiles) > 1 {
+		if len(opts.transcriptFiles) > 1 {
 			transcription = combined.String()
 		}
 	} else {
-		// Standard audio transcription mode
-		// Get the audio file path from remaining arguments
-		if flag.NArg() < 1 {
-			fmt.Println("Error: Audio file path is required")
-			fmt.Println("Usage: goscribe [options] <audio_path>")
-			fmt.Println("   or: goscribe -transcript <transcript_file> -action <action_id>")
-			flag.PrintDefaults()
-			os.Exit(1)
+		if len(opts.args) < 1 {
+			return fmt.Errorf("audio file path is required")
 		}
-		audioPath = flag.Arg(0)
+		audioPath = opts.args[0]
 
-		// Check if audio file exists
 		if _, err := os.Stat(audioPath); os.IsNotExist(err) {
-			fmt.Printf("Error: Audio file '%s' not found.\n", audioPath)
-			os.Exit(1)
+			return fmt.Errorf("audio file '%s' not found", audioPath)
 		}
 
-		// Generate output filename if not provided
-		outputFilename := *output
-
-		if outputFilename == "" {
+		if opts.output == "" {
 			ext := filepath.Ext(audioPath)
 			baseName := strings.TrimSuffix(audioPath, ext)
 			transcriptFilename = baseName + "-transcript.txt"
 		} else {
-			// If user provides custom output, use it for transcript
-			transcriptFilename = outputFilename
+			transcriptFilename = opts.output
 		}
 
-		// Transcribe the audio file (with automatic splitting if needed)
-		fmt.Println("Transcribing audio...")
-		var err error
-		transcription, err = transcribeAudioWithSplitting(audioPath, *apiKey)
+		fmt.Printf("Transcribing audio with %s...\n", activeProvider)
+		transcription, err = transcribeAudioWithProvider(audioPath, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("transcription failed: %w", err)
 		}
 
-		// Always save the raw transcript
 		err = os.WriteFile(transcriptFilename, []byte(transcription), 0644)
 		if err != nil {
-			fmt.Printf("Error writing transcript file: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("writing transcript file: %w", err)
 		}
 		fmt.Printf("Raw transcript saved to %s\n", transcriptFilename)
 	}
 
-	// Apply post-processing action(s) if specified
+	// Resolve action IDs
 	var processedFiles []string
 	var actionIDs []string
 
-	// Handle automatic action selection
-	if *autoSelect {
-		fmt.Println("\n🤖 Analyzing transcript to select best actions...")
-		selectedActions, err := selectBestActions(transcription, *apiKey)
+	if opts.autoSelect {
+		fmt.Printf("\n🤖 Analyzing transcript with %s to select best actions...\n", activeProvider)
+		selectedActions, err := selectBestActionsWithProvider(transcription, activeProvider, apiKey, geminiKey, geminiModel)
 		if err != nil {
 			fmt.Printf("⚠ Warning: Auto-selection failed: %v\n", err)
 			fmt.Println("Continuing without post-processing.")
@@ -378,12 +232,10 @@ func main() {
 			actionIDs = selectedActions
 			fmt.Printf("✓ Selected %d action(s): %s\n", len(actionIDs), strings.Join(actionIDs, ", "))
 		}
-	} else if *postAction != "" {
-		// Split comma-separated action IDs
-		actionIDs = strings.Split(*postAction, ",")
+	} else if opts.postAction != "" {
+		actionIDs = strings.Split(opts.postAction, ",")
 	}
 
-	// Trim whitespace from action IDs
 	for i, id := range actionIDs {
 		actionIDs[i] = strings.TrimSpace(id)
 	}
@@ -399,32 +251,28 @@ func main() {
 
 			action := findAction(actionID)
 			if action == nil {
-				fmt.Printf("Error: Unknown action '%s'. Use -list-actions to see available options.\n", actionID)
-				os.Exit(1)
+				return fmt.Errorf("unknown action '%s'. Use -list-actions to see available options", actionID)
 			}
 
-			fmt.Printf("\n[%d/%d] Applying post-processing: %s...\n", idx+1, len(actionIDs), action.Name)
-			processed, err := processWithOpenAIChunked(transcription, action, *apiKey)
+			fmt.Printf("\n[%d/%d] Applying post-processing with %s: %s...\n", idx+1, len(actionIDs), activeProvider, action.Name)
+			processed, err := processWithProviderChunked(transcription, action, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
 			if err != nil {
 				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
-				if len(transcriptFiles) == 0 && len(actionIDs) == 1 {
+				if len(opts.transcriptFiles) == 0 && len(actionIDs) == 1 {
 					fmt.Println("Only raw transcript was saved.")
 				}
 			} else {
-				// Generate filename for post-processed output
 				var processedFilename string
-				if len(transcriptFiles) > 0 {
-					// For transcript mode, use the transcript filename(s) as base
-					first := transcriptFiles[0]
+				if len(opts.transcriptFiles) > 0 {
+					first := opts.transcriptFiles[0]
 					ext := filepath.Ext(first)
 					baseName := strings.TrimSuffix(first, ext)
-					if len(transcriptFiles) == 1 {
+					if len(opts.transcriptFiles) == 1 {
 						processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
 					} else {
-						processedFilename = fmt.Sprintf("%s+%d-%s.txt", baseName, len(transcriptFiles)-1, action.ID)
+						processedFilename = fmt.Sprintf("%s+%d-%s.txt", baseName, len(opts.transcriptFiles)-1, action.ID)
 					}
 				} else {
-					// For audio mode, use the audio filename as base
 					ext := filepath.Ext(audioPath)
 					baseName := strings.TrimSuffix(audioPath, ext)
 					processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
@@ -448,12 +296,12 @@ func main() {
 	// Print confirmation summary
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("Summary:\n")
-	if len(transcriptFiles) > 0 {
-		if len(transcriptFiles) == 1 {
-			fmt.Printf("  Transcript: %s\n", transcriptFiles[0])
+	if len(opts.transcriptFiles) > 0 {
+		if len(opts.transcriptFiles) == 1 {
+			fmt.Printf("  Transcript: %s\n", opts.transcriptFiles[0])
 		} else {
-			fmt.Printf("  Transcripts (%d):\n", len(transcriptFiles))
-			for _, tf := range transcriptFiles {
+			fmt.Printf("  Transcripts (%d):\n", len(opts.transcriptFiles))
+			for _, tf := range opts.transcriptFiles {
 				fmt.Printf("    - %s\n", tf)
 			}
 		}
@@ -467,806 +315,139 @@ func main() {
 			fmt.Printf("    - %s\n", pf)
 		}
 	}
-	if *apiKey != "XXXX" {
-		fmt.Printf("  API key:    %s\n", *apiKey)
+	if apiKey != "XXXX" {
+		fmt.Printf("  API key:    %s\n", apiKey)
 	}
 	fmt.Println(strings.Repeat("=", 70))
-}
-
-func findAction(id string) *PostAction {
-	for i := range postActions {
-		if postActions[i].ID == id {
-			return &postActions[i]
-		}
-	}
-	return nil
-}
-
-func loadConfigActions(configPath string) (string, error) {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var config Config
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse YAML config: %w", err)
-	}
-
-	// Validate config
-	if err := validateConfig(&config); err != nil {
-		return "", fmt.Errorf("config validation failed: %w", err)
-	}
-
-	// Load actions from config file
-	postActions = config.PostActions
-	fmt.Printf("Loaded %d action(s) from config file\n", len(config.PostActions))
-
-	return config.OpenAIAPIKey, nil
-}
-
-func validateConfig(config *Config) error {
-	if len(config.PostActions) == 0 {
-		return fmt.Errorf("no post-processing actions defined in config")
-	}
-
-	// Track unique IDs
-	seenIDs := make(map[string]bool)
-
-	for i, action := range config.PostActions {
-		// Check required fields
-		if action.ID == "" {
-			return fmt.Errorf("action at index %d is missing 'id' field", i)
-		}
-		if action.Name == "" {
-			return fmt.Errorf("action '%s' is missing 'name' field", action.ID)
-		}
-		if action.Type == "" {
-			return fmt.Errorf("action '%s' is missing 'type' field", action.ID)
-		}
-		if action.Prompt == "" {
-			return fmt.Errorf("action '%s' is missing 'prompt' field", action.ID)
-		}
-		if action.Model == "" {
-			return fmt.Errorf("action '%s' is missing 'model' field", action.ID)
-		}
-
-		// Check for duplicate IDs
-		if seenIDs[action.ID] {
-			return fmt.Errorf("duplicate action ID '%s' found", action.ID)
-		}
-		seenIDs[action.ID] = true
-
-		// Validate type
-		validTypes := map[string]bool{
-			"openai": true,
-		}
-		if !validTypes[action.Type] {
-			return fmt.Errorf("action '%s' has invalid type '%s' (valid: openai)", action.ID, action.Type)
-		}
-
-		// Validate temperature range
-		if action.Temperature < 0 || action.Temperature > 2 {
-			return fmt.Errorf("action '%s' has invalid temperature %.2f (must be between 0 and 2)", action.ID, action.Temperature)
-		}
-
-		// Validate max_tokens
-		if action.MaxTokens <= 0 {
-			return fmt.Errorf("action '%s' has invalid max_tokens %d (must be > 0)", action.ID, action.MaxTokens)
-		}
-
-		// Validate model names (basic check for OpenAI models)
-		validModels := map[string]bool{
-			"gpt-3.5-turbo": true,
-			"gpt-4":         true,
-			"gpt-4-turbo":   true,
-			"gpt-4o":        true,
-			"gpt-4o-mini":   true,
-		}
-		if action.Type == "openai" && !validModels[action.Model] {
-			fmt.Printf("Warning: action '%s' uses model '%s' which may not be valid\n", action.ID, action.Model)
-		}
-	}
 
 	return nil
 }
 
-func createDefaultConfig() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	configDir := filepath.Join(homeDir, ".goscribe")
-	configFile := filepath.Join(configDir, "config.yml")
-
-	// Create directory if it doesn't exist
-	err = os.MkdirAll(configDir, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	// Get default config content with all built-in actions
-	defaultConfig := getDefaultConfigContent()
-
-	// Write config file
-	err = os.WriteFile(configFile, []byte(defaultConfig), 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	fmt.Printf("✓ Created default config file at: %s\n", configFile)
-	fmt.Println("\nYou can now:")
-	fmt.Println("  1. Edit the config file to customize your actions")
-	fmt.Printf("  2. Use: goscribe -list-actions to see all available actions\n")
-	fmt.Printf("  3. Use: goscribe -action openai-meeting-summary audio.mp3\n")
-
-	return nil
-}
-
-func resetConfig() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	configFile := filepath.Join(homeDir, ".goscribe", "config.yml")
-
-	// Check if config exists
-	if _, err := os.Stat(configFile); err == nil {
-		fmt.Printf("⚠ Warning: This will overwrite your existing config at: %s\n", configFile)
-		fmt.Print("Continue? [y/N] ")
-
-		var response string
-		fmt.Scanln(&response)
-		response = strings.ToLower(strings.TrimSpace(response))
-
-		if response != "y" && response != "yes" {
-			fmt.Println("Config reset cancelled.")
-			return nil
-		}
-	}
-
-	// Use createDefaultConfig to write the new config
-	err = createDefaultConfig()
-	if err != nil {
-		return err
-	}
-
-	fmt.Println("✓ Config file reset to defaults")
-	return nil
-}
-
-func storeAPIKey(apiKey string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	configDir := filepath.Join(homeDir, ".goscribe")
-	configFile := filepath.Join(configDir, "config.yml")
-
-	// Create default config if it doesn't exist
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		fmt.Println("Config file not found. Creating default config...")
-		if err := createDefaultConfig(); err != nil {
-			return fmt.Errorf("failed to create default config: %w", err)
-		}
-	}
-
-	// Read existing config
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var config Config
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return fmt.Errorf("failed to parse config file: %w", err)
-	}
-
-	// Update API key
-	config.OpenAIAPIKey = apiKey
-
-	// Marshal back to YAML
-	updatedData, err := yaml.Marshal(&config)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	// Write updated config
-	err = os.WriteFile(configFile, updatedData, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	fmt.Printf("✓ API key stored successfully in: %s\n", configFile)
-	fmt.Println("\nYou can now use goscribe without the -k flag:")
-	fmt.Println("  goscribe audio.mp3")
-	fmt.Println("  goscribe -action openai-meeting-summary meeting.mp3")
-
-	return nil
-}
-
-func processWithOpenAI(transcript string, action *PostAction, apiKey string) (string, error) {
-	basePrompt := "You are a helpful assistant that processes transcribed text according to user instructions.\n\nTranscript:\n%s\n\nPlease process this transcript according to the instructions above."
-
-	fullPrompt := action.Prompt + "\n\n" + fmt.Sprintf(basePrompt, transcript)
-
-	reqBody := ChatCompletionRequest{
-		Model: action.Model,
-		Messages: []Message{
-			{
-				Role:    "user",
-				Content: fullPrompt,
-			},
-		},
-		Temperature: action.Temperature,
-		MaxTokens:   action.MaxTokens,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp ChatCompletionResponse
-	err = json.Unmarshal(respBody, &chatResp)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("no response from API")
-	}
-
-	return chatResp.Choices[0].Message.Content, nil
-}
-
-func processWithOpenAIChunked(transcript string, action *PostAction, apiKey string) (string, error) {
-	// Get model-specific context limit
-	maxTokens := getModelContextLimit(action.Model)
-
-	// Estimate transcript + prompt tokens
-	promptTokens := len(action.Prompt) / avgCharsPerToken
-	transcriptTokens := len(transcript) / avgCharsPerToken
-	estimatedTokens := promptTokens + transcriptTokens
-
-	// If transcript fits in context, process normally
-	if estimatedTokens <= maxTokens {
-		return processWithOpenAI(transcript, action, apiKey)
-	}
-
-	// Transcript is too long, need to chunk
-	fmt.Printf("  ⚠ Transcript is large (~%d tokens), processing in chunks...\n", estimatedTokens)
-
-	// Calculate chunk size (leaving room for prompt and overlap)
-	maxTranscriptTokensPerChunk := maxTokens - promptTokens - 500 // 500 token buffer
-	maxCharsPerChunk := maxTranscriptTokensPerChunk * avgCharsPerToken
-
-	// Split transcript into sentences for better chunking
-	sentences := splitIntoSentences(transcript)
-
-	var chunks []string
-	var currentChunk strings.Builder
-	currentSize := 0
-
-	for i, sentence := range sentences {
-		sentenceLen := len(sentence)
-
-		// If adding this sentence exceeds chunk size, start new chunk
-		if currentSize > 0 && currentSize+sentenceLen > maxCharsPerChunk {
-			chunks = append(chunks, currentChunk.String())
-			currentChunk.Reset()
-
-			// Add overlap from previous chunk
-			overlapStart := max(0, i-3) // Include last few sentences for context
-			for j := overlapStart; j < i; j++ {
-				currentChunk.WriteString(sentences[j])
-				currentChunk.WriteString(" ")
-			}
-			currentSize = currentChunk.Len()
-		}
-
-		currentChunk.WriteString(sentence)
-		currentChunk.WriteString(" ")
-		currentSize += sentenceLen + 1
-	}
-
-	// Add final chunk
-	if currentChunk.Len() > 0 {
-		chunks = append(chunks, currentChunk.String())
-	}
-
-	fmt.Printf("  → Split into %d chunk(s) for processing\n", len(chunks))
-
-	// Process each chunk
-	var results []string
-	for i, chunk := range chunks {
-		fmt.Printf("  → Processing chunk %d/%d...\n", i+1, len(chunks))
-
-		result, err := processWithOpenAI(chunk, action, apiKey)
+func main() {
+	// Preprocess arguments
+	if len(os.Args) > 1 {
+		normalized, err := normalizeArgs(os.Args[1:])
 		if err != nil {
-			return "", fmt.Errorf("failed to process chunk %d: %w", i+1, err)
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
 		}
-		results = append(results, result)
+		os.Args = append([]string{os.Args[0]}, normalized...)
 	}
 
-	// Intelligently merge chunk results using AI
-	fmt.Printf("  ✓ All chunks processed, merging results intelligently\n")
-	merged, err := mergeChunkResults(results, action, apiKey)
-	if err != nil {
-		fmt.Printf("  ⚠ Merge failed, falling back to simple concatenation: %v\n", err)
-		return strings.Join(results, "\n\n---\n\n"), nil
-	}
-	return merged, nil
-}
+	// Define command-line flags
+	apiKey := flag.String("k", "XXXX", "OpenAI API key")
+	geminiKey := flag.String("gemini-key", "", "Gemini API key")
+	provider := flag.String("provider", "", "AI provider: openai or gemini (default: from config or openai)")
+	noFallback := flag.Bool("no-fallback", false, "Disable automatic fallback to alternate provider on failure")
+	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
+	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
+	postAction := flag.String("action", "", "Post-processing action ID(s), comma-separated (use -list-actions to see options)")
+	autoSelect := flag.Bool("auto", false, "Automatically select best post-processing actions based on transcript content")
+	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
+	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
+	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
+	setGeminiKey := flag.String("set-gemini-key", "", "Store Gemini API key in config file")
+	setProviderFlag := flag.String("set-provider", "", "Set default AI provider in config file (openai or gemini)")
+	var transcriptFiles multiStringFlag
+	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
 
-func mergeChunkResults(chunkResults []string, action *PostAction, apiKey string) (string, error) {
-	// If only 1 chunk, no merge needed
-	if len(chunkResults) == 1 {
-		return chunkResults[0], nil
-	}
-
-	// Combine all chunk results into a single text for merging
-	combinedChunks := strings.Join(chunkResults, "\n\n--- CHUNK BOUNDARY ---\n\n")
-
-	// Estimate tokens for merge prompt
-	estimatedTokens := len(combinedChunks) / avgCharsPerToken
-	maxTokens := getModelContextLimit(action.Model)
-
-	// If merge would exceed limits, do hierarchical merge
-	if estimatedTokens > maxTokens/2 { // Leave room for prompt + response
-		fmt.Printf("  → Chunk results too large, using hierarchical merge\n")
-		return hierarchicalMerge(chunkResults, action, apiKey)
-	}
-
-	// Create a merge prompt that understands the original action's intent
-	mergePrompt := fmt.Sprintf(`You are merging multiple partial results from the same analysis that was split into chunks.
-
-Original task: %s
-
-Below are %d separate results from processing different parts of a transcript. Your job is to merge them into a single, coherent, comprehensive result that:
-1. Removes duplicate information
-2. Consolidates related points
-3. Maintains the structure and format requested in the original task
-4. Preserves all unique insights and details
-5. Creates a unified narrative without chunk boundaries
-
-Chunk results to merge:
-%s
-
-Provide the final merged result:`, action.Name, len(chunkResults), combinedChunks)
-
-	// Use same model as the action for consistency
-	reqBody := ChatCompletionRequest{
-		Model: action.Model,
-		Messages: []Message{
-			{
-				Role:    "user",
-				Content: mergePrompt,
-			},
-		},
-		Temperature: 0.3, // Lower temperature for consistency
-		MaxTokens:   action.MaxTokens,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal merge request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create merge request: %w", err)
+	// Custom usage message
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI or Gemini\n\n")
+		fmt.Fprintf(os.Stderr, "USAGE:\n")
+		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n\n")
+		fmt.Fprintf(os.Stderr, "OPTIONS:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nEXAMPLES:\n")
+		fmt.Fprintf(os.Stderr, "  # Basic transcription (OpenAI)\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Transcription with Gemini\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -gemini-key YOUR_KEY -provider gemini meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Transcribe with meeting summary\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Custom output file\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -o transcript.txt audio.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # List all available post-processing actions\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -list-actions\n\n")
+		fmt.Fprintf(os.Stderr, "  # Process existing transcript file\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting.txt -action openai-meeting-summary\n\n")
+		fmt.Fprintf(os.Stderr, "  # Automatically select best actions\n")
+		fmt.Fprintf(os.Stderr, "  goscribe --auto meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Store API keys in config file\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -set-key YOUR_OPENAI_KEY\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -set-gemini-key YOUR_GEMINI_KEY\n\n")
+		fmt.Fprintf(os.Stderr, "  # Set default provider\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -set-provider gemini\n\n")
+		fmt.Fprintf(os.Stderr, "  # Reset config to defaults\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -init\n\n")
+		fmt.Fprintf(os.Stderr, "OUTPUT FILES:\n")
+		fmt.Fprintf(os.Stderr, "  <filename>-transcript.txt              Raw transcription\n")
+		fmt.Fprintf(os.Stderr, "  <filename>-<action-id>.txt             Post-processed output\n\n")
+		fmt.Fprintf(os.Stderr, "CONFIGURATION:\n")
+		fmt.Fprintf(os.Stderr, "  Config file: ~/.goscribe/config.yml\n")
+		fmt.Fprintf(os.Stderr, "  - provider: default AI provider (openai or gemini)\n")
+		fmt.Fprintf(os.Stderr, "  - openai_api_key: your OpenAI API key\n")
+		fmt.Fprintf(os.Stderr, "  - gemini_api_key: your Gemini API key\n")
+		fmt.Fprintf(os.Stderr, "  - gemini_model: default Gemini model\n\n")
+		fmt.Fprintf(os.Stderr, "PROVIDERS:\n")
+		fmt.Fprintf(os.Stderr, "  openai    OpenAI Whisper (transcription) + GPT (processing)\n")
+		fmt.Fprintf(os.Stderr, "  gemini    Google Gemini (transcription + processing)\n\n")
+		fmt.Fprintf(os.Stderr, "FALLBACK:\n")
+		fmt.Fprintf(os.Stderr, "  When both API keys are configured, goscribe automatically\n")
+		fmt.Fprintf(os.Stderr, "  falls back to the other provider if one fails.\n")
+		fmt.Fprintf(os.Stderr, "  Use -no-fallback to disable this behavior.\n\n")
+		fmt.Fprintf(os.Stderr, "For more information, visit: https://github.com/fabienpiette/goscribe\n")
 	}
 
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	flag.Parse()
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send merge request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read merge response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("merge API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp ChatCompletionResponse
-	err = json.Unmarshal(respBody, &chatResp)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse merge response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("no merge response from API")
-	}
-
-	return chatResp.Choices[0].Message.Content, nil
-}
-
-func hierarchicalMerge(chunkResults []string, action *PostAction, apiKey string) (string, error) {
-	// Merge in pairs until we have a single result
-	currentLevel := chunkResults
-
-	for len(currentLevel) > 1 {
-		var nextLevel []string
-		fmt.Printf("  → Hierarchical merge: processing %d results\n", len(currentLevel))
-
-		// Process in pairs
-		for i := 0; i < len(currentLevel); i += 2 {
-			if i+1 < len(currentLevel) {
-				// Merge pair
-				pair := []string{currentLevel[i], currentLevel[i+1]}
-				merged, err := mergeChunkResults(pair, action, apiKey)
-				if err != nil {
-					return "", fmt.Errorf("hierarchical merge failed at level: %w", err)
-				}
-				nextLevel = append(nextLevel, merged)
-			} else {
-				// Odd one out, pass through
-				nextLevel = append(nextLevel, currentLevel[i])
-			}
+	// Handle one-shot config commands
+	if *setKey != "" {
+		if err := storeAPIKey(*setKey); err != nil {
+			fmt.Printf("Error storing API key: %v\n", err)
+			os.Exit(1)
 		}
-
-		currentLevel = nextLevel
+		return
 	}
-
-	return currentLevel[0], nil
-}
-
-func selectBestActions(transcript string, apiKey string) ([]string, error) {
-	// Build list of available actions for AI to choose from
-	var actionDescriptions []string
-	for _, action := range postActions {
-		actionDescriptions = append(actionDescriptions, fmt.Sprintf("- %s: %s", action.ID, action.Description))
-	}
-
-	prompt := fmt.Sprintf(`Analyze the following transcript and select the 2-3 most appropriate post-processing actions from the list below.
-
-Available actions:
-%s
-
-Transcript preview (first 2000 chars):
-%s
-
-Based on the content, which actions would provide the most value? Reply ONLY with a comma-separated list of action IDs (e.g., "openai-meeting-summary,openai-action-items"). Do not include any explanation.`,
-		strings.Join(actionDescriptions, "\n"),
-		truncateString(transcript, 2000))
-
-	reqBody := ChatCompletionRequest{
-		Model: "gpt-3.5-turbo",
-		Messages: []Message{
-			{
-				Role:    "user",
-				Content: prompt,
-			},
-		},
-		Temperature: 0.3,
-		MaxTokens:   100,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp ChatCompletionResponse
-	err = json.Unmarshal(respBody, &chatResp)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("no response from API")
-	}
-
-	// Parse the response (comma-separated action IDs)
-	response := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	selectedIDs := strings.Split(response, ",")
-
-	// Trim and validate each ID
-	var validIDs []string
-	for _, id := range selectedIDs {
-		id = strings.TrimSpace(id)
-		// Verify the action exists
-		if findAction(id) != nil {
-			validIDs = append(validIDs, id)
+	if *setGeminiKey != "" {
+		if err := storeGeminiAPIKey(*setGeminiKey); err != nil {
+			fmt.Printf("Error storing Gemini API key: %v\n", err)
+			os.Exit(1)
 		}
+		return
 	}
-
-	if len(validIDs) == 0 {
-		return nil, fmt.Errorf("no valid actions selected by AI")
-	}
-
-	return validIDs, nil
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-func splitIntoSentences(text string) []string {
-	// Simple sentence splitter (splits on . ! ? followed by space)
-	var sentences []string
-	var current strings.Builder
-
-	runes := []rune(text)
-	for i := 0; i < len(runes); i++ {
-		current.WriteRune(runes[i])
-
-		// Check for sentence endings
-		if runes[i] == '.' || runes[i] == '!' || runes[i] == '?' {
-			// Check if followed by space or end of text
-			if i+1 >= len(runes) || runes[i+1] == ' ' || runes[i+1] == '\n' {
-				sentence := strings.TrimSpace(current.String())
-				if len(sentence) > 0 {
-					sentences = append(sentences, sentence)
-				}
-				current.Reset()
-			}
+	if *setProviderFlag != "" {
+		if err := setDefaultProvider(*setProviderFlag); err != nil {
+			fmt.Printf("Error setting provider: %v\n", err)
+			os.Exit(1)
 		}
+		return
 	}
-
-	// Add any remaining text
-	if current.Len() > 0 {
-		sentence := strings.TrimSpace(current.String())
-		if len(sentence) > 0 {
-			sentences = append(sentences, sentence)
+	if *initConfig {
+		if err := resetConfig(); err != nil {
+			fmt.Printf("Error resetting config: %v\n", err)
+			os.Exit(1)
 		}
+		return
 	}
 
-	return sentences
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func transcribeAudio(audioPath, apiKey string) (string, error) {
-	// Open the audio file
-	file, err := os.Open(audioPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open audio file: %w", err)
-	}
-	defer file.Close()
-
-	// Create a multipart form
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	// Add the file to the form
-	part, err := writer.CreateFormFile("file", filepath.Base(audioPath))
-	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %w", err)
-	}
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return "", fmt.Errorf("failed to copy file: %w", err)
+	// Run core logic
+	opts := runOptions{
+		apiKey:          *apiKey,
+		geminiKey:       *geminiKey,
+		provider:        *provider,
+		enableFallback:  !*noFallback,
+		output:          *output,
+		listActions:     *listActions,
+		postAction:      *postAction,
+		autoSelect:      *autoSelect,
+		configFile:      *configFile,
+		transcriptFiles: transcriptFiles,
+		args:            flag.Args(),
 	}
 
-	// Add the model field
-	err = writer.WriteField("model", "whisper-1")
-	if err != nil {
-		return "", fmt.Errorf("failed to write model field: %w", err)
+	if err := run(opts); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
 	}
-
-	// Close the writer
-	err = writer.Close()
-	if err != nil {
-		return "", fmt.Errorf("failed to close writer: %w", err)
-	}
-
-	// Create the HTTP request
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", body)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read the response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Check for errors
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	// Parse the response
-	var transcriptionResp TranscriptionResponse
-	err = json.Unmarshal(respBody, &transcriptionResp)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return transcriptionResp.Text, nil
-}
-
-func getFileSize(filePath string) (int64, error) {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return 0, err
-	}
-	return info.Size(), nil
-}
-
-func splitAudioFile(audioPath string, chunkDurationSeconds int) ([]string, error) {
-	// Create temporary directory for chunks
-	tmpDir, err := os.MkdirTemp("", "goscribe-chunks-*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp directory: %w", err)
-	}
-
-	baseName := filepath.Base(audioPath)
-	ext := filepath.Ext(baseName)
-	nameWithoutExt := strings.TrimSuffix(baseName, ext)
-
-	outputPattern := filepath.Join(tmpDir, nameWithoutExt+"_chunk_%03d"+ext)
-
-	// Use ffmpeg to split the file
-	cmd := fmt.Sprintf("ffmpeg -i %s -f segment -segment_time %d -c copy -reset_timestamps 1 %s",
-		shellescape(audioPath),
-		chunkDurationSeconds,
-		shellescape(outputPattern))
-
-	output, err := exec.Command("bash", "-c", cmd).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("ffmpeg failed: %w\nOutput: %s", err, string(output))
-	}
-
-	// Find all generated chunk files
-	chunks, err := filepath.Glob(filepath.Join(tmpDir, nameWithoutExt+"_chunk_*"+ext))
-	if err != nil {
-		return nil, fmt.Errorf("failed to find chunk files: %w", err)
-	}
-
-	if len(chunks) == 0 {
-		return nil, fmt.Errorf("no chunks were created")
-	}
-
-	return chunks, nil
-}
-
-func shellescape(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
-
-func transcribeAudioWithSplitting(audioPath, apiKey string) (string, error) {
-	// Check file size
-	fileSize, err := getFileSize(audioPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to get file size: %w", err)
-	}
-
-	fileSizeMB := float64(fileSize) / (1024 * 1024)
-
-	// If file is under the limit, transcribe normally
-	if fileSize <= maxFileSizeBytes {
-		return transcribeAudio(audioPath, apiKey)
-	}
-
-	// File is too large, need to split
-	fmt.Printf("⚠ File size (%.1f MB) exceeds OpenAI limit (25 MB)\n", fileSizeMB)
-	fmt.Println("Splitting audio file into chunks...")
-
-	// Split into 10-minute chunks (600 seconds)
-	// This ensures each chunk stays well under 25MB for most audio formats
-	chunkDurationSeconds := 600
-
-	chunks, err := splitAudioFile(audioPath, chunkDurationSeconds)
-	if err != nil {
-		return "", fmt.Errorf("failed to split audio: %w", err)
-	}
-	defer func() {
-		// Clean up chunks
-		for _, chunk := range chunks {
-			os.Remove(chunk)
-		}
-		os.Remove(filepath.Dir(chunks[0]))
-	}()
-
-	fmt.Printf("✓ Created %d chunks\n", len(chunks))
-
-	// Transcribe each chunk
-	var allTranscripts []string
-	for i, chunk := range chunks {
-		fmt.Printf("\n[%d/%d] Transcribing chunk %s...\n", i+1, len(chunks), filepath.Base(chunk))
-
-		// Check chunk size
-		chunkSize, _ := getFileSize(chunk)
-		if chunkSize > maxFileSizeBytes {
-			return "", fmt.Errorf("chunk %d is still too large (%.1f MB) - try a shorter chunk duration",
-				i+1, float64(chunkSize)/(1024*1024))
-		}
-
-		transcript, err := transcribeAudio(chunk, apiKey)
-		if err != nil {
-			return "", fmt.Errorf("failed to transcribe chunk %d: %w", i+1, err)
-		}
-
-		allTranscripts = append(allTranscripts, transcript)
-		fmt.Printf("✓ Chunk %d/%d complete\n", i+1, len(chunks))
-	}
-
-	// Merge all transcripts
-	fmt.Println("\n✓ All chunks transcribed successfully")
-	return strings.Join(allTranscripts, " "), nil
 }

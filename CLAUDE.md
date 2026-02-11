@@ -1,2 +1,0 @@
-- For commit use only one line and never reference Claude
-- before a commit and push always check if the README and goscribe -h is up to date
