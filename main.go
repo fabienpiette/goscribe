@@ -160,45 +160,307 @@ func getModelContextLimit(model string) int {
 	}
 }
 
-func main() {
-	// Preprocess arguments to allow multiple values after -transcript without repeating the flag
-	if len(os.Args) > 1 {
-		rawArgs := os.Args[1:]
-		normalized := make([]string, 0, len(rawArgs))
+// normalizeArgs preprocesses CLI arguments to allow multiple values after -transcript
+// without repeating the flag. Returns normalized args and an error if -transcript has no value.
+func normalizeArgs(rawArgs []string) ([]string, error) {
+	normalized := make([]string, 0, len(rawArgs))
 
-		for i := 0; i < len(rawArgs); i++ {
-			arg := rawArgs[i]
+	for i := 0; i < len(rawArgs); i++ {
+		arg := rawArgs[i]
 
-			if arg == "-transcript" {
-				normalized = append(normalized, arg)
-				i++
-				if i >= len(rawArgs) {
-					fmt.Println("Error: -transcript flag requires at least one value")
-					os.Exit(1)
-				}
-				values := []string{rawArgs[i]}
-				for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
-					i++
-					values = append(values, rawArgs[i])
-				}
-				normalized = append(normalized, strings.Join(values, ","))
-				continue
-			}
-
-			if strings.HasPrefix(arg, "-transcript=") {
-				value := strings.TrimPrefix(arg, "-transcript=")
-				values := []string{value}
-				for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
-					i++
-					values = append(values, rawArgs[i])
-				}
-				normalized = append(normalized, "-transcript="+strings.Join(values, ","))
-				continue
-			}
-
+		if arg == "-transcript" {
 			normalized = append(normalized, arg)
+			i++
+			if i >= len(rawArgs) {
+				return nil, fmt.Errorf("-transcript flag requires at least one value")
+			}
+			values := []string{rawArgs[i]}
+			for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
+				i++
+				values = append(values, rawArgs[i])
+			}
+			normalized = append(normalized, strings.Join(values, ","))
+			continue
 		}
 
+		if strings.HasPrefix(arg, "-transcript=") {
+			value := strings.TrimPrefix(arg, "-transcript=")
+			values := []string{value}
+			for i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
+				i++
+				values = append(values, rawArgs[i])
+			}
+			normalized = append(normalized, "-transcript="+strings.Join(values, ","))
+			continue
+		}
+
+		normalized = append(normalized, arg)
+	}
+
+	return normalized, nil
+}
+
+// runOptions holds all resolved CLI options for the run function
+type runOptions struct {
+	apiKey          string
+	geminiKey       string
+	provider        string
+	enableFallback  bool
+	output          string
+	listActions     bool
+	postAction      string
+	autoSelect      bool
+	configFile      string
+	transcriptFiles []string
+	args            []string // remaining positional args
+}
+
+// run contains the core application logic, separated from main for testability
+func run(opts runOptions) error {
+	// Determine which config file to use
+	configPath := opts.configFile
+	if configPath == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("getting home directory: %w", err)
+		}
+		configPath = filepath.Join(homeDir, ".goscribe", "config.yml")
+
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			fmt.Println("Config file not found. Creating default config...")
+			if err := createDefaultConfig(); err != nil {
+				return fmt.Errorf("creating default config: %w", err)
+			}
+		}
+	}
+
+	config, err := loadConfigActions(configPath)
+	if err != nil {
+		return fmt.Errorf("loading config file: %w", err)
+	}
+
+	// Resolve API keys from config
+	apiKey := opts.apiKey
+	if apiKey == "XXXX" && config.OpenAIAPIKey != "" {
+		apiKey = config.OpenAIAPIKey
+		fmt.Println("Using API key from config file")
+	}
+
+	geminiKey := opts.geminiKey
+	if geminiKey == "" && config.GeminiAPIKey != "" {
+		geminiKey = config.GeminiAPIKey
+	}
+
+	// Determine active provider: flag > config > default
+	activeProvider := "openai"
+	if opts.provider != "" {
+		activeProvider = opts.provider
+	} else if config.Provider != "" {
+		activeProvider = config.Provider
+	}
+
+	geminiModel := config.GeminiModel
+	if geminiModel == "" {
+		geminiModel = "gemini-2.0-flash"
+	}
+
+	enableFallback := opts.enableFallback
+
+	// List actions and exit if requested
+	if opts.listActions {
+		fmt.Println("Available post-processing actions:")
+		fmt.Println()
+		for _, action := range postActions {
+			fmt.Printf("ID: %s\n", action.ID)
+			fmt.Printf("Name: %s\n", action.Name)
+			fmt.Printf("Description: %s\n", action.Description)
+			fmt.Printf("Model: %s\n", action.Model)
+			fmt.Println(strings.Repeat("-", 70))
+		}
+		return nil
+	}
+
+	var transcription string
+	var audioPath string
+	var transcriptFilename string
+
+	// Handle transcript file mode
+	if len(opts.transcriptFiles) > 0 {
+		if opts.postAction == "" && !opts.autoSelect {
+			return fmt.Errorf("-action or --auto is required when using -transcript")
+		}
+
+		var combined strings.Builder
+		for idx, file := range opts.transcriptFiles {
+			if _, err := os.Stat(file); os.IsNotExist(err) {
+				return fmt.Errorf("transcript file '%s' not found", file)
+			}
+
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return fmt.Errorf("reading transcript file '%s': %w", file, err)
+			}
+
+			content := string(data)
+			if len(opts.transcriptFiles) == 1 {
+				transcription = content
+			} else {
+				fmt.Fprintf(&combined, "Transcript %d (%s):\n\n%s", idx+1, file, content)
+				if idx < len(opts.transcriptFiles)-1 {
+					combined.WriteString("\n\n" + strings.Repeat("-", 70) + "\n\n")
+				}
+			}
+
+			fmt.Printf("Loaded transcript from %s\n", file)
+		}
+
+		if len(opts.transcriptFiles) > 1 {
+			transcription = combined.String()
+		}
+	} else {
+		if len(opts.args) < 1 {
+			return fmt.Errorf("audio file path is required")
+		}
+		audioPath = opts.args[0]
+
+		if _, err := os.Stat(audioPath); os.IsNotExist(err) {
+			return fmt.Errorf("audio file '%s' not found", audioPath)
+		}
+
+		if opts.output == "" {
+			ext := filepath.Ext(audioPath)
+			baseName := strings.TrimSuffix(audioPath, ext)
+			transcriptFilename = baseName + "-transcript.txt"
+		} else {
+			transcriptFilename = opts.output
+		}
+
+		fmt.Printf("Transcribing audio with %s...\n", activeProvider)
+		transcription, err = transcribeAudioWithProvider(audioPath, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
+		if err != nil {
+			return fmt.Errorf("transcription failed: %w", err)
+		}
+
+		err = os.WriteFile(transcriptFilename, []byte(transcription), 0644)
+		if err != nil {
+			return fmt.Errorf("writing transcript file: %w", err)
+		}
+		fmt.Printf("Raw transcript saved to %s\n", transcriptFilename)
+	}
+
+	// Resolve action IDs
+	var processedFiles []string
+	var actionIDs []string
+
+	if opts.autoSelect {
+		fmt.Printf("\n🤖 Analyzing transcript with %s to select best actions...\n", activeProvider)
+		selectedActions, err := selectBestActionsWithProvider(transcription, activeProvider, apiKey, geminiKey, geminiModel)
+		if err != nil {
+			fmt.Printf("⚠ Warning: Auto-selection failed: %v\n", err)
+			fmt.Println("Continuing without post-processing.")
+		} else {
+			actionIDs = selectedActions
+			fmt.Printf("✓ Selected %d action(s): %s\n", len(actionIDs), strings.Join(actionIDs, ", "))
+		}
+	} else if opts.postAction != "" {
+		actionIDs = strings.Split(opts.postAction, ",")
+	}
+
+	for i, id := range actionIDs {
+		actionIDs[i] = strings.TrimSpace(id)
+	}
+
+	// Process selected actions
+	if len(actionIDs) > 0 {
+		fmt.Printf("\nProcessing %d action(s)...\n", len(actionIDs))
+
+		for idx, actionID := range actionIDs {
+			if actionID == "" {
+				continue
+			}
+
+			action := findAction(actionID)
+			if action == nil {
+				return fmt.Errorf("unknown action '%s'. Use -list-actions to see available options", actionID)
+			}
+
+			fmt.Printf("\n[%d/%d] Applying post-processing with %s: %s...\n", idx+1, len(actionIDs), activeProvider, action.Name)
+			processed, err := processWithProviderChunked(transcription, action, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
+			if err != nil {
+				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
+				if len(opts.transcriptFiles) == 0 && len(actionIDs) == 1 {
+					fmt.Println("Only raw transcript was saved.")
+				}
+			} else {
+				var processedFilename string
+				if len(opts.transcriptFiles) > 0 {
+					first := opts.transcriptFiles[0]
+					ext := filepath.Ext(first)
+					baseName := strings.TrimSuffix(first, ext)
+					if len(opts.transcriptFiles) == 1 {
+						processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
+					} else {
+						processedFilename = fmt.Sprintf("%s+%d-%s.txt", baseName, len(opts.transcriptFiles)-1, action.ID)
+					}
+				} else {
+					ext := filepath.Ext(audioPath)
+					baseName := strings.TrimSuffix(audioPath, ext)
+					processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
+				}
+
+				err = os.WriteFile(processedFilename, []byte(processed), 0644)
+				if err != nil {
+					fmt.Printf("⚠ Error writing processed file: %v\n", err)
+				} else {
+					fmt.Printf("✓ Post-processed output saved to %s\n", processedFilename)
+					processedFiles = append(processedFiles, processedFilename)
+				}
+			}
+		}
+
+		if len(processedFiles) > 0 {
+			fmt.Printf("\n✓ Post-processing completed! Generated %d file(s)\n", len(processedFiles))
+		}
+	}
+
+	// Print confirmation summary
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("Summary:\n")
+	if len(opts.transcriptFiles) > 0 {
+		if len(opts.transcriptFiles) == 1 {
+			fmt.Printf("  Transcript: %s\n", opts.transcriptFiles[0])
+		} else {
+			fmt.Printf("  Transcripts (%d):\n", len(opts.transcriptFiles))
+			for _, tf := range opts.transcriptFiles {
+				fmt.Printf("    - %s\n", tf)
+			}
+		}
+	} else {
+		fmt.Printf("  Audio file: %s\n", audioPath)
+		fmt.Printf("  Transcript: %s\n", transcriptFilename)
+	}
+	if len(processedFiles) > 0 {
+		fmt.Printf("  Processed files (%d):\n", len(processedFiles))
+		for _, pf := range processedFiles {
+			fmt.Printf("    - %s\n", pf)
+		}
+	}
+	if apiKey != "XXXX" {
+		fmt.Printf("  API key:    %s\n", apiKey)
+	}
+	fmt.Println(strings.Repeat("=", 70))
+
+	return nil
+}
+
+func main() {
+	// Preprocess arguments
+	if len(os.Args) > 1 {
+		normalized, err := normalizeArgs(os.Args[1:])
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
 		os.Args = append([]string{os.Args[0]}, normalized...)
 	}
 
@@ -215,7 +477,7 @@ func main() {
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
 	setGeminiKey := flag.String("set-gemini-key", "", "Store Gemini API key in config file")
-	setProvider := flag.String("set-provider", "", "Set default AI provider in config file (openai or gemini)")
+	setProviderFlag := flag.String("set-provider", "", "Set default AI provider in config file (openai or gemini)")
 	var transcriptFiles multiStringFlag
 	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
 
@@ -269,315 +531,55 @@ func main() {
 
 	flag.Parse()
 
-	// Store API key if requested
+	// Handle one-shot config commands
 	if *setKey != "" {
-		err := storeAPIKey(*setKey)
-		if err != nil {
+		if err := storeAPIKey(*setKey); err != nil {
 			fmt.Printf("Error storing API key: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
-
-	// Store Gemini API key if requested
 	if *setGeminiKey != "" {
-		err := storeGeminiAPIKey(*setGeminiKey)
-		if err != nil {
+		if err := storeGeminiAPIKey(*setGeminiKey); err != nil {
 			fmt.Printf("Error storing Gemini API key: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
-
-	// Set default provider if requested
-	if *setProvider != "" {
-		err := setDefaultProvider(*setProvider)
-		if err != nil {
+	if *setProviderFlag != "" {
+		if err := setDefaultProvider(*setProviderFlag); err != nil {
 			fmt.Printf("Error setting provider: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
-
-	// Reset config if requested
 	if *initConfig {
-		err := resetConfig()
-		if err != nil {
+		if err := resetConfig(); err != nil {
 			fmt.Printf("Error resetting config: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	// Determine which config file to use
-	configPath := *configFile
-	if configPath == "" {
-		// Get default config location
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Printf("Error getting home directory: %v\n", err)
-			os.Exit(1)
-		}
-		configPath = filepath.Join(homeDir, ".goscribe", "config.yml")
-
-		// Create default config if it doesn't exist
-		if _, err := os.Stat(configPath); os.IsNotExist(err) {
-			fmt.Println("Config file not found. Creating default config...")
-			if err := createDefaultConfig(); err != nil {
-				fmt.Printf("Error creating default config: %v\n", err)
-				os.Exit(1)
-			}
-		}
+	// Run core logic
+	opts := runOptions{
+		apiKey:          *apiKey,
+		geminiKey:       *geminiKey,
+		provider:        *provider,
+		enableFallback:  !*noFallback,
+		output:          *output,
+		listActions:     *listActions,
+		postAction:      *postAction,
+		autoSelect:      *autoSelect,
+		configFile:      *configFile,
+		transcriptFiles: transcriptFiles,
+		args:            flag.Args(),
 	}
 
-	// Always load config file (required for actions)
-	config, err := loadConfigActions(configPath)
-	if err != nil {
-		fmt.Printf("Error loading config file: %v\n", err)
+	if err := run(opts); err != nil {
+		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Use config OpenAI API key if command-line key is default
-	if *apiKey == "XXXX" && config.OpenAIAPIKey != "" {
-		*apiKey = config.OpenAIAPIKey
-		fmt.Println("Using API key from config file")
-	}
-
-	// Use config Gemini API key if not provided via flag
-	if *geminiKey == "" && config.GeminiAPIKey != "" {
-		*geminiKey = config.GeminiAPIKey
-	}
-
-	// Determine active provider: flag > config > default
-	activeProvider := "openai"
-	if *provider != "" {
-		activeProvider = *provider
-	} else if config.Provider != "" {
-		activeProvider = config.Provider
-	}
-
-	// Get Gemini model from config
-	geminiModel := config.GeminiModel
-	if geminiModel == "" {
-		geminiModel = "gemini-2.0-flash"
-	}
-
-	// Determine if fallback is enabled
-	enableFallback := !*noFallback
-
-	// List actions and exit if requested
-	if *listActions {
-		fmt.Println("Available post-processing actions:")
-		fmt.Println()
-		for _, action := range postActions {
-			fmt.Printf("ID: %s\n", action.ID)
-			fmt.Printf("Name: %s\n", action.Name)
-			fmt.Printf("Description: %s\n", action.Description)
-			fmt.Printf("Model: %s\n", action.Model)
-			fmt.Println(strings.Repeat("-", 70))
-		}
-		return
-	}
-
-	var transcription string
-	var audioPath string
-	var transcriptFilename string
-
-	// Handle transcript file mode
-	if len(transcriptFiles) > 0 {
-		// Process existing transcript file
-		if *postAction == "" && !*autoSelect {
-			fmt.Println("Error: -action or --auto is required when using -transcript")
-			os.Exit(1)
-		}
-
-		var combined strings.Builder
-		for idx, file := range transcriptFiles {
-			// Check if transcript file exists
-			if _, err := os.Stat(file); os.IsNotExist(err) {
-				fmt.Printf("Error: Transcript file '%s' not found.\n", file)
-				os.Exit(1)
-			}
-
-			// Read the transcript file
-			data, err := os.ReadFile(file)
-			if err != nil {
-				fmt.Printf("Error reading transcript file '%s': %v\n", file, err)
-				os.Exit(1)
-			}
-
-			content := string(data)
-			if len(transcriptFiles) == 1 {
-				transcription = content
-			} else {
-				fmt.Fprintf(&combined, "Transcript %d (%s):\n\n%s", idx+1, file, content)
-				if idx < len(transcriptFiles)-1 {
-					combined.WriteString("\n\n" + strings.Repeat("-", 70) + "\n\n")
-				}
-			}
-
-			fmt.Printf("Loaded transcript from %s\n", file)
-		}
-
-		if len(transcriptFiles) > 1 {
-			transcription = combined.String()
-		}
-	} else {
-		// Standard audio transcription mode
-		// Get the audio file path from remaining arguments
-		if flag.NArg() < 1 {
-			fmt.Println("Error: Audio file path is required")
-			fmt.Println("Usage: goscribe [options] <audio_path>")
-			fmt.Println("   or: goscribe -transcript <transcript_file> -action <action_id>")
-			flag.PrintDefaults()
-			os.Exit(1)
-		}
-		audioPath = flag.Arg(0)
-
-		// Check if audio file exists
-		if _, err := os.Stat(audioPath); os.IsNotExist(err) {
-			fmt.Printf("Error: Audio file '%s' not found.\n", audioPath)
-			os.Exit(1)
-		}
-
-		// Generate output filename if not provided
-		outputFilename := *output
-
-		if outputFilename == "" {
-			ext := filepath.Ext(audioPath)
-			baseName := strings.TrimSuffix(audioPath, ext)
-			transcriptFilename = baseName + "-transcript.txt"
-		} else {
-			// If user provides custom output, use it for transcript
-			transcriptFilename = outputFilename
-		}
-
-		// Transcribe the audio file (with automatic splitting if needed)
-		fmt.Printf("Transcribing audio with %s...\n", activeProvider)
-		var err error
-		transcription, err = transcribeAudioWithProvider(audioPath, activeProvider, *apiKey, *geminiKey, geminiModel, enableFallback)
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Always save the raw transcript
-		err = os.WriteFile(transcriptFilename, []byte(transcription), 0644)
-		if err != nil {
-			fmt.Printf("Error writing transcript file: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Raw transcript saved to %s\n", transcriptFilename)
-	}
-
-	// Apply post-processing action(s) if specified
-	var processedFiles []string
-	var actionIDs []string
-
-	// Handle automatic action selection
-	if *autoSelect {
-		fmt.Printf("\n🤖 Analyzing transcript with %s to select best actions...\n", activeProvider)
-		selectedActions, err := selectBestActionsWithProvider(transcription, activeProvider, *apiKey, *geminiKey, geminiModel)
-		if err != nil {
-			fmt.Printf("⚠ Warning: Auto-selection failed: %v\n", err)
-			fmt.Println("Continuing without post-processing.")
-		} else {
-			actionIDs = selectedActions
-			fmt.Printf("✓ Selected %d action(s): %s\n", len(actionIDs), strings.Join(actionIDs, ", "))
-		}
-	} else if *postAction != "" {
-		// Split comma-separated action IDs
-		actionIDs = strings.Split(*postAction, ",")
-	}
-
-	// Trim whitespace from action IDs
-	for i, id := range actionIDs {
-		actionIDs[i] = strings.TrimSpace(id)
-	}
-
-	// Process selected actions
-	if len(actionIDs) > 0 {
-		fmt.Printf("\nProcessing %d action(s)...\n", len(actionIDs))
-
-		for idx, actionID := range actionIDs {
-			if actionID == "" {
-				continue
-			}
-
-			action := findAction(actionID)
-			if action == nil {
-				fmt.Printf("Error: Unknown action '%s'. Use -list-actions to see available options.\n", actionID)
-				os.Exit(1)
-			}
-
-			fmt.Printf("\n[%d/%d] Applying post-processing with %s: %s...\n", idx+1, len(actionIDs), activeProvider, action.Name)
-			processed, err := processWithProviderChunked(transcription, action, activeProvider, *apiKey, *geminiKey, geminiModel, enableFallback)
-			if err != nil {
-				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
-				if len(transcriptFiles) == 0 && len(actionIDs) == 1 {
-					fmt.Println("Only raw transcript was saved.")
-				}
-			} else {
-				// Generate filename for post-processed output
-				var processedFilename string
-				if len(transcriptFiles) > 0 {
-					// For transcript mode, use the transcript filename(s) as base
-					first := transcriptFiles[0]
-					ext := filepath.Ext(first)
-					baseName := strings.TrimSuffix(first, ext)
-					if len(transcriptFiles) == 1 {
-						processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
-					} else {
-						processedFilename = fmt.Sprintf("%s+%d-%s.txt", baseName, len(transcriptFiles)-1, action.ID)
-					}
-				} else {
-					// For audio mode, use the audio filename as base
-					ext := filepath.Ext(audioPath)
-					baseName := strings.TrimSuffix(audioPath, ext)
-					processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
-				}
-
-				err = os.WriteFile(processedFilename, []byte(processed), 0644)
-				if err != nil {
-					fmt.Printf("⚠ Error writing processed file: %v\n", err)
-				} else {
-					fmt.Printf("✓ Post-processed output saved to %s\n", processedFilename)
-					processedFiles = append(processedFiles, processedFilename)
-				}
-			}
-		}
-
-		if len(processedFiles) > 0 {
-			fmt.Printf("\n✓ Post-processing completed! Generated %d file(s)\n", len(processedFiles))
-		}
-	}
-
-	// Print confirmation summary
-	fmt.Println(strings.Repeat("=", 70))
-	fmt.Printf("Summary:\n")
-	if len(transcriptFiles) > 0 {
-		if len(transcriptFiles) == 1 {
-			fmt.Printf("  Transcript: %s\n", transcriptFiles[0])
-		} else {
-			fmt.Printf("  Transcripts (%d):\n", len(transcriptFiles))
-			for _, tf := range transcriptFiles {
-				fmt.Printf("    - %s\n", tf)
-			}
-		}
-	} else {
-		fmt.Printf("  Audio file: %s\n", audioPath)
-		fmt.Printf("  Transcript: %s\n", transcriptFilename)
-	}
-	if len(processedFiles) > 0 {
-		fmt.Printf("  Processed files (%d):\n", len(processedFiles))
-		for _, pf := range processedFiles {
-			fmt.Printf("    - %s\n", pf)
-		}
-	}
-	if *apiKey != "XXXX" {
-		fmt.Printf("  API key:    %s\n", *apiKey)
-	}
-	fmt.Println(strings.Repeat("=", 70))
 }
 
 func findAction(id string) *PostAction {

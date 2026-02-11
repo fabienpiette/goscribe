@@ -1557,6 +1557,1704 @@ func TestTranscribeAudio(t *testing.T) {
 	}
 }
 
+// --- run() integration tests ---
+
+func TestRunListActions(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	// Create config
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:     "XXXX",
+		listActions: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTranscriptMode(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	// Setup mock server
+	ts := httptest.NewServer(openAISuccessHandler("processed output"))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	// Create a transcript file
+	transcriptFile := filepath.Join(t.TempDir(), "test-transcript.txt")
+	if err := os.WriteFile(transcriptFile, []byte("This is a test transcript."), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:          "test-key",
+		enableFallback:  true,
+		postAction:      "openai-meeting-summary",
+		transcriptFiles: []string{transcriptFile},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTranscriptModeMultipleFiles(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	ts := httptest.NewServer(openAISuccessHandler("processed output"))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	dir := t.TempDir()
+	file1 := filepath.Join(dir, "t1.txt")
+	file2 := filepath.Join(dir, "t2.txt")
+	if err := os.WriteFile(file1, []byte("Transcript one."), 0644); err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("Transcript two."), 0644); err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:          "test-key",
+		enableFallback:  true,
+		postAction:      "openai-meeting-summary",
+		transcriptFiles: []string{file1, file2},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTranscriptModeNoAction(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:          "test-key",
+		transcriptFiles: []string{"file.txt"},
+	})
+	if err == nil {
+		t.Fatal("expected error when no action specified")
+	}
+	if !strings.Contains(err.Error(), "-action or --auto") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestRunTranscriptFileNotFound(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:          "test-key",
+		postAction:      "openai-meeting-summary",
+		transcriptFiles: []string{"/nonexistent/file.txt"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestRunNoAudioFile(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	err := run(runOptions{apiKey: "test-key"})
+	if err == nil {
+		t.Fatal("expected error for missing audio file")
+	}
+	if !strings.Contains(err.Error(), "audio file path is required") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestRunAudioFileNotFound(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey: "test-key",
+		args:   []string{"/nonexistent/audio.mp3"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing audio")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestRunWithCustomConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yml")
+	configContent := `openai_api_key: "from-config"
+post_actions:
+  - id: "test-action"
+    name: "Test Action"
+    type: "openai"
+    prompt: "Test"
+    model: "gpt-4"
+    temperature: 0.3
+    max_tokens: 1000
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:     "XXXX",
+		configFile: configPath,
+		listActions: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunUnknownAction(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := createDefaultConfig(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	transcriptFile := filepath.Join(t.TempDir(), "t.txt")
+	if err := os.WriteFile(transcriptFile, []byte("text"), 0644); err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:          "test-key",
+		postAction:      "nonexistent-action",
+		transcriptFiles: []string{transcriptFile},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown action")
+	}
+	if !strings.Contains(err.Error(), "unknown action") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestRunWithProviderFromConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yml")
+	configContent := `provider: "gemini"
+gemini_api_key: "gemini-from-config"
+gemini_model: "gemini-2.0-flash"
+post_actions:
+  - id: "test"
+    name: "Test"
+    type: "gemini"
+    prompt: "Test"
+    model: "gemini-2.0-flash"
+    temperature: 0.3
+    max_tokens: 1000
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:     "XXXX",
+		configFile: configPath,
+		listActions: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- normalizeArgs tests ---
+
+func TestNormalizeArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   []string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:  "no transcript flag",
+			input: []string{"-k", "key", "audio.mp3"},
+			want:  []string{"-k", "key", "audio.mp3"},
+		},
+		{
+			name:  "transcript with single file",
+			input: []string{"-transcript", "file1.txt", "-action", "summary"},
+			want:  []string{"-transcript", "file1.txt", "-action", "summary"},
+		},
+		{
+			name:  "transcript with multiple files",
+			input: []string{"-transcript", "file1.txt", "file2.txt", "-action", "summary"},
+			want:  []string{"-transcript", "file1.txt,file2.txt", "-action", "summary"},
+		},
+		{
+			name:  "transcript= with multiple files",
+			input: []string{"-transcript=file1.txt", "file2.txt", "-action", "summary"},
+			want:  []string{"-transcript=file1.txt,file2.txt", "-action", "summary"},
+		},
+		{
+			name:    "transcript with no value",
+			input:   []string{"-transcript"},
+			wantErr: true,
+		},
+		{
+			name:  "empty args",
+			input: []string{},
+			want:  []string{},
+		},
+		{
+			name:  "transcript with files at end",
+			input: []string{"-transcript", "a.txt", "b.txt", "c.txt"},
+			want:  []string{"-transcript", "a.txt,b.txt,c.txt"},
+		},
+		{
+			name:  "other flags pass through",
+			input: []string{"-k", "key", "-o", "out.txt", "audio.mp3"},
+			want:  []string{"-k", "key", "-o", "out.txt", "audio.mp3"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeArgs(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("normalizeArgs() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("normalizeArgs() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("arg[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// --- Chunked processing tests ---
+
+// geminiSuccessHandler returns an httptest handler that responds with the given text
+func geminiSuccessHandler(text string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := GeminiResponse{
+			Candidates: []GeminiCandidate{
+				{Content: struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				}{
+					Parts: []struct {
+						Text string `json:"text"`
+					}{{Text: text}},
+				}},
+			},
+		}
+		writeJSON(w, resp)
+	}
+}
+
+// openAISuccessHandler returns an httptest handler that responds with the given text
+func openAISuccessHandler(text string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := ChatCompletionResponse{
+			Choices: []struct {
+				Message Message `json:"message"`
+			}{
+				{Message: Message{Role: "assistant", Content: text}},
+			},
+		}
+		writeJSON(w, resp)
+	}
+}
+
+func TestProcessWithOpenAIChunked(t *testing.T) {
+	t.Run("small transcript fits in context", func(t *testing.T) {
+		ts := httptest.NewServer(openAISuccessHandler("processed result"))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		action := &PostAction{
+			Model:       "gpt-4",
+			Prompt:      "Summarize",
+			Temperature: 0.3,
+			MaxTokens:   1000,
+		}
+		got, err := processWithOpenAIChunked("short transcript", action, "test-key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "processed result" {
+			t.Errorf("got %q, want %q", got, "processed result")
+		}
+	})
+
+	t.Run("large transcript triggers chunking", func(t *testing.T) {
+		ts := httptest.NewServer(openAISuccessHandler("merged output"))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		action := &PostAction{
+			Model:       "gpt-4", // 6000 token limit = ~24000 chars
+			Prompt:      "Summarize",
+			Temperature: 0.3,
+			MaxTokens:   1000,
+		}
+		// Create a transcript that exceeds gpt-4 context limit
+		// gpt-4 limit = 6000 tokens * 4 chars = 24000 chars
+		bigTranscript := strings.Repeat("This is a test sentence. ", 2000) // ~50000 chars
+		got, err := processWithOpenAIChunked(bigTranscript, action, "test-key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "merged output" {
+			t.Errorf("got %q, want %q", got, "merged output")
+		}
+	})
+}
+
+func TestProcessWithGeminiChunked(t *testing.T) {
+	t.Run("small transcript fits in context", func(t *testing.T) {
+		ts := httptest.NewServer(geminiSuccessHandler("gemini processed"))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		action := &PostAction{
+			Model:       "gemini-2.0-flash",
+			Prompt:      "Summarize",
+			Temperature: 0.3,
+			MaxTokens:   1000,
+		}
+		got, err := processWithGeminiChunked("short text", action, "key", "gemini-2.0-flash")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "gemini processed" {
+			t.Errorf("got %q, want %q", got, "gemini processed")
+		}
+	})
+
+	t.Run("default model when empty", func(t *testing.T) {
+		ts := httptest.NewServer(geminiSuccessHandler("default model"))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		action := &PostAction{
+			Prompt:      "Summarize",
+			Temperature: 0.3,
+			MaxTokens:   1000,
+		}
+		got, err := processWithGeminiChunked("short text", action, "key", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "default model" {
+			t.Errorf("got %q, want %q", got, "default model")
+		}
+	})
+}
+
+func TestMergeChunkResults(t *testing.T) {
+	t.Run("single chunk no merge", func(t *testing.T) {
+		got, err := mergeChunkResults([]string{"only chunk"}, &PostAction{Model: "gpt-4", MaxTokens: 1000}, "key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "only chunk" {
+			t.Errorf("got %q, want %q", got, "only chunk")
+		}
+	})
+
+	t.Run("multiple chunks merged via API", func(t *testing.T) {
+		ts := httptest.NewServer(openAISuccessHandler("merged result"))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		action := &PostAction{
+			Name:      "Test Action",
+			Model:     "gpt-4o", // large context
+			MaxTokens: 1000,
+		}
+		got, err := mergeChunkResults([]string{"chunk1", "chunk2"}, action, "key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "merged result" {
+			t.Errorf("got %q, want %q", got, "merged result")
+		}
+	})
+}
+
+func TestMergeChunkResultsWithGemini(t *testing.T) {
+	t.Run("single chunk no merge", func(t *testing.T) {
+		got, err := mergeChunkResultsWithGemini([]string{"only chunk"}, &PostAction{}, "key", "gemini-2.0-flash")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "only chunk" {
+			t.Errorf("got %q, want %q", got, "only chunk")
+		}
+	})
+
+	t.Run("multiple chunks merged via API", func(t *testing.T) {
+		ts := httptest.NewServer(geminiSuccessHandler("gemini merged"))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		action := &PostAction{Name: "Test", MaxTokens: 1000}
+		got, err := mergeChunkResultsWithGemini([]string{"chunk1", "chunk2"}, action, "key", "gemini-2.0-flash")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "gemini merged" {
+			t.Errorf("got %q, want %q", got, "gemini merged")
+		}
+	})
+
+	t.Run("API error falls back to concatenation", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("error"))
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		action := &PostAction{Name: "Test", MaxTokens: 1000}
+		got, err := mergeChunkResultsWithGemini([]string{"chunk1", "chunk2"}, action, "key", "gemini-2.0-flash")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Should fall back to simple concatenation
+		if !strings.Contains(got, "chunk1") || !strings.Contains(got, "chunk2") {
+			t.Errorf("expected concatenated chunks, got %q", got)
+		}
+	})
+}
+
+func TestHierarchicalMerge(t *testing.T) {
+	t.Run("single result passthrough", func(t *testing.T) {
+		got, err := hierarchicalMerge([]string{"solo"}, &PostAction{Model: "gpt-4o", Name: "Test", MaxTokens: 1000}, "key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "solo" {
+			t.Errorf("got %q, want %q", got, "solo")
+		}
+	})
+
+	t.Run("two results merged", func(t *testing.T) {
+		ts := httptest.NewServer(openAISuccessHandler("pair merged"))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		action := &PostAction{Model: "gpt-4o", Name: "Test", MaxTokens: 1000}
+		got, err := hierarchicalMerge([]string{"a", "b"}, action, "key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "pair merged" {
+			t.Errorf("got %q, want %q", got, "pair merged")
+		}
+	})
+
+	t.Run("three results with odd one out", func(t *testing.T) {
+		ts := httptest.NewServer(openAISuccessHandler("final merge"))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		action := &PostAction{Model: "gpt-4o", Name: "Test", MaxTokens: 1000}
+		got, err := hierarchicalMerge([]string{"a", "b", "c"}, action, "key")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "final merge" {
+			t.Errorf("got %q, want %q", got, "final merge")
+		}
+	})
+}
+
+func TestSelectBestActions(t *testing.T) {
+	// Setup test actions
+	origActions := postActions
+	defer func() { postActions = origActions }()
+	postActions = []PostAction{
+		{ID: "summary", Name: "Summary", Description: "Generate summary"},
+		{ID: "action-items", Name: "Action Items", Description: "Extract action items"},
+	}
+
+	ts := httptest.NewServer(openAISuccessHandler("summary,action-items"))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	got, err := selectBestActions("transcript text", "test-key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "summary" || got[1] != "action-items" {
+		t.Errorf("got %v, want [summary, action-items]", got)
+	}
+}
+
+func TestSelectBestActionsNoValid(t *testing.T) {
+	origActions := postActions
+	defer func() { postActions = origActions }()
+	postActions = []PostAction{
+		{ID: "summary", Name: "Summary", Description: "Generate summary"},
+	}
+
+	ts := httptest.NewServer(openAISuccessHandler("nonexistent-action"))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	_, err := selectBestActions("transcript text", "test-key")
+	if err == nil {
+		t.Fatal("expected error for no valid actions")
+	}
+	if !strings.Contains(err.Error(), "no valid actions") {
+		t.Errorf("error = %q, want containing 'no valid actions'", err.Error())
+	}
+}
+
+func TestSelectBestActionsWithGemini(t *testing.T) {
+	origActions := postActions
+	defer func() { postActions = origActions }()
+	postActions = []PostAction{
+		{ID: "summary", Name: "Summary", Description: "Generate summary"},
+		{ID: "action-items", Name: "Action Items", Description: "Extract action items"},
+	}
+
+	ts := httptest.NewServer(geminiSuccessHandler("summary,action-items"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	got, err := selectBestActionsWithGemini("transcript", "key", "gemini-2.0-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "summary" || got[1] != "action-items" {
+		t.Errorf("got %v, want [summary, action-items]", got)
+	}
+}
+
+func TestSelectBestActionsWithGeminiNoValid(t *testing.T) {
+	origActions := postActions
+	defer func() { postActions = origActions }()
+	postActions = []PostAction{
+		{ID: "summary", Name: "Summary", Description: "Generate summary"},
+	}
+
+	ts := httptest.NewServer(geminiSuccessHandler("nonexistent"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	_, err := selectBestActionsWithGemini("transcript", "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error for no valid actions")
+	}
+}
+
+// --- Provider dispatch success tests ---
+
+func TestTranscribeAudioWithProviderSuccess(t *testing.T) {
+	t.Run("openai success", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, TranscriptionResponse{Text: "openai transcript"})
+		}))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+		if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+			t.Fatalf("failed to write temp file: %v", err)
+		}
+
+		got, err := transcribeAudioWithProvider(tmpFile, "openai", "test-key", "", "", false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "openai transcript" {
+			t.Errorf("got %q, want %q", got, "openai transcript")
+		}
+	})
+
+	t.Run("gemini success", func(t *testing.T) {
+		ts := httptest.NewServer(geminiSuccessHandler("gemini transcript"))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+		if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+			t.Fatalf("failed to write temp file: %v", err)
+		}
+
+		got, err := transcribeAudioWithProvider(tmpFile, "gemini", "", "test-key", "gemini-2.0-flash", false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "gemini transcript" {
+			t.Errorf("got %q, want %q", got, "gemini transcript")
+		}
+	})
+}
+
+func TestProcessWithProviderChunkedSuccess(t *testing.T) {
+	action := &PostAction{
+		Model:       "gpt-4",
+		Prompt:      "Summarize",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+
+	t.Run("openai success", func(t *testing.T) {
+		ts := httptest.NewServer(openAISuccessHandler("openai result"))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		got, err := processWithProviderChunked("transcript", action, "openai", "test-key", "", "", false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "openai result" {
+			t.Errorf("got %q, want %q", got, "openai result")
+		}
+	})
+
+	t.Run("gemini success", func(t *testing.T) {
+		ts := httptest.NewServer(geminiSuccessHandler("gemini result"))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		got, err := processWithProviderChunked("transcript", action, "gemini", "", "test-key", "gemini-2.0-flash", false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "gemini result" {
+			t.Errorf("got %q, want %q", got, "gemini result")
+		}
+	})
+}
+
+func TestSelectBestActionsWithProviderSuccess(t *testing.T) {
+	origActions := postActions
+	defer func() { postActions = origActions }()
+	postActions = []PostAction{
+		{ID: "summary", Name: "Summary", Description: "Generate summary"},
+	}
+
+	t.Run("openai success", func(t *testing.T) {
+		ts := httptest.NewServer(openAISuccessHandler("summary"))
+		defer ts.Close()
+		overrideBaseURLs(t, ts.URL, "")
+
+		got, err := selectBestActionsWithProvider("transcript", "openai", "test-key", "", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0] != "summary" {
+			t.Errorf("got %v, want [summary]", got)
+		}
+	})
+
+	t.Run("gemini success", func(t *testing.T) {
+		ts := httptest.NewServer(geminiSuccessHandler("summary"))
+		defer ts.Close()
+		overrideBaseURLs(t, "", ts.URL)
+
+		got, err := selectBestActionsWithProvider("transcript", "gemini", "", "test-key", "gemini-2.0-flash")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0] != "summary" {
+			t.Errorf("got %v, want [summary]", got)
+		}
+	})
+}
+
+// --- Additional coverage tests ---
+
+func TestMakeOpenAIRequestRetryThenSuccess(t *testing.T) {
+	attempt := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("error"))
+			return
+		}
+		writeJSON(w, ChatCompletionResponse{
+			Choices: []struct {
+				Message Message `json:"message"`
+			}{
+				{Message: Message{Content: "success after retry"}},
+			},
+		})
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	got, err := makeOpenAIRequest(ChatCompletionRequest{}, "key", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Choices[0].Message.Content != "success after retry" {
+		t.Errorf("got %q", got.Choices[0].Message.Content)
+	}
+}
+
+func TestMakeGeminiRequestRetryThenSuccess(t *testing.T) {
+	attempt := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("error"))
+			return
+		}
+		resp := GeminiResponse{
+			Candidates: []GeminiCandidate{
+				{Content: struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				}{
+					Parts: []struct {
+						Text string `json:"text"`
+					}{{Text: "success after retry"}},
+				}},
+			},
+		}
+		writeJSON(w, resp)
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	got, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Candidates[0].Content.Parts[0].Text != "success after retry" {
+		t.Errorf("got %q", got.Candidates[0].Content.Parts[0].Text)
+	}
+}
+
+func TestTranscribeAudioRetryThenSuccess(t *testing.T) {
+	attempt := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("error"))
+			return
+		}
+		writeJSON(w, TranscriptionResponse{Text: "retry success"})
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeAudio(tmpFile, "test-key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "retry success" {
+		t.Errorf("got %q, want %q", got, "retry success")
+	}
+}
+
+func TestTranscribeWithGeminiUnsupportedFormat(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "test.xyz")
+	if err := os.WriteFile(tmpFile, []byte("data"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	_, err := transcribeWithGemini(tmpFile, "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error for unsupported format")
+	}
+	if !strings.Contains(err.Error(), "unsupported audio format") {
+		t.Errorf("error = %q, want containing 'unsupported audio format'", err.Error())
+	}
+}
+
+func TestTranscribeWithGeminiDefaultModel(t *testing.T) {
+	ts := httptest.NewServer(geminiSuccessHandler("transcribed"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeWithGemini(tmpFile, "key", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "transcribed" {
+		t.Errorf("got %q, want %q", got, "transcribed")
+	}
+}
+
+func TestProcessWithGeminiDefaultModel(t *testing.T) {
+	ts := httptest.NewServer(geminiSuccessHandler("default model response"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	action := &PostAction{
+		Prompt:      "Summarize",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+	got, err := processWithGemini("transcript", action, "key", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "default model response" {
+		t.Errorf("got %q, want %q", got, "default model response")
+	}
+}
+
+func TestSelectBestActionsWithGeminiDefaultModel(t *testing.T) {
+	origActions := postActions
+	defer func() { postActions = origActions }()
+	postActions = []PostAction{
+		{ID: "summary", Name: "Summary", Description: "Generate summary"},
+	}
+
+	ts := httptest.NewServer(geminiSuccessHandler("summary"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	got, err := selectBestActionsWithGemini("transcript", "key", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "summary" {
+		t.Errorf("got %v, want [summary]", got)
+	}
+}
+
+func TestResetConfig(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() {
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("failed to restore HOME: %v", err)
+		}
+	}()
+
+	tmpHome := t.TempDir()
+	if err := os.Setenv("HOME", tmpHome); err != nil {
+		t.Fatalf("failed to set HOME: %v", err)
+	}
+
+	// When no config exists, resetConfig should create default without prompting
+	err := resetConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify config was created
+	configPath := filepath.Join(tmpHome, ".goscribe", "config.yml")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Error("resetConfig() did not create config file")
+	}
+}
+
+func TestTranscribeAudioWithProviderFallback(t *testing.T) {
+	// Test fallback from openai to gemini
+	callCount := 0
+	tsOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("openai down"))
+	}))
+	defer tsOpenAI.Close()
+
+	tsGemini := httptest.NewServer(geminiSuccessHandler("gemini fallback"))
+	defer tsGemini.Close()
+
+	overrideBaseURLs(t, tsOpenAI.URL, tsGemini.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeAudioWithProvider(tmpFile, "openai", "openai-key", "gemini-key", "gemini-2.0-flash", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "gemini fallback" {
+		t.Errorf("got %q, want %q", got, "gemini fallback")
+	}
+}
+
+func TestProcessWithProviderChunkedFallback(t *testing.T) {
+	tsOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer tsOpenAI.Close()
+
+	tsGemini := httptest.NewServer(geminiSuccessHandler("gemini fallback result"))
+	defer tsGemini.Close()
+
+	overrideBaseURLs(t, tsOpenAI.URL, tsGemini.URL)
+
+	action := &PostAction{
+		Model:       "gpt-4",
+		Prompt:      "Summarize",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+	got, err := processWithProviderChunked("transcript", action, "openai", "openai-key", "gemini-key", "gemini-2.0-flash", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "gemini fallback result" {
+		t.Errorf("got %q, want %q", got, "gemini fallback result")
+	}
+}
+
+func TestTranscribeAudioWithProviderBothFail(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, ts.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	_, err := transcribeAudioWithProvider(tmpFile, "openai", "openai-key", "gemini-key", "gemini-2.0-flash", true)
+	if err == nil {
+		t.Fatal("expected error when both providers fail")
+	}
+	if !strings.Contains(err.Error(), "primary") || !strings.Contains(err.Error(), "fallback") {
+		t.Errorf("error should mention both primary and fallback: %v", err)
+	}
+}
+
+func TestTranscribeWithGeminiFileTooLarge(t *testing.T) {
+	// Create a file >20MB
+	tmpFile := filepath.Join(t.TempDir(), "large.mp3")
+	f, err := os.Create(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+	if err := f.Truncate(21 * 1024 * 1024); err != nil {
+		t.Fatalf("failed to truncate: %v", err)
+	}
+	f.Close()
+
+	_, err = transcribeWithGemini(tmpFile, "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error for file too large")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error = %q, want containing 'too large'", err.Error())
+	}
+}
+
+func TestTranscribeAudioNonExistentFile(t *testing.T) {
+	_, err := transcribeAudio("/nonexistent/file.mp3", "key")
+	if err == nil {
+		t.Fatal("expected error for non-existent file")
+	}
+}
+
+func TestTranscribeWithGeminiNonExistentFile(t *testing.T) {
+	_, err := transcribeWithGemini("/nonexistent/file.mp3", "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error for non-existent file")
+	}
+}
+
+// --- Splitting with small files (no ffmpeg needed) ---
+
+func TestTranscribeAudioWithSplitting(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, TranscriptionResponse{Text: "small file transcript"})
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("small audio data"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeAudioWithSplitting(tmpFile, "test-key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "small file transcript" {
+		t.Errorf("got %q, want %q", got, "small file transcript")
+	}
+}
+
+func TestTranscribeWithGeminiWithSplitting(t *testing.T) {
+	ts := httptest.NewServer(geminiSuccessHandler("gemini small file"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("small audio data"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeWithGeminiWithSplitting(tmpFile, "key", "gemini-2.0-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "gemini small file" {
+		t.Errorf("got %q, want %q", got, "gemini small file")
+	}
+}
+
+func TestTranscribeWithGeminiWithSplittingBadFile(t *testing.T) {
+	_, err := transcribeWithGeminiWithSplitting("/nonexistent/file.mp3", "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error for non-existent file")
+	}
+}
+
+func TestTranscribeAudioWithSplittingBadFile(t *testing.T) {
+	_, err := transcribeAudioWithSplitting("/nonexistent/file.mp3", "key")
+	if err == nil {
+		t.Fatal("expected error for non-existent file")
+	}
+}
+
+// --- Large transcript chunking (Gemini) ---
+
+func TestProcessWithGeminiChunkedLargeTranscript(t *testing.T) {
+	ts := httptest.NewServer(geminiSuccessHandler("chunk result"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	action := &PostAction{
+		Prompt:      "Summarize",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+	// gemini-1.0-pro has 28000 token limit = ~112000 chars
+	// Create a transcript just big enough to need 2 chunks but small enough
+	// that the merge results (short strings from mock) fit in context
+	model := "gemini-1.0-pro"
+	bigTranscript := strings.Repeat("This is a test sentence. ", 6000) // ~150000 chars > 112000
+	got, err := processWithGeminiChunked(bigTranscript, action, "key", model)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == "" {
+		t.Error("expected non-empty result")
+	}
+}
+
+// --- Merge with hierarchical path ---
+
+func TestHierarchicalMergeFourResults(t *testing.T) {
+	ts := httptest.NewServer(openAISuccessHandler("merged"))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	action := &PostAction{Model: "gpt-4o", Name: "Test", MaxTokens: 1000}
+	got, err := hierarchicalMerge([]string{"a", "b", "c", "d"}, action, "key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "merged" {
+		t.Errorf("got %q, want %q", got, "merged")
+	}
+}
+
+// --- Rate limit retry paths ---
+
+func TestTranscribeAudioRateLimit(t *testing.T) {
+	attempt := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt <= 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("Please try again in 0.1s"))
+			return
+		}
+		writeJSON(w, TranscriptionResponse{Text: "after rate limit"})
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeAudio(tmpFile, "test-key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "after rate limit" {
+		t.Errorf("got %q, want %q", got, "after rate limit")
+	}
+}
+
+func TestMakeOpenAIRequestRateLimit(t *testing.T) {
+	attempt := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("Please try again in 0.1s"))
+			return
+		}
+		writeJSON(w, ChatCompletionResponse{
+			Choices: []struct {
+				Message Message `json:"message"`
+			}{
+				{Message: Message{Content: "after rate limit"}},
+			},
+		})
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	got, err := makeOpenAIRequest(ChatCompletionRequest{}, "key", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Choices[0].Message.Content != "after rate limit" {
+		t.Errorf("got %q", got.Choices[0].Message.Content)
+	}
+}
+
+func TestMakeGeminiRequestRateLimit(t *testing.T) {
+	attempt := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("Please try again in 0.1s"))
+			return
+		}
+		resp := GeminiResponse{
+			Candidates: []GeminiCandidate{
+				{Content: struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				}{
+					Parts: []struct {
+						Text string `json:"text"`
+					}{{Text: "after rate limit"}},
+				}},
+			},
+		}
+		writeJSON(w, resp)
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	got, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Candidates[0].Content.Parts[0].Text != "after rate limit" {
+		t.Errorf("got %q", got.Candidates[0].Content.Parts[0].Text)
+	}
+}
+
+func TestMakeGeminiRequestNon200(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	_, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 0)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error should mention status 400: %v", err)
+	}
+}
+
+func TestMakeGeminiRequestBadJSON(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	_, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 0)
+	if err == nil {
+		t.Fatal("expected error for bad JSON")
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Errorf("error should mention parse: %v", err)
+	}
+}
+
+func TestMakeOpenAIRequestBadJSON(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	_, err := makeOpenAIRequest(ChatCompletionRequest{}, "key", 0)
+	if err == nil {
+		t.Fatal("expected error for bad JSON")
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Errorf("error should mention parse: %v", err)
+	}
+}
+
+func TestTranscribeAudioBadJSON(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	_, err := transcribeAudio(tmpFile, "key")
+	if err == nil {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestTranscribeAudioAllRetriesFail(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("always fail"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	_, err := transcribeAudio(tmpFile, "key")
+	if err == nil {
+		t.Fatal("expected error when all retries fail")
+	}
+}
+
+// --- Additional gap coverage ---
+
+func TestTranscribeAudioWithProviderGeminiToOpenAIFallback(t *testing.T) {
+	tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("gemini down"))
+	}))
+	defer tsGemini.Close()
+
+	tsOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, TranscriptionResponse{Text: "openai fallback"})
+	}))
+	defer tsOpenAI.Close()
+
+	overrideBaseURLs(t, tsOpenAI.URL, tsGemini.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeAudioWithProvider(tmpFile, "gemini", "openai-key", "gemini-key", "gemini-2.0-flash", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "openai fallback" {
+		t.Errorf("got %q, want %q", got, "openai fallback")
+	}
+}
+
+func TestTranscribeAudioWithProviderNoFallbackKey(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, ts.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	// openai fails, no gemini key for fallback
+	_, err := transcribeAudioWithProvider(tmpFile, "openai", "openai-key", "", "", true)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestProcessWithProviderChunkedGeminiToOpenAIFallback(t *testing.T) {
+	tsGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer tsGemini.Close()
+
+	tsOpenAI := httptest.NewServer(openAISuccessHandler("openai fallback"))
+	defer tsOpenAI.Close()
+
+	overrideBaseURLs(t, tsOpenAI.URL, tsGemini.URL)
+
+	action := &PostAction{Model: "gpt-4", Prompt: "test", Temperature: 0.3, MaxTokens: 100}
+	got, err := processWithProviderChunked("transcript", action, "gemini", "openai-key", "gemini-key", "gemini-2.0-flash", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "openai fallback" {
+		t.Errorf("got %q, want %q", got, "openai fallback")
+	}
+}
+
+func TestProcessWithProviderChunkedBothFail(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, ts.URL)
+
+	action := &PostAction{Model: "gpt-4", Prompt: "test", Temperature: 0.3, MaxTokens: 100}
+	_, err := processWithProviderChunked("transcript", action, "openai", "openai-key", "gemini-key", "gemini-2.0-flash", true)
+	if err == nil {
+		t.Fatal("expected error when both fail")
+	}
+	if !strings.Contains(err.Error(), "primary") && !strings.Contains(err.Error(), "fallback") {
+		t.Errorf("expected primary/fallback in error: %v", err)
+	}
+}
+
+func TestProcessWithProviderChunkedNoFallbackKey(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, ts.URL)
+
+	action := &PostAction{Model: "gpt-4", Prompt: "test", Temperature: 0.3, MaxTokens: 100}
+	// gemini fails, no openai key for fallback
+	_, err := processWithProviderChunked("transcript", action, "gemini", "", "gemini-key", "", true)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestTranscribeAudioWithSplittingSmallFile(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, TranscriptionResponse{Text: "under limit"})
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	// Create a file under 25MB limit
+	if err := os.WriteFile(tmpFile, []byte("small"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeAudioWithSplitting(tmpFile, "key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "under limit" {
+		t.Errorf("got %q, want %q", got, "under limit")
+	}
+}
+
+func TestTranscribeWithGeminiWithSplittingSmallFile(t *testing.T) {
+	ts := httptest.NewServer(geminiSuccessHandler("under limit"))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("small"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	got, err := transcribeWithGeminiWithSplitting(tmpFile, "key", "gemini-2.0-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "under limit" {
+		t.Errorf("got %q, want %q", got, "under limit")
+	}
+}
+
+func TestMakeOpenAIRequestNetworkError(t *testing.T) {
+	// Point at a closed server to trigger network error
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := ts.URL
+	ts.Close() // Close immediately to cause network error
+
+	overrideBaseURLs(t, url, "")
+	_, err := makeOpenAIRequest(ChatCompletionRequest{}, "key", 0)
+	if err == nil {
+		t.Fatal("expected network error")
+	}
+}
+
+func TestMakeGeminiRequestNetworkError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := ts.URL
+	ts.Close()
+
+	overrideBaseURLs(t, "", url)
+	_, err := makeGeminiRequest("gemini-2.0-flash", nil, "key", 0)
+	if err == nil {
+		t.Fatal("expected network error")
+	}
+}
+
+func TestTranscribeAudioNetworkError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := ts.URL
+	ts.Close()
+
+	overrideBaseURLs(t, url, "")
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	_, err := transcribeAudio(tmpFile, "key")
+	if err == nil {
+		t.Fatal("expected network error")
+	}
+}
+
+func TestProcessWithOpenAIChunkedError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	action := &PostAction{
+		Model:       "gpt-4", // 6000 token limit
+		Prompt:      "Summarize",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+	// Large transcript that needs chunking
+	bigTranscript := strings.Repeat("This is a test sentence. ", 2000)
+	_, err := processWithOpenAIChunked(bigTranscript, action, "key")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to process chunk") {
+		t.Errorf("error should mention chunk failure: %v", err)
+	}
+}
+
+func TestProcessWithGeminiChunkedError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	action := &PostAction{
+		Prompt:      "Summarize",
+		Temperature: 0.3,
+		MaxTokens:   1000,
+	}
+	model := "gemini-1.0-pro" // 28000 token limit
+	bigTranscript := strings.Repeat("This is a test sentence. ", 6000)
+	_, err := processWithGeminiChunked(bigTranscript, action, "key", model)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestHierarchicalMergeError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	action := &PostAction{Model: "gpt-4o", Name: "Test", MaxTokens: 1000}
+	_, err := hierarchicalMerge([]string{"a", "b"}, action, "key")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestMergeChunkResultsError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	action := &PostAction{Name: "Test", Model: "gpt-4o", MaxTokens: 1000}
+	_, err := mergeChunkResults([]string{"chunk1", "chunk2"}, action, "key")
+	if err == nil {
+		t.Fatal("expected error from merge")
+	}
+}
+
+func TestSelectBestActionsError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	_, err := selectBestActions("transcript", "key")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSelectBestActionsWithGeminiError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	_, err := selectBestActionsWithGemini("transcript", "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestProcessWithGeminiError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	action := &PostAction{Prompt: "Summarize", Temperature: 0.3, MaxTokens: 1000}
+	_, err := processWithGemini("transcript", action, "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestTranscribeWithGeminiError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, "", ts.URL)
+
+	tmpFile := filepath.Join(t.TempDir(), "test.mp3")
+	if err := os.WriteFile(tmpFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	_, err := transcribeWithGemini(tmpFile, "key", "gemini-2.0-flash")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestProcessWithOpenAIError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer ts.Close()
+	overrideBaseURLs(t, ts.URL, "")
+
+	action := &PostAction{Model: "gpt-4", Prompt: "test", Temperature: 0.3, MaxTokens: 1000}
+	_, err := processWithOpenAI("transcript", action, "key")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 // --- Provider dispatch error tests ---
 
 func TestTranscribeAudioWithProvider(t *testing.T) {
