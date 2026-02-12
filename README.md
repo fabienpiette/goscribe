@@ -8,10 +8,6 @@ AI-powered audio transcription with post-processing — supports OpenAI Whisper/
   <img src="docs/demo.gif" alt="goscribe demo" width="800">
 </p>
 
-<p align="center">
-<a href="https://buymeacoffee.com/fabienpiette" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60"></a>
-</p>
-
 ## Quick Start
 
 ```bash
@@ -161,6 +157,14 @@ make build-all          # cross-compile all platforms
 make test               # run tests (verbose)
 make test-coverage      # generate coverage.html
 ```
+
+## Acknowledgments
+
+Thanks to all [contributors](https://github.com/fabienpiette/goscribe/graphs/contributors).
+
+<p align="center">
+<a href="https://buymeacoffee.com/fabienpiette" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60"></a>
+</p>
 
 ## License
 
