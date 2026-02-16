@@ -310,8 +310,8 @@ func run(opts runOptions) error {
 			fmt.Printf("    - %s\n", pf)
 		}
 	}
-	if apiKey != "XXXX" && len(apiKey) > 8 {
-		fmt.Printf("  API key:    %s...%s\n", apiKey[:4], apiKey[len(apiKey)-4:])
+	if apiKey != "XXXX" && len(apiKey) > 0 {
+		fmt.Printf("  API key:    [configured]\n")
 	}
 	fmt.Println(strings.Repeat("=", 70))
 
