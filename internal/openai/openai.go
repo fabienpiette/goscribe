@@ -1,4 +1,4 @@
-package main
+package openai
 
 import (
 	"bytes"
@@ -11,10 +11,37 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"goscribe/internal/util"
+	"goscribe/pkg/config"
 )
 
-// makeOpenAIRequest makes an HTTP request to OpenAI API with retry logic
-func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries int) (*ChatCompletionResponse, error) {
+// BaseURL can be overridden in tests.
+var BaseURL = "https://api.openai.com/v1"
+
+type transcriptionResponse struct {
+	Text string `json:"text"`
+}
+
+type chatCompletionRequest struct {
+	Model       string    `json:"model"`
+	Messages    []message `json:"messages"`
+	Temperature float64   `json:"temperature,omitempty"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+}
+
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatCompletionResponse struct {
+	Choices []struct {
+		Message message `json:"message"`
+	} `json:"choices"`
+}
+
+func makeRequest(reqBody chatCompletionRequest, apiKey string, maxRetries int) (*chatCompletionResponse, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -23,7 +50,7 @@ func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries 
 			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
 
-		req, err := http.NewRequest("POST", openAIBaseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+		req, err := http.NewRequest("POST", BaseURL+"/chat/completions", bytes.NewBuffer(jsonData))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -51,9 +78,8 @@ func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries 
 			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
 
-		// Handle rate limiting (429)
 		if resp.StatusCode == http.StatusTooManyRequests {
-			waitTime := parseRateLimitWaitTime(string(respBody))
+			waitTime := util.ParseRateLimitWaitTime(string(respBody))
 			lastErr = fmt.Errorf("API request failed with status 429: %s", string(respBody))
 
 			if attempt < maxRetries {
@@ -65,7 +91,6 @@ func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries 
 			return nil, lastErr
 		}
 
-		// Handle other non-OK status codes
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
 			if attempt < maxRetries {
@@ -78,8 +103,7 @@ func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries 
 			return nil, lastErr
 		}
 
-		// Success! Parse and return response
-		var chatResp ChatCompletionResponse
+		var chatResp chatCompletionResponse
 		err = json.Unmarshal(respBody, &chatResp)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse response: %w", err)
@@ -95,22 +119,19 @@ func makeOpenAIRequest(reqBody ChatCompletionRequest, apiKey string, maxRetries 
 	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }
 
-func transcribeAudio(audioPath, apiKey string) (string, error) {
+func TranscribeAudio(audioPath, apiKey string) (string, error) {
 	maxRetries := 3
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Open the audio file
 		file, err := os.Open(audioPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to open audio file: %w", err)
 		}
 
-		// Create a multipart form
 		body := &bytes.Buffer{}
 		writer := multipart.NewWriter(body)
 
-		// Add the file to the form
 		part, err := writer.CreateFormFile("file", filepath.Base(audioPath))
 		if err != nil {
 			file.Close()
@@ -123,29 +144,24 @@ func transcribeAudio(audioPath, apiKey string) (string, error) {
 		}
 		file.Close()
 
-		// Add the model field
 		err = writer.WriteField("model", "whisper-1")
 		if err != nil {
 			return "", fmt.Errorf("failed to write model field: %w", err)
 		}
 
-		// Close the writer
 		err = writer.Close()
 		if err != nil {
 			return "", fmt.Errorf("failed to close writer: %w", err)
 		}
 
-		// Create the HTTP request
-		req, err := http.NewRequest("POST", openAIBaseURL+"/audio/transcriptions", body)
+		req, err := http.NewRequest("POST", BaseURL+"/audio/transcriptions", body)
 		if err != nil {
 			return "", fmt.Errorf("failed to create request: %w", err)
 		}
 
-		// Set headers
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
 
-		// Send the request
 		client := &http.Client{}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -161,15 +177,13 @@ func transcribeAudio(audioPath, apiKey string) (string, error) {
 		}
 		defer resp.Body.Close()
 
-		// Read the response
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return "", fmt.Errorf("failed to read response: %w", err)
 		}
 
-		// Handle rate limiting (429)
 		if resp.StatusCode == http.StatusTooManyRequests {
-			waitTime := parseRateLimitWaitTime(string(respBody))
+			waitTime := util.ParseRateLimitWaitTime(string(respBody))
 			lastErr = fmt.Errorf("API request failed with status 429: %s", string(respBody))
 
 			if attempt < maxRetries {
@@ -181,7 +195,6 @@ func transcribeAudio(audioPath, apiKey string) (string, error) {
 			return "", lastErr
 		}
 
-		// Check for other errors
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(respBody))
 			if attempt < maxRetries {
@@ -194,8 +207,7 @@ func transcribeAudio(audioPath, apiKey string) (string, error) {
 			return "", lastErr
 		}
 
-		// Parse the response
-		var transcriptionResp TranscriptionResponse
+		var transcriptionResp transcriptionResponse
 		err = json.Unmarshal(respBody, &transcriptionResp)
 		if err != nil {
 			return "", fmt.Errorf("failed to parse response: %w", err)
@@ -207,34 +219,28 @@ func transcribeAudio(audioPath, apiKey string) (string, error) {
 	return "", fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }
 
-func transcribeAudioWithSplitting(audioPath, apiKey string) (string, error) {
-	// Check file size
-	fileSize, err := getFileSize(audioPath)
+func TranscribeAudioWithSplitting(audioPath, apiKey string) (string, error) {
+	fileSize, err := util.GetFileSize(audioPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to get file size: %w", err)
 	}
 
 	fileSizeMB := float64(fileSize) / (1024 * 1024)
 
-	// If file is under the limit, transcribe normally
-	if fileSize <= maxFileSizeBytes {
-		return transcribeAudio(audioPath, apiKey)
+	if fileSize <= util.MaxFileSizeBytes {
+		return TranscribeAudio(audioPath, apiKey)
 	}
 
-	// File is too large, need to split
 	fmt.Printf("⚠ File size (%.1f MB) exceeds OpenAI limit (25 MB)\n", fileSizeMB)
 	fmt.Println("Splitting audio file into chunks...")
 
-	// Split into 10-minute chunks (600 seconds)
-	// This ensures each chunk stays well under 25MB for most audio formats
 	chunkDurationSeconds := 600
 
-	chunks, err := splitAudioFile(audioPath, chunkDurationSeconds)
+	chunks, err := util.SplitAudioFile(audioPath, chunkDurationSeconds)
 	if err != nil {
 		return "", fmt.Errorf("failed to split audio: %w", err)
 	}
 	defer func() {
-		// Clean up chunks
 		for _, chunk := range chunks {
 			os.Remove(chunk)
 		}
@@ -243,19 +249,17 @@ func transcribeAudioWithSplitting(audioPath, apiKey string) (string, error) {
 
 	fmt.Printf("✓ Created %d chunks\n", len(chunks))
 
-	// Transcribe each chunk
 	var allTranscripts []string
 	for i, chunk := range chunks {
 		fmt.Printf("\n[%d/%d] Transcribing chunk %s...\n", i+1, len(chunks), filepath.Base(chunk))
 
-		// Check chunk size
-		chunkSize, _ := getFileSize(chunk)
-		if chunkSize > maxFileSizeBytes {
+		chunkSize, _ := util.GetFileSize(chunk)
+		if chunkSize > util.MaxFileSizeBytes {
 			return "", fmt.Errorf("chunk %d is still too large (%.1f MB) - try a shorter chunk duration",
 				i+1, float64(chunkSize)/(1024*1024))
 		}
 
-		transcript, err := transcribeAudio(chunk, apiKey)
+		transcript, err := TranscribeAudio(chunk, apiKey)
 		if err != nil {
 			return "", fmt.Errorf("failed to transcribe chunk %d: %w", i+1, err)
 		}
@@ -264,19 +268,18 @@ func transcribeAudioWithSplitting(audioPath, apiKey string) (string, error) {
 		fmt.Printf("✓ Chunk %d/%d complete\n", i+1, len(chunks))
 	}
 
-	// Merge all transcripts
 	fmt.Println("\n✓ All chunks transcribed successfully")
 	return strings.Join(allTranscripts, " "), nil
 }
 
-func processWithOpenAI(transcript string, action *PostAction, apiKey string) (string, error) {
+func processWithOpenAI(transcript string, action *config.PostAction, apiKey string) (string, error) {
 	basePrompt := "You are a helpful assistant that processes transcribed text according to user instructions.\n\nTranscript:\n%s\n\nPlease process this transcript according to the instructions above."
 
 	fullPrompt := action.Prompt + "\n\n" + fmt.Sprintf(basePrompt, transcript)
 
-	reqBody := ChatCompletionRequest{
+	reqBody := chatCompletionRequest{
 		Model: action.Model,
-		Messages: []Message{
+		Messages: []message{
 			{
 				Role:    "user",
 				Content: fullPrompt,
@@ -286,8 +289,7 @@ func processWithOpenAI(transcript string, action *PostAction, apiKey string) (st
 		MaxTokens:   action.MaxTokens,
 	}
 
-	// Use the retry-enabled request helper (3 max retries)
-	chatResp, err := makeOpenAIRequest(reqBody, apiKey, 3)
+	chatResp, err := makeRequest(reqBody, apiKey, 3)
 	if err != nil {
 		return "", err
 	}
@@ -295,29 +297,23 @@ func processWithOpenAI(transcript string, action *PostAction, apiKey string) (st
 	return chatResp.Choices[0].Message.Content, nil
 }
 
-func processWithOpenAIChunked(transcript string, action *PostAction, apiKey string) (string, error) {
-	// Get model-specific context limit
-	maxTokens := getModelContextLimit(action.Model)
+func ProcessChunked(transcript string, action *config.PostAction, apiKey string) (string, error) {
+	maxTokens := util.GetModelContextLimit(action.Model)
 
-	// Estimate transcript + prompt tokens
-	promptTokens := len(action.Prompt) / avgCharsPerToken
-	transcriptTokens := len(transcript) / avgCharsPerToken
+	promptTokens := len(action.Prompt) / util.AvgCharsPerToken
+	transcriptTokens := len(transcript) / util.AvgCharsPerToken
 	estimatedTokens := promptTokens + transcriptTokens
 
-	// If transcript fits in context, process normally
 	if estimatedTokens <= maxTokens {
 		return processWithOpenAI(transcript, action, apiKey)
 	}
 
-	// Transcript is too long, need to chunk
 	fmt.Printf("  ⚠ Transcript is large (~%d tokens), processing in chunks...\n", estimatedTokens)
 
-	// Calculate chunk size (leaving room for prompt and overlap)
-	maxTranscriptTokensPerChunk := maxTokens - promptTokens - 500 // 500 token buffer
-	maxCharsPerChunk := maxTranscriptTokensPerChunk * avgCharsPerToken
+	maxTranscriptTokensPerChunk := maxTokens - promptTokens - 500
+	maxCharsPerChunk := maxTranscriptTokensPerChunk * util.AvgCharsPerToken
 
-	// Split transcript into sentences for better chunking
-	sentences := splitIntoSentences(transcript)
+	sentences := util.SplitIntoSentences(transcript)
 
 	var chunks []string
 	var currentChunk strings.Builder
@@ -326,13 +322,11 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 	for i, sentence := range sentences {
 		sentenceLen := len(sentence)
 
-		// If adding this sentence exceeds chunk size, start new chunk
 		if currentSize > 0 && currentSize+sentenceLen > maxCharsPerChunk {
 			chunks = append(chunks, currentChunk.String())
 			currentChunk.Reset()
 
-			// Add overlap from previous chunk
-			overlapStart := max(0, i-3) // Include last few sentences for context
+			overlapStart := util.Max(0, i-3)
 			for j := overlapStart; j < i; j++ {
 				currentChunk.WriteString(sentences[j])
 				currentChunk.WriteString(" ")
@@ -345,27 +339,22 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 		currentSize += sentenceLen + 1
 	}
 
-	// Add final chunk
 	if currentChunk.Len() > 0 {
 		chunks = append(chunks, currentChunk.String())
 	}
 
 	fmt.Printf("  → Split into %d chunk(s) for processing\n", len(chunks))
 
-	// Process each chunk with retry logic
 	var results []string
 	for i, chunk := range chunks {
 		fmt.Printf("  → Processing chunk %d/%d...\n", i+1, len(chunks))
 
-		// processWithOpenAI now has built-in retry logic
 		result, err := processWithOpenAI(chunk, action, apiKey)
 		if err != nil {
 			return "", fmt.Errorf("failed to process chunk %d: %w", i+1, err)
 		}
 		results = append(results, result)
 
-		// Add a small delay between chunks to avoid hitting rate limits
-		// Skip delay after the last chunk
 		if i < len(chunks)-1 {
 			delaySeconds := 2
 			fmt.Printf("  ⏸ Waiting %d seconds before next chunk...\n", delaySeconds)
@@ -373,7 +362,6 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 		}
 	}
 
-	// Intelligently merge chunk results using AI
 	fmt.Printf("  ✓ All chunks processed, merging results intelligently\n")
 	merged, err := mergeChunkResults(results, action, apiKey)
 	if err != nil {
@@ -383,26 +371,21 @@ func processWithOpenAIChunked(transcript string, action *PostAction, apiKey stri
 	return merged, nil
 }
 
-func mergeChunkResults(chunkResults []string, action *PostAction, apiKey string) (string, error) {
-	// If only 1 chunk, no merge needed
+func mergeChunkResults(chunkResults []string, action *config.PostAction, apiKey string) (string, error) {
 	if len(chunkResults) == 1 {
 		return chunkResults[0], nil
 	}
 
-	// Combine all chunk results into a single text for merging
 	combinedChunks := strings.Join(chunkResults, "\n\n--- CHUNK BOUNDARY ---\n\n")
 
-	// Estimate tokens for merge prompt
-	estimatedTokens := len(combinedChunks) / avgCharsPerToken
-	maxTokens := getModelContextLimit(action.Model)
+	estimatedTokens := len(combinedChunks) / util.AvgCharsPerToken
+	maxTokens := util.GetModelContextLimit(action.Model)
 
-	// If merge would exceed limits, do hierarchical merge
-	if estimatedTokens > maxTokens/2 { // Leave room for prompt + response
+	if estimatedTokens > maxTokens/2 {
 		fmt.Printf("  → Chunk results too large, using hierarchical merge\n")
 		return hierarchicalMerge(chunkResults, action, apiKey)
 	}
 
-	// Create a merge prompt that understands the original action's intent
 	mergePrompt := fmt.Sprintf(`You are merging multiple partial results from the same analysis that was split into chunks.
 
 Original task: %s
@@ -419,21 +402,19 @@ Chunk results to merge:
 
 Provide the final merged result:`, action.Name, len(chunkResults), combinedChunks)
 
-	// Use same model as the action for consistency
-	reqBody := ChatCompletionRequest{
+	reqBody := chatCompletionRequest{
 		Model: action.Model,
-		Messages: []Message{
+		Messages: []message{
 			{
 				Role:    "user",
 				Content: mergePrompt,
 			},
 		},
-		Temperature: 0.3, // Lower temperature for consistency
+		Temperature: 0.3,
 		MaxTokens:   action.MaxTokens,
 	}
 
-	// Use the retry-enabled request helper (3 max retries)
-	chatResp, err := makeOpenAIRequest(reqBody, apiKey, 3)
+	chatResp, err := makeRequest(reqBody, apiKey, 3)
 	if err != nil {
 		return "", fmt.Errorf("merge request failed: %w", err)
 	}
@@ -441,18 +422,15 @@ Provide the final merged result:`, action.Name, len(chunkResults), combinedChunk
 	return chatResp.Choices[0].Message.Content, nil
 }
 
-func hierarchicalMerge(chunkResults []string, action *PostAction, apiKey string) (string, error) {
-	// Merge in pairs until we have a single result
+func hierarchicalMerge(chunkResults []string, action *config.PostAction, apiKey string) (string, error) {
 	currentLevel := chunkResults
 
 	for len(currentLevel) > 1 {
 		var nextLevel []string
 		fmt.Printf("  → Hierarchical merge: processing %d results\n", len(currentLevel))
 
-		// Process in pairs
 		for i := 0; i < len(currentLevel); i += 2 {
 			if i+1 < len(currentLevel) {
-				// Merge pair
 				pair := []string{currentLevel[i], currentLevel[i+1]}
 				merged, err := mergeChunkResults(pair, action, apiKey)
 				if err != nil {
@@ -460,7 +438,6 @@ func hierarchicalMerge(chunkResults []string, action *PostAction, apiKey string)
 				}
 				nextLevel = append(nextLevel, merged)
 			} else {
-				// Odd one out, pass through
 				nextLevel = append(nextLevel, currentLevel[i])
 			}
 		}
@@ -471,10 +448,9 @@ func hierarchicalMerge(chunkResults []string, action *PostAction, apiKey string)
 	return currentLevel[0], nil
 }
 
-func selectBestActions(transcript string, apiKey string) ([]string, error) {
-	// Build list of available actions for AI to choose from
+func SelectBestActions(transcript string, actions []config.PostAction, apiKey string) ([]string, error) {
 	var actionDescriptions []string
-	for _, action := range postActions {
+	for _, action := range actions {
 		actionDescriptions = append(actionDescriptions, fmt.Sprintf("- %s: %s", action.ID, action.Description))
 	}
 
@@ -488,11 +464,11 @@ Transcript preview (first 2000 chars):
 
 Based on the content, which actions would provide the most value? Reply ONLY with a comma-separated list of action IDs (e.g., "openai-meeting-summary,openai-action-items"). Do not include any explanation.`,
 		strings.Join(actionDescriptions, "\n"),
-		truncateString(transcript, 2000))
+		util.TruncateString(transcript, 2000))
 
-	reqBody := ChatCompletionRequest{
+	reqBody := chatCompletionRequest{
 		Model: "gpt-3.5-turbo",
-		Messages: []Message{
+		Messages: []message{
 			{
 				Role:    "user",
 				Content: prompt,
@@ -502,22 +478,18 @@ Based on the content, which actions would provide the most value? Reply ONLY wit
 		MaxTokens:   100,
 	}
 
-	// Use the retry-enabled request helper (3 max retries)
-	chatResp, err := makeOpenAIRequest(reqBody, apiKey, 3)
+	chatResp, err := makeRequest(reqBody, apiKey, 3)
 	if err != nil {
 		return nil, fmt.Errorf("action selection failed: %w", err)
 	}
 
-	// Parse the response (comma-separated action IDs)
 	response := strings.TrimSpace(chatResp.Choices[0].Message.Content)
 	selectedIDs := strings.Split(response, ",")
 
-	// Trim and validate each ID
 	var validIDs []string
 	for _, id := range selectedIDs {
 		id = strings.TrimSpace(id)
-		// Verify the action exists
-		if findAction(id) != nil {
+		if config.FindAction(actions, id) != nil {
 			validIDs = append(validIDs, id)
 		}
 	}

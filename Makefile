@@ -17,17 +17,17 @@ help:
 	@echo "  help           - Show this help"
 
 build:
-	$(GO) build -o $(BINARY_NAME)
+	$(GO) build -o $(BINARY_NAME) ./cmd/goscribe
 
 build-optimized:
-	$(GO) build -ldflags="-s -w" -o $(BINARY_NAME)
+	$(GO) build -ldflags="-s -w" -o $(BINARY_NAME) ./cmd/goscribe
 
 build-all:
-	GOOS=linux GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-linux-amd64
-	GOOS=linux GOARCH=arm64 $(GO) build -o $(BINARY_NAME)-linux-arm64
-	GOOS=darwin GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-darwin-amd64
-	GOOS=darwin GOARCH=arm64 $(GO) build -o $(BINARY_NAME)-darwin-arm64
-	GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe
+	GOOS=linux GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-linux-amd64 ./cmd/goscribe
+	GOOS=linux GOARCH=arm64 $(GO) build -o $(BINARY_NAME)-linux-arm64 ./cmd/goscribe
+	GOOS=darwin GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-darwin-amd64 ./cmd/goscribe
+	GOOS=darwin GOARCH=arm64 $(GO) build -o $(BINARY_NAME)-darwin-arm64 ./cmd/goscribe
+	GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe ./cmd/goscribe
 
 install: build
 	sudo mv $(BINARY_NAME) $(INSTALL_PATH)/
@@ -54,4 +54,4 @@ lint:
 	$(GO) run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run ./...
 
 run:
-	$(GO) run .
+	$(GO) run ./cmd/goscribe

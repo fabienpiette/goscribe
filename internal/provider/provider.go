@@ -1,9 +1,14 @@
-package main
+package provider
 
-import "fmt"
+import (
+	"fmt"
 
-// transcribeAudioWithProvider transcribes audio using the specified provider with optional fallback
-func transcribeAudioWithProvider(audioPath, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
+	"goscribe/internal/gemini"
+	"goscribe/internal/openai"
+	"goscribe/pkg/config"
+)
+
+func TranscribeAudio(audioPath, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
 	var primaryErr error
 	var result string
 
@@ -12,22 +17,20 @@ func transcribeAudioWithProvider(audioPath, provider, openaiKey, geminiKey, gemi
 		if geminiKey == "" {
 			return "", fmt.Errorf("Gemini API key required. Use -gemini-key or -set-gemini-key")
 		}
-		result, primaryErr = transcribeWithGeminiWithSplitting(audioPath, geminiKey, geminiModel)
+		result, primaryErr = gemini.TranscribeAudioWithSplitting(audioPath, geminiKey, geminiModel)
 	case "openai":
 		fallthrough
 	default:
 		if openaiKey == "" || openaiKey == "XXXX" {
 			return "", fmt.Errorf("OpenAI API key required. Use -k or -set-key")
 		}
-		result, primaryErr = transcribeAudioWithSplitting(audioPath, openaiKey)
+		result, primaryErr = openai.TranscribeAudioWithSplitting(audioPath, openaiKey)
 	}
 
-	// If primary succeeded, return result
 	if primaryErr == nil {
 		return result, nil
 	}
 
-	// Try fallback if enabled and alternate key is available
 	if enableFallback {
 		altProvider := ""
 		altKey := ""
@@ -44,9 +47,9 @@ func transcribeAudioWithProvider(audioPath, provider, openaiKey, geminiKey, gemi
 
 			var fallbackErr error
 			if altProvider == "gemini" {
-				result, fallbackErr = transcribeWithGeminiWithSplitting(audioPath, altKey, geminiModel)
+				result, fallbackErr = gemini.TranscribeAudioWithSplitting(audioPath, altKey, geminiModel)
 			} else {
-				result, fallbackErr = transcribeAudioWithSplitting(audioPath, altKey)
+				result, fallbackErr = openai.TranscribeAudioWithSplitting(audioPath, altKey)
 			}
 
 			if fallbackErr == nil {
@@ -61,8 +64,7 @@ func transcribeAudioWithProvider(audioPath, provider, openaiKey, geminiKey, gemi
 	return "", primaryErr
 }
 
-// processWithProviderChunked processes transcript using the specified provider with optional fallback
-func processWithProviderChunked(transcript string, action *PostAction, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
+func ProcessChunked(transcript string, action *config.PostAction, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
 	var primaryErr error
 	var result string
 
@@ -71,22 +73,20 @@ func processWithProviderChunked(transcript string, action *PostAction, provider,
 		if geminiKey == "" {
 			return "", fmt.Errorf("Gemini API key required")
 		}
-		result, primaryErr = processWithGeminiChunked(transcript, action, geminiKey, geminiModel)
+		result, primaryErr = gemini.ProcessChunked(transcript, action, geminiKey, geminiModel)
 	case "openai":
 		fallthrough
 	default:
 		if openaiKey == "" || openaiKey == "XXXX" {
 			return "", fmt.Errorf("OpenAI API key required")
 		}
-		result, primaryErr = processWithOpenAIChunked(transcript, action, openaiKey)
+		result, primaryErr = openai.ProcessChunked(transcript, action, openaiKey)
 	}
 
-	// If primary succeeded, return result
 	if primaryErr == nil {
 		return result, nil
 	}
 
-	// Try fallback if enabled and alternate key is available
 	if enableFallback {
 		altProvider := ""
 		altKey := ""
@@ -103,9 +103,9 @@ func processWithProviderChunked(transcript string, action *PostAction, provider,
 
 			var fallbackErr error
 			if altProvider == "gemini" {
-				result, fallbackErr = processWithGeminiChunked(transcript, action, altKey, geminiModel)
+				result, fallbackErr = gemini.ProcessChunked(transcript, action, altKey, geminiModel)
 			} else {
-				result, fallbackErr = processWithOpenAIChunked(transcript, action, altKey)
+				result, fallbackErr = openai.ProcessChunked(transcript, action, altKey)
 			}
 
 			if fallbackErr == nil {
@@ -120,18 +120,17 @@ func processWithProviderChunked(transcript string, action *PostAction, provider,
 	return "", primaryErr
 }
 
-// selectBestActionsWithProvider selects best actions using the specified provider
-func selectBestActionsWithProvider(transcript, provider, openaiKey, geminiKey, geminiModel string) ([]string, error) {
+func SelectBestActions(transcript string, actions []config.PostAction, provider, openaiKey, geminiKey, geminiModel string) ([]string, error) {
 	switch provider {
 	case "gemini":
 		if geminiKey == "" {
 			return nil, fmt.Errorf("Gemini API key required for auto-selection")
 		}
-		return selectBestActionsWithGemini(transcript, geminiKey, geminiModel)
+		return gemini.SelectBestActions(transcript, actions, geminiKey, geminiModel)
 	default:
 		if openaiKey == "" || openaiKey == "XXXX" {
 			return nil, fmt.Errorf("OpenAI API key required for auto-selection")
 		}
-		return selectBestActions(transcript, openaiKey)
+		return openai.SelectBestActions(transcript, actions, openaiKey)
 	}
 }
