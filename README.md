@@ -49,7 +49,7 @@ make build && sudo make install
 ### Build manually
 
 ```bash
-go build -o goscribe
+go build -o goscribe ./cmd/goscribe
 sudo mv goscribe /usr/local/bin/
 ```
 
@@ -148,6 +148,17 @@ Reset to defaults: `goscribe -init`.
 - [Architecture](docs/ARCHITECTURE.md)
 - Supported formats: mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg, flac, aac, aiff
 
+## Project Structure
+
+```
+cmd/goscribe/       CLI entry point and orchestration
+pkg/config/         Config types, loading, validation (importable)
+internal/provider/  Provider routing and fallback logic
+internal/openai/    OpenAI API client
+internal/gemini/    Gemini API client
+internal/util/      Shared helpers (model limits, audio splitting, etc.)
+```
+
 ## Development
 
 ```bash
@@ -156,6 +167,7 @@ make build-optimized    # smaller binary (-ldflags="-s -w")
 make build-all          # cross-compile all platforms
 make test               # run tests (verbose)
 make test-coverage      # generate coverage.html
+make run                # go run ./cmd/goscribe
 ```
 
 ## Acknowledgments
