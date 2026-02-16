@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"goscribe/internal/provider"
+	"goscribe/pkg/config"
 )
 
 type multiStringFlag []string
@@ -70,7 +73,6 @@ func normalizeArgs(rawArgs []string) ([]string, error) {
 	return normalized, nil
 }
 
-// runOptions holds all resolved CLI options for the run function
 type runOptions struct {
 	apiKey          string
 	geminiKey       string
@@ -82,12 +84,10 @@ type runOptions struct {
 	autoSelect      bool
 	configFile      string
 	transcriptFiles []string
-	args            []string // remaining positional args
+	args            []string
 }
 
-// run contains the core application logic, separated from main for testability
 func run(opts runOptions) error {
-	// Determine which config file to use
 	configPath := opts.configFile
 	if configPath == "" {
 		homeDir, err := os.UserHomeDir()
@@ -98,45 +98,44 @@ func run(opts runOptions) error {
 
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			fmt.Println("Config file not found. Creating default config...")
-			if err := createDefaultConfig(); err != nil {
+			if err := config.CreateDefault(); err != nil {
 				return fmt.Errorf("creating default config: %w", err)
 			}
 		}
 	}
 
-	config, err := loadConfigActions(configPath)
+	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("loading config file: %w", err)
 	}
 
-	// Resolve API keys from config
+	postActions := cfg.PostActions
+
 	apiKey := opts.apiKey
-	if apiKey == "XXXX" && config.OpenAIAPIKey != "" {
-		apiKey = config.OpenAIAPIKey
+	if apiKey == "XXXX" && cfg.OpenAIAPIKey != "" {
+		apiKey = cfg.OpenAIAPIKey
 		fmt.Println("Using API key from config file")
 	}
 
 	geminiKey := opts.geminiKey
-	if geminiKey == "" && config.GeminiAPIKey != "" {
-		geminiKey = config.GeminiAPIKey
+	if geminiKey == "" && cfg.GeminiAPIKey != "" {
+		geminiKey = cfg.GeminiAPIKey
 	}
 
-	// Determine active provider: flag > config > default
 	activeProvider := "openai"
 	if opts.provider != "" {
 		activeProvider = opts.provider
-	} else if config.Provider != "" {
-		activeProvider = config.Provider
+	} else if cfg.Provider != "" {
+		activeProvider = cfg.Provider
 	}
 
-	geminiModel := config.GeminiModel
+	geminiModel := cfg.GeminiModel
 	if geminiModel == "" {
 		geminiModel = "gemini-2.0-flash"
 	}
 
 	enableFallback := opts.enableFallback
 
-	// List actions and exit if requested
 	if opts.listActions {
 		fmt.Println("Available post-processing actions:")
 		fmt.Println()
@@ -154,7 +153,6 @@ func run(opts runOptions) error {
 	var audioPath string
 	var transcriptFilename string
 
-	// Handle transcript file mode
 	if len(opts.transcriptFiles) > 0 {
 		if opts.postAction == "" && !opts.autoSelect {
 			return fmt.Errorf("-action or --auto is required when using -transcript")
@@ -206,7 +204,7 @@ func run(opts runOptions) error {
 		}
 
 		fmt.Printf("Transcribing audio with %s...\n", activeProvider)
-		transcription, err = transcribeAudioWithProvider(audioPath, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
+		transcription, err = provider.TranscribeAudio(audioPath, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
 		if err != nil {
 			return fmt.Errorf("transcription failed: %w", err)
 		}
@@ -218,13 +216,12 @@ func run(opts runOptions) error {
 		fmt.Printf("Raw transcript saved to %s\n", transcriptFilename)
 	}
 
-	// Resolve action IDs
 	var processedFiles []string
 	var actionIDs []string
 
 	if opts.autoSelect {
 		fmt.Printf("\n🤖 Analyzing transcript with %s to select best actions...\n", activeProvider)
-		selectedActions, err := selectBestActionsWithProvider(transcription, activeProvider, apiKey, geminiKey, geminiModel)
+		selectedActions, err := provider.SelectBestActions(transcription, postActions, activeProvider, apiKey, geminiKey, geminiModel)
 		if err != nil {
 			fmt.Printf("⚠ Warning: Auto-selection failed: %v\n", err)
 			fmt.Println("Continuing without post-processing.")
@@ -240,7 +237,6 @@ func run(opts runOptions) error {
 		actionIDs[i] = strings.TrimSpace(id)
 	}
 
-	// Process selected actions
 	if len(actionIDs) > 0 {
 		fmt.Printf("\nProcessing %d action(s)...\n", len(actionIDs))
 
@@ -249,13 +245,13 @@ func run(opts runOptions) error {
 				continue
 			}
 
-			action := findAction(actionID)
+			action := config.FindAction(postActions, actionID)
 			if action == nil {
 				return fmt.Errorf("unknown action '%s'. Use -list-actions to see available options", actionID)
 			}
 
 			fmt.Printf("\n[%d/%d] Applying post-processing with %s: %s...\n", idx+1, len(actionIDs), activeProvider, action.Name)
-			processed, err := processWithProviderChunked(transcription, action, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
+			processed, err := provider.ProcessChunked(transcription, action, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
 			if err != nil {
 				fmt.Printf("⚠ Warning: Post-processing failed: %v\n", err)
 				if len(opts.transcriptFiles) == 0 && len(actionIDs) == 1 {
@@ -293,7 +289,6 @@ func run(opts runOptions) error {
 		}
 	}
 
-	// Print confirmation summary
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("Summary:\n")
 	if len(opts.transcriptFiles) > 0 {
@@ -324,7 +319,6 @@ func run(opts runOptions) error {
 }
 
 func main() {
-	// Preprocess arguments
 	if len(os.Args) > 1 {
 		normalized, err := normalizeArgs(os.Args[1:])
 		if err != nil {
@@ -334,10 +328,9 @@ func main() {
 		os.Args = append([]string{os.Args[0]}, normalized...)
 	}
 
-	// Define command-line flags
 	apiKey := flag.String("k", "XXXX", "OpenAI API key")
 	geminiKey := flag.String("gemini-key", "", "Gemini API key")
-	provider := flag.String("provider", "", "AI provider: openai or gemini (default: from config or openai)")
+	providerFlag := flag.String("provider", "", "AI provider: openai or gemini (default: from config or openai)")
 	noFallback := flag.Bool("no-fallback", false, "Disable automatic fallback to alternate provider on failure")
 	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
 	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
@@ -351,7 +344,6 @@ func main() {
 	var transcriptFiles multiStringFlag
 	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
 
-	// Custom usage message
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI or Gemini\n\n")
 		fmt.Fprintf(os.Stderr, "USAGE:\n")
@@ -401,41 +393,39 @@ func main() {
 
 	flag.Parse()
 
-	// Handle one-shot config commands
 	if *setKey != "" {
-		if err := storeAPIKey(*setKey); err != nil {
+		if err := config.StoreAPIKey(*setKey); err != nil {
 			fmt.Printf("Error storing API key: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 	if *setGeminiKey != "" {
-		if err := storeGeminiAPIKey(*setGeminiKey); err != nil {
+		if err := config.StoreGeminiAPIKey(*setGeminiKey); err != nil {
 			fmt.Printf("Error storing Gemini API key: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 	if *setProviderFlag != "" {
-		if err := setDefaultProvider(*setProviderFlag); err != nil {
+		if err := config.SetDefaultProvider(*setProviderFlag); err != nil {
 			fmt.Printf("Error setting provider: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 	if *initConfig {
-		if err := resetConfig(); err != nil {
+		if err := config.Reset(); err != nil {
 			fmt.Printf("Error resetting config: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	// Run core logic
 	opts := runOptions{
 		apiKey:          *apiKey,
 		geminiKey:       *geminiKey,
-		provider:        *provider,
+		provider:        *providerFlag,
 		enableFallback:  !*noFallback,
 		output:          *output,
 		listActions:     *listActions,

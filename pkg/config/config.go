@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -9,7 +9,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func loadConfigActions(configPath string) (*Config, error) {
+type PostAction struct {
+	ID          string  `yaml:"id"`
+	Name        string  `yaml:"name"`
+	Description string  `yaml:"description"`
+	Type        string  `yaml:"type"`
+	Prompt      string  `yaml:"prompt"`
+	Model       string  `yaml:"model"`
+	Temperature float64 `yaml:"temperature"`
+	MaxTokens   int     `yaml:"max_tokens"`
+}
+
+type Config struct {
+	Provider     string       `yaml:"provider"`
+	OpenAIAPIKey string       `yaml:"openai_api_key"`
+	GeminiAPIKey string       `yaml:"gemini_api_key"`
+	GeminiModel  string       `yaml:"gemini_model"`
+	PostActions  []PostAction `yaml:"post_actions"`
+}
+
+func LoadConfig(configPath string) (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -21,20 +40,16 @@ func loadConfigActions(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse YAML config: %w", err)
 	}
 
-	// Validate config
-	if err := validateConfig(&config); err != nil {
+	if err := ValidateConfig(&config); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
-	// Load actions from config file
-	postActions = config.PostActions
 	fmt.Printf("Loaded %d action(s) from config file\n", len(config.PostActions))
 
 	return &config, nil
 }
 
-func validateConfig(config *Config) error {
-	// Validate provider if set
+func ValidateConfig(config *Config) error {
 	if config.Provider != "" && config.Provider != "openai" && config.Provider != "gemini" {
 		return fmt.Errorf("invalid provider '%s' (valid: openai, gemini)", config.Provider)
 	}
@@ -43,10 +58,8 @@ func validateConfig(config *Config) error {
 		return fmt.Errorf("no post-processing actions defined in config")
 	}
 
-	// Track unique IDs
 	seenIDs := make(map[string]bool)
 
-	// Valid types and models
 	validTypes := map[string]bool{
 		"openai": true,
 		"gemini": true,
@@ -69,7 +82,6 @@ func validateConfig(config *Config) error {
 	}
 
 	for i, action := range config.PostActions {
-		// Check required fields
 		if action.ID == "" {
 			return fmt.Errorf("action at index %d is missing 'id' field", i)
 		}
@@ -86,28 +98,23 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("action '%s' is missing 'model' field", action.ID)
 		}
 
-		// Check for duplicate IDs
 		if seenIDs[action.ID] {
 			return fmt.Errorf("duplicate action ID '%s' found", action.ID)
 		}
 		seenIDs[action.ID] = true
 
-		// Validate type
 		if !validTypes[action.Type] {
 			return fmt.Errorf("action '%s' has invalid type '%s' (valid: openai, gemini)", action.ID, action.Type)
 		}
 
-		// Validate temperature range
 		if action.Temperature < 0 || action.Temperature > 2 {
 			return fmt.Errorf("action '%s' has invalid temperature %.2f (must be between 0 and 2)", action.ID, action.Temperature)
 		}
 
-		// Validate max_tokens
 		if action.MaxTokens <= 0 {
 			return fmt.Errorf("action '%s' has invalid max_tokens %d (must be > 0)", action.ID, action.MaxTokens)
 		}
 
-		// Validate model names based on type
 		if action.Type == "openai" && !validOpenAIModels[action.Model] {
 			fmt.Printf("Warning: action '%s' uses model '%s' which may not be a recognized OpenAI model\n", action.ID, action.Model)
 		}
@@ -119,25 +126,37 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-func createDefaultConfig() error {
+func configDir() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".goscribe"), nil
+}
+
+func configFilePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.yml"), nil
+}
+
+func CreateDefault() error {
+	dir, err := configDir()
+	if err != nil {
+		return err
 	}
 
-	configDir := filepath.Join(homeDir, ".goscribe")
-	configFile := filepath.Join(configDir, "config.yml")
+	configFile := filepath.Join(dir, "config.yml")
 
-	// Create directory if it doesn't exist
-	err = os.MkdirAll(configDir, 0755)
+	err = os.MkdirAll(dir, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Get default config content with all built-in actions
 	defaultConfig := getDefaultConfigContent()
 
-	// Write config file
 	err = os.WriteFile(configFile, []byte(defaultConfig), 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
@@ -152,15 +171,12 @@ func createDefaultConfig() error {
 	return nil
 }
 
-func resetConfig() error {
-	homeDir, err := os.UserHomeDir()
+func Reset() error {
+	configFile, err := configFilePath()
 	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
+		return err
 	}
 
-	configFile := filepath.Join(homeDir, ".goscribe", "config.yml")
-
-	// Check if config exists
 	if _, err := os.Stat(configFile); err == nil {
 		fmt.Printf("⚠ Warning: This will overwrite your existing config at: %s\n", configFile)
 		fmt.Print("Continue? [y/N] ")
@@ -177,8 +193,7 @@ func resetConfig() error {
 		}
 	}
 
-	// Use createDefaultConfig to write the new config
-	err = createDefaultConfig()
+	err = CreateDefault()
 	if err != nil {
 		return err
 	}
@@ -187,132 +202,62 @@ func resetConfig() error {
 	return nil
 }
 
-func storeAPIKey(apiKey string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	configDir := filepath.Join(homeDir, ".goscribe")
-	configFile := filepath.Join(configDir, "config.yml")
-
-	// Create default config if it doesn't exist
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		fmt.Println("Config file not found. Creating default config...")
-		if err := createDefaultConfig(); err != nil {
-			return fmt.Errorf("failed to create default config: %w", err)
-		}
-	}
-
-	// Read existing config
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var config Config
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return fmt.Errorf("failed to parse config file: %w", err)
-	}
-
-	// Update API key
-	config.OpenAIAPIKey = apiKey
-
-	// Marshal back to YAML
-	updatedData, err := yaml.Marshal(&config)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	// Write updated config
-	err = os.WriteFile(configFile, updatedData, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	fmt.Printf("✓ API key stored successfully in: %s\n", configFile)
-	fmt.Println("\nYou can now use goscribe without the -k flag:")
-	fmt.Println("  goscribe audio.mp3")
-	fmt.Println("  goscribe -action openai-meeting-summary meeting.mp3")
-
-	return nil
+func StoreAPIKey(apiKey string) error {
+	return updateConfigField(func(config *Config) {
+		config.OpenAIAPIKey = apiKey
+	}, func(configFile string) {
+		fmt.Printf("✓ API key stored successfully in: %s\n", configFile)
+		fmt.Println("\nYou can now use goscribe without the -k flag:")
+		fmt.Println("  goscribe audio.mp3")
+		fmt.Println("  goscribe -action openai-meeting-summary meeting.mp3")
+	})
 }
 
-func storeGeminiAPIKey(apiKey string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	configDir := filepath.Join(homeDir, ".goscribe")
-	configFile := filepath.Join(configDir, "config.yml")
-
-	// Create default config if it doesn't exist
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		fmt.Println("Config file not found. Creating default config...")
-		if err := createDefaultConfig(); err != nil {
-			return fmt.Errorf("failed to create default config: %w", err)
-		}
-	}
-
-	// Read existing config
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var config Config
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return fmt.Errorf("failed to parse config file: %w", err)
-	}
-
-	// Update Gemini API key
-	config.GeminiAPIKey = apiKey
-
-	// Marshal back to YAML
-	updatedData, err := yaml.Marshal(&config)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	// Write updated config
-	err = os.WriteFile(configFile, updatedData, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	fmt.Printf("✓ Gemini API key stored successfully in: %s\n", configFile)
-	fmt.Println("\nYou can now use goscribe with Gemini:")
-	fmt.Println("  goscribe -provider gemini audio.mp3")
-	fmt.Println("  goscribe -provider gemini -action openai-meeting-summary meeting.mp3")
-
-	return nil
+func StoreGeminiAPIKey(apiKey string) error {
+	return updateConfigField(func(config *Config) {
+		config.GeminiAPIKey = apiKey
+	}, func(configFile string) {
+		fmt.Printf("✓ Gemini API key stored successfully in: %s\n", configFile)
+		fmt.Println("\nYou can now use goscribe with Gemini:")
+		fmt.Println("  goscribe -provider gemini audio.mp3")
+		fmt.Println("  goscribe -provider gemini -action openai-meeting-summary meeting.mp3")
+	})
 }
 
-func setDefaultProvider(providerName string) error {
+func SetDefaultProvider(providerName string) error {
 	if providerName != "openai" && providerName != "gemini" {
 		return fmt.Errorf("invalid provider '%s' (valid: openai, gemini)", providerName)
 	}
 
-	homeDir, err := os.UserHomeDir()
+	return updateConfigField(func(config *Config) {
+		config.Provider = providerName
+	}, func(configFile string) {
+		fmt.Printf("✓ Default provider set to '%s' in: %s\n", providerName, configFile)
+	})
+}
+
+func FindAction(actions []PostAction, id string) *PostAction {
+	for i := range actions {
+		if actions[i].ID == id {
+			return &actions[i]
+		}
+	}
+	return nil
+}
+
+func updateConfigField(mutate func(*Config), onSuccess func(string)) error {
+	configFile, err := configFilePath()
 	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
+		return err
 	}
 
-	configDir := filepath.Join(homeDir, ".goscribe")
-	configFile := filepath.Join(configDir, "config.yml")
-
-	// Create default config if it doesn't exist
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		fmt.Println("Config file not found. Creating default config...")
-		if err := createDefaultConfig(); err != nil {
+		if err := CreateDefault(); err != nil {
 			return fmt.Errorf("failed to create default config: %w", err)
 		}
 	}
 
-	// Read existing config
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
@@ -324,22 +269,18 @@ func setDefaultProvider(providerName string) error {
 		return fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Update provider
-	config.Provider = providerName
+	mutate(&config)
 
-	// Marshal back to YAML
 	updatedData, err := yaml.Marshal(&config)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Write updated config
 	err = os.WriteFile(configFile, updatedData, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	fmt.Printf("✓ Default provider set to '%s' in: %s\n", providerName, configFile)
-
+	onSuccess(configFile)
 	return nil
 }
