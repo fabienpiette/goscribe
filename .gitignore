@@ -1,6 +1,6 @@
 # Binaries
-goscribe
-goscribe-*
+/goscribe
+/goscribe-*
 transcribe
 transcribe-*
 

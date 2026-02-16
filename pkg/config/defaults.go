@@ -1,4 +1,4 @@
-package main
+package config
 
 func getDefaultConfigContent() string {
 	return `# goscribe configuration file

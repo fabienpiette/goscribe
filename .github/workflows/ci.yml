@@ -59,6 +59,6 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -o goscribe-${{ matrix.suffix }}
+        run: go build -o goscribe-${{ matrix.suffix }} ./cmd/goscribe
       - name: Verify binary
         run: test -f goscribe-${{ matrix.suffix }}
