@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"goscribe/internal/worker"
@@ -47,20 +48,16 @@ func makeTask(t *testing.T, payload worker.ProcessPayload) *asynq.Task {
 	return asynq.NewTask(worker.TaskTypeProcess, b)
 }
 
-func skipIfNoRedis(t *testing.T, rdb *redis.Client) {
-	t.Helper()
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		t.Skipf("Redis not available at localhost:6379: %v", err)
-	}
-}
-
 func newTestRDB(t *testing.T) *redis.Client {
 	t.Helper()
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: 15})
-	skipIfNoRedis(t, rdb)
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() {
-		rdb.FlushDB(context.Background())
 		rdb.Close()
+		mr.Close()
 	})
 	return rdb
 }
@@ -143,7 +140,7 @@ func TestProcessTask_DeletesTempFile(t *testing.T) {
 	}
 }
 
-func TestProcessTask_FiresWebhook(t *testing.T) {
+func TestProcessTask_WebhookBlockedBySSRF(t *testing.T) {
 	rdb := newTestRDB(t)
 
 	webhookCalled := false
@@ -161,7 +158,7 @@ func TestProcessTask_FiresWebhook(t *testing.T) {
 		ResultTTL:   time.Hour,
 	})
 
-	jobID := "job-webhook-test"
+	jobID := "job-webhook-blocked"
 	initial := worker.JobResult{JobID: jobID, Status: worker.StatusQueued, CreatedAt: time.Now()}
 	b, _ := json.Marshal(initial)
 	rdb.Set(context.Background(), worker.ResultKeyPrefix+jobID, b, time.Hour)
@@ -176,7 +173,7 @@ func TestProcessTask_FiresWebhook(t *testing.T) {
 	if err := proc.ProcessTask(context.Background(), task); err != nil {
 		t.Fatalf("ProcessTask: %v", err)
 	}
-	if !webhookCalled {
-		t.Error("expected webhook to be called after job completion")
+	if webhookCalled {
+		t.Error("webhook should be blocked by SSRF protection for localhost")
 	}
 }
