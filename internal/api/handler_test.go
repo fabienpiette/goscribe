@@ -89,7 +89,9 @@ func TestSubmitJob_TranscriptText(t *testing.T) {
 		t.Fatalf("status: got %d, want 202; body: %s", rec.Code, rec.Body.String())
 	}
 	var resp map[string]string
-	json.NewDecoder(rec.Body).Decode(&resp)
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
 	if resp["job_id"] == "" {
 		t.Error("expected non-empty job_id in response")
 	}
@@ -146,7 +148,9 @@ func TestListActions(t *testing.T) {
 		t.Errorf("status: got %d, want 200", rec.Code)
 	}
 	var got []config.PostAction
-	json.NewDecoder(rec.Body).Decode(&got)
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
 	if len(got) != 1 || got[0].ID != "action-1" {
 		t.Errorf("unexpected actions: %+v", got)
 	}
