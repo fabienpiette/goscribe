@@ -27,3 +27,9 @@ tmp/
 # Claude
 CLAUDE.md
 .claude/
+docs/superpowers/
+
+# Worktrees
+.worktrees
+
+.env

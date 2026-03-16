@@ -1,0 +1,53 @@
+services:
+  goscribe:
+    image: ghcr.io/fabienpiette/goscribe:latest
+    container_name: goscribe-app
+    ports:
+      - 8080:8080
+    environment:
+      - MODE=${MODE:-all}
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOSCRIBE_PROVIDER=${GOSCRIBE_PROVIDER:-openai}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - RESULT_TTL_HOURS=${RESULT_TTL_HOURS:-24}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-100}
+      - SHUTDOWN_TIMEOUT_SECONDS=${SHUTDOWN_TIMEOUT_SECONDS:-30}
+    volumes:
+      - goscribe-uploads:/tmp/goscribe-uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+      resources:
+        limits:
+          memory: 512m
+    networks:
+      - goscribe-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: goscribe-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - goscribe-redis:/data
+    networks:
+      - goscribe-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  goscribe-uploads:
+  goscribe-redis:
+
+networks:
+  goscribe-net:
+    driver: bridge

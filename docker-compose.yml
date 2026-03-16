@@ -1,0 +1,66 @@
+services:
+  goscribe:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MODE=all
+    volumes:
+      - goscribe_uploads:/tmp/goscribe-uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  goscribe-api:
+    build: .
+    profiles:
+      - split
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MODE=api
+    volumes:
+      - goscribe_uploads:/tmp/goscribe-uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  goscribe-worker:
+    build: .
+    profiles:
+      - split
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MODE=worker
+    volumes:
+      - goscribe_uploads:/tmp/goscribe-uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  goscribe_uploads:

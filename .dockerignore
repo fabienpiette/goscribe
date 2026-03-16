@@ -1,0 +1,13 @@
+.git
+.github
+.serena
+.claude
+docs/
+tmp/
+coverage.out
+coverage.html
+goscribe
+goscribe-*
+*.md
+.env
+.gitignore
