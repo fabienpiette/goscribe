@@ -17,6 +17,8 @@ func NewRouter(h *Handler) http.Handler {
 	r.Get("/jobs/{id}", h.GetJob)
 	r.Get("/actions", h.ListActions)
 	r.Get("/health", h.Health)
+	r.Get("/openapi.yaml", h.ServeOpenAPISpec)
+	r.Get("/docs", h.ServeSwaggerUI)
 
 	return r
 }
