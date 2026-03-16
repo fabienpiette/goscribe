@@ -1,0 +1,318 @@
+openapi: "3.0.3"
+info:
+  title: goscribe API
+  version: "1.0.0"
+  description: |
+    HTTP API for goscribe — async audio transcription and AI post-processing.
+
+    Submit a job with an audio file or existing transcript. The job is queued
+    and processed asynchronously by a worker. Poll `GET /jobs/{id}` for results,
+    or supply a `webhook_url` to receive them via HTTP POST on completion.
+
+servers:
+  - url: http://localhost:8080
+    description: Local / Docker Compose
+
+paths:
+  /jobs:
+    post:
+      summary: Submit a transcription job
+      description: |
+        Accepts a multipart form with either an audio file to transcribe or
+        an existing transcript to post-process. At least one of `file` or
+        `transcript` is required.
+      operationId: submitJob
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    Audio file to transcribe. Supported formats: mp3, mp4, mpeg,
+                    mpga, m4a, wav, webm, ogg, flac, aac, aiff.
+                    Maximum size is controlled by `MAX_UPLOAD_MB` (default 100 MB).
+                transcript:
+                  type: string
+                  description: |
+                    Existing transcript text to post-process directly.
+                    Mutually exclusive with `file` — if both are provided,
+                    `file` takes precedence and `transcript` is ignored.
+                actions:
+                  type: string
+                  description: |
+                    Comma-separated list of action IDs to run after transcription
+                    (e.g. `openai-meeting-summary,openai-action-items`).
+                    Pass `auto` to let the AI select the most relevant actions.
+                    If omitted, only the raw transcript is produced.
+                  example: openai-meeting-summary,openai-action-items
+                provider:
+                  type: string
+                  enum: [openai, gemini]
+                  description: |
+                    AI provider to use for this job. Overrides the server default.
+                    Automatic fallback to the other provider is enabled on the
+                    worker side when both keys are configured.
+                  example: openai
+                webhook_url:
+                  type: string
+                  format: uri
+                  description: |
+                    URL to call via HTTP POST when the job completes.
+                    The request body is the `JobResult` JSON object.
+                    Requests to private/loopback addresses are rejected.
+                  example: https://example.com/hooks/transcription
+      responses:
+        "202":
+          description: Job accepted and queued for processing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitResponse"
+              example:
+                job_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+                status: queued
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /jobs/{id}:
+    get:
+      summary: Get job status and results
+      description: |
+        Returns the current state of a job. Poll this endpoint until `status`
+        is `completed` or `failed`. Results are retained in Redis for
+        `RESULT_TTL_HOURS` (default 24 h) after completion.
+      operationId: getJob
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Job ID returned by `POST /jobs`.
+          schema:
+            type: string
+            format: uuid
+          example: "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+      responses:
+        "200":
+          description: Job found. Check `status` for current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobResult"
+              examples:
+                queued:
+                  summary: Job still in queue
+                  value:
+                    job_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+                    status: queued
+                    created_at: "2024-01-15T10:30:00Z"
+                completed:
+                  summary: Job completed successfully
+                  value:
+                    job_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+                    status: completed
+                    provider_used: openai
+                    transcript: "Good morning everyone, let's get started..."
+                    results:
+                      openai-meeting-summary: "## Meeting Summary\n\nThe team discussed..."
+                      openai-action-items: "- Alice to finalize the proposal by Friday\n- Bob to review..."
+                    created_at: "2024-01-15T10:30:00Z"
+                    completed_at: "2024-01-15T10:30:45Z"
+                failed:
+                  summary: Job failed
+                  value:
+                    job_id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+                    status: failed
+                    error: "transcription failed: invalid API key"
+                    created_at: "2024-01-15T10:30:00Z"
+                    completed_at: "2024-01-15T10:30:05Z"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /actions:
+    get:
+      summary: List available post-processing actions
+      description: |
+        Returns all post-processing actions configured on this server instance.
+        Includes the 18 built-in actions plus any custom actions loaded from
+        `GOSCRIBE_CONFIG_FILE`.
+      operationId: listActions
+      responses:
+        "200":
+          description: List of actions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PostAction"
+              example:
+                - id: openai-meeting-summary
+                  name: Meeting Summary
+                  description: Comprehensive meeting summary with key points and decisions
+                  type: openai
+                  model: gpt-4o
+                  temperature: 0.3
+                  max_tokens: 2000
+
+  /health:
+    get:
+      summary: Health check
+      description: Returns `{"status":"ok"}` when the server is up. Does not check Redis connectivity.
+      operationId: health
+      responses:
+        "200":
+          description: Server is healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+components:
+  schemas:
+    SubmitResponse:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: Unique identifier for the submitted job.
+        status:
+          type: string
+          enum: [queued]
+          description: Always `queued` on a successful submission.
+
+    JobResult:
+      type: object
+      required: [job_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, processing, completed, failed]
+          description: Current lifecycle state of the job.
+        provider_used:
+          type: string
+          enum: [openai, gemini]
+          description: Provider that produced the result. Present only when `status` is `completed`.
+        transcript:
+          type: string
+          description: Raw transcription text. Present when `status` is `completed`.
+        results:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Map of action ID to post-processed output text.
+            Present when `status` is `completed` and at least one action was requested.
+          example:
+            openai-meeting-summary: "## Meeting Summary\n\nThe team discussed..."
+        error:
+          type: string
+          description: Human-readable error message. Present only when `status` is `failed`.
+        created_at:
+          type: string
+          format: date-time
+          description: Time the job was submitted.
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Time the job finished (succeeded or failed). Null while still in progress.
+
+    PostAction:
+      type: object
+      required: [id, name, type]
+      properties:
+        id:
+          type: string
+          description: Unique action identifier used in the `actions` form field.
+          example: openai-meeting-summary
+        name:
+          type: string
+          description: Human-readable display name.
+          example: Meeting Summary
+        description:
+          type: string
+          description: Short description of what the action produces.
+        type:
+          type: string
+          enum: [openai, gemini]
+          description: Provider this action is designed for.
+        prompt:
+          type: string
+          description: System prompt sent to the AI model.
+        model:
+          type: string
+          description: Model identifier (e.g. `gpt-4o`, `gemini-2.0-flash`).
+        temperature:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 2
+        max_tokens:
+          type: integer
+          minimum: 1
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+
+  responses:
+    BadRequest:
+      description: Invalid request — missing required fields or malformed input.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "provide either a file or transcript text"
+
+    NotFound:
+      description: Job not found or result has expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "job not found"
+
+    TooLarge:
+      description: Uploaded file exceeds the configured size limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "file exceeds 100 MB limit"
+
+    InternalError:
+      description: Unexpected server-side error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "enqueuing job: connection refused"
