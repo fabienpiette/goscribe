@@ -28,3 +28,6 @@ tmp/
 CLAUDE.md
 .claude/
 docs/superpowers/
+
+# Worktrees
+.worktrees
