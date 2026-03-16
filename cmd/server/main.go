@@ -125,9 +125,18 @@ func loadConfig() serverConfig {
 	redisURL := getenv("REDIS_URL", "redis://redis:6379")
 	redisAddr := parseRedisAddr(redisURL)
 
-	resultTTLHours, _ := strconv.Atoi(getenv("RESULT_TTL_HOURS", "24"))
-	maxUploadMB, _ := strconv.ParseInt(getenv("MAX_UPLOAD_MB", "100"), 10, 64)
-	shutdownSecs, _ := strconv.Atoi(getenv("SHUTDOWN_TIMEOUT_SECONDS", "30"))
+	resultTTLHours, err := strconv.Atoi(getenv("RESULT_TTL_HOURS", "24"))
+	if err != nil {
+		log.Fatalf("invalid RESULT_TTL_HOURS: %v", err)
+	}
+	maxUploadMB, err := strconv.ParseInt(getenv("MAX_UPLOAD_MB", "100"), 10, 64)
+	if err != nil {
+		log.Fatalf("invalid MAX_UPLOAD_MB: %v", err)
+	}
+	shutdownSecs, err := strconv.Atoi(getenv("SHUTDOWN_TIMEOUT_SECONDS", "30"))
+	if err != nil {
+		log.Fatalf("invalid SHUTDOWN_TIMEOUT_SECONDS: %v", err)
+	}
 
 	return serverConfig{
 		mode:            getenv("MODE", "all"),
@@ -155,6 +164,7 @@ func getenv(key, fallback string) string {
 func parseRedisAddr(redisURL string) string {
 	u, err := url.Parse(redisURL)
 	if err != nil {
+		log.Printf("warning: failed to parse REDIS_URL %q: %v, using original string", redisURL, err)
 		return redisURL
 	}
 	host := u.Host

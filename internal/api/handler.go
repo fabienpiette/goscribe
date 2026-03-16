@@ -104,7 +104,11 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		Provider:   provider,
 		WebhookURL: webhookURL,
 	}
-	b, _ := json.Marshal(payload)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "marshalling job payload: "+err.Error())
+		return
+	}
 	task := asynq.NewTask(worker.TaskTypeProcess, b)
 	if _, err := h.cfg.Enqueuer.Enqueue(task); err != nil {
 		writeError(w, http.StatusInternalServerError, "enqueuing job: "+err.Error())
@@ -150,7 +154,10 @@ func (h *Handler) saveUpload(file io.Reader, originalName string) (string, error
 }
 
 func (h *Handler) saveResult(ctx context.Context, r worker.JobResult) error {
-	b, _ := json.Marshal(r)
+	b, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("marshal job result: %w", err)
+	}
 	return h.cfg.RDB.Set(ctx, worker.ResultKeyPrefix+r.JobID, b, h.cfg.ResultTTL).Err()
 }
 
