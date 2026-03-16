@@ -284,3 +284,11 @@ func updateConfigField(mutate func(*Config), onSuccess func(string)) error {
 	onSuccess(configFile)
 	return nil
 }
+
+func DefaultPostActions() []PostAction {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(getDefaultConfigContent()), &cfg); err != nil {
+		panic("DefaultPostActions: malformed embedded YAML: " + err.Error())
+	}
+	return cfg.PostActions
+}

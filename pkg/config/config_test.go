@@ -650,3 +650,18 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+func TestDefaultPostActions(t *testing.T) {
+	actions := DefaultPostActions()
+	if len(actions) == 0 {
+		t.Fatal("expected at least one default action, got none")
+	}
+	for _, a := range actions {
+		if a.ID == "" {
+			t.Errorf("action has empty ID: %+v", a)
+		}
+		if a.Prompt == "" {
+			t.Errorf("action %s has empty prompt", a.ID)
+		}
+	}
+}
