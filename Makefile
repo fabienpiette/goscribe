@@ -1,4 +1,4 @@
-.PHONY: build install clean test test-coverage test-short lint help
+.PHONY: build install clean test test-coverage test-short lint help docker-build docker-up docker-down docker-logs
 
 BINARY_NAME=goscribe
 GO=go
@@ -15,6 +15,10 @@ help:
 	@echo "  build-all      - Build for multiple platforms"
 	@echo "  lint           - Run golangci-lint"
 	@echo "  help           - Show this help"
+	@echo "  docker-build   - Build Docker image"
+	@echo "  docker-up      - Start goscribe + redis via docker compose"
+	@echo "  docker-down    - Stop all services"
+	@echo "  docker-logs    - Tail goscribe container logs"
 
 build:
 	$(GO) build -o $(BINARY_NAME) ./cmd/goscribe
@@ -55,3 +59,15 @@ lint:
 
 run:
 	$(GO) run ./cmd/goscribe
+
+docker-build:
+	docker build -t goscribe:local .
+
+docker-up:
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f goscribe
