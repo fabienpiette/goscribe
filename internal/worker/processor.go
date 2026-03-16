@@ -27,7 +27,7 @@ var webhookClient = &http.Client{
 }
 
 func dialContextWithValidation(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +44,8 @@ func dialContextWithValidation(ctx context.Context, network, addr string) (net.C
 	}
 
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	return dialer.DialContext(ctx, network, addr)
+	resolvedAddr := net.JoinHostPort(ips[0].String(), port)
+	return dialer.DialContext(ctx, network, resolvedAddr)
 }
 
 func isPrivateIP(ip net.IP) bool {
