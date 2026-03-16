@@ -186,11 +186,11 @@ func buildHTTPServer(cfg serverConfig, client *asynq.Client, rdb *redis.Client, 
 		DefaultProvider: cfg.provider,
 	})
 	return &http.Server{
-		Addr:         ":" + cfg.port,
-		Handler:      api.NewRouter(h),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + cfg.port,
+		Handler:           api.NewRouter(h),
+		ReadHeaderTimeout: 30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
