@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -16,6 +18,10 @@ import (
 	"goscribe/internal/provider"
 	"goscribe/pkg/config"
 )
+
+var webhookClient = &http.Client{
+	Timeout: 10 * time.Second,
+}
 
 type Transcriber interface {
 	TranscribeAudio(audioPath, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (string, error)
@@ -195,14 +201,68 @@ func (p *Processor) saveResult(ctx context.Context, r JobResult) error {
 	return p.cfg.RDB.Set(ctx, ResultKeyPrefix+r.JobID, b, p.cfg.ResultTTL).Err()
 }
 
-func (p *Processor) fireWebhook(url string, result JobResult) {
+func (p *Processor) fireWebhook(rawURL string, result JobResult) {
+	if !isAllowedWebhookURL(rawURL) {
+		return
+	}
 	b, err := json.Marshal(result)
 	if err != nil {
 		return
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+	resp, err := webhookClient.Post(rawURL, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return
 	}
 	resp.Body.Close()
+}
+
+func isAllowedWebhookURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		host = u.Host
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return !isPrivateIP(ip)
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.",
+		"172.16.", "172.17.", "172.18.", "172.19.",
+		"172.20.", "172.21.", "172.22.", "172.23.",
+		"172.24.", "172.25.", "172.26.", "172.27.",
+		"172.28.", "172.29.", "172.30.", "172.31.",
+		"192.168.",
+		"127.",
+		"169.254.", // link-local
+		"::1",      // IPv6 loopback
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return true
+	}
+	for _, r := range privateRanges {
+		if strings.HasPrefix(ip.String(), r) {
+			return true
+		}
+	}
+	return false
 }

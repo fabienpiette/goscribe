@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -86,7 +86,7 @@ func main() {
 
 	select {
 	case err := <-errCh:
-		log.Fatalf("fatal error: %v", err)
+		log.Printf("fatal error: %v", err)
 	case sig := <-quit:
 		log.Printf("received %v, shutting down (timeout=%s)...", sig, cfg.shutdownTimeout)
 	}
@@ -123,7 +123,7 @@ type serverConfig struct {
 
 func loadConfig() serverConfig {
 	redisURL := getenv("REDIS_URL", "redis://redis:6379")
-	redisAddr := strings.TrimPrefix(redisURL, "redis://")
+	redisAddr := parseRedisAddr(redisURL)
 
 	resultTTLHours, _ := strconv.Atoi(getenv("RESULT_TTL_HOURS", "24"))
 	maxUploadMB, _ := strconv.ParseInt(getenv("MAX_UPLOAD_MB", "100"), 10, 64)
@@ -152,6 +152,18 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
+func parseRedisAddr(redisURL string) string {
+	u, err := url.Parse(redisURL)
+	if err != nil {
+		return redisURL
+	}
+	host := u.Host
+	if host == "" {
+		return redisURL
+	}
+	return host
+}
+
 func loadPostActions(configFile string) []config.PostAction {
 	if configFile != "" {
 		cfg, err := config.LoadConfig(configFile)
@@ -174,8 +186,11 @@ func buildHTTPServer(cfg serverConfig, client *asynq.Client, rdb *redis.Client, 
 		DefaultProvider: cfg.provider,
 	})
 	return &http.Server{
-		Addr:    ":" + cfg.port,
-		Handler: api.NewRouter(h),
+		Addr:         ":" + cfg.port,
+		Handler:      api.NewRouter(h),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 }
 
