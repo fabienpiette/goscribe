@@ -31,3 +31,5 @@ docs/superpowers/
 
 # Worktrees
 .worktrees
+
+.env
