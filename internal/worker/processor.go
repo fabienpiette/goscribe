@@ -21,6 +21,74 @@ import (
 
 var webhookClient = &http.Client{
 	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		DialContext: dialContextWithValidation,
+	},
+}
+
+func dialContextWithValidation(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return nil, fmt.Errorf("refused: %s resolves to private IP", host)
+		}
+	}
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return dialer.DialContext(ctx, network, addr)
+}
+
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return true
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return isPrivateIPv4(ipv4)
+	}
+	if len(ip) == 16 {
+		return isPrivateIPv6(ip)
+	}
+	return false
+}
+
+func isPrivateIPv4(ip net.IP) bool {
+	if ip[0] == 10 {
+		return true
+	}
+	if ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31 {
+		return true
+	}
+	if ip[0] == 192 && ip[1] == 168 {
+		return true
+	}
+	return false
+}
+
+func isPrivateIPv6(ip net.IP) bool {
+	if len(ip) != 16 {
+		return false
+	}
+	if ip[0] == 0xfe && ip[1] == 0x80 {
+		return true
+	}
+	if ip[0] == 0xfc || ip[0] == 0xfd {
+		return true
+	}
+	if ip[0] == 0x00 && ip[1] == 0x00 && ip[2] == 0x00 && ip[3] == 0x00 && ip[4] == 0x00 && ip[5] == 0x00 && ip[6] == 0x00 && ip[7] == 0x00 {
+		if ip[8] == 0x00 && ip[9] == 0x00 && ip[10] == 0x00 && ip[11] == 0x00 && ip[12] == 0x00 && ip[13] == 0x00 && ip[14] == 0x00 && ip[15] == 0x01 {
+			return true
+		}
+	}
+	return false
 }
 
 type Transcriber interface {
@@ -224,45 +292,5 @@ func isAllowedWebhookURL(rawURL string) bool {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}
-	host, _, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		host = u.Host
-	}
-	ip := net.ParseIP(host)
-	if ip != nil {
-		return !isPrivateIP(ip)
-	}
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return false
-	}
-	for _, ip := range ips {
-		if isPrivateIP(ip) {
-			return false
-		}
-	}
 	return true
-}
-
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
-		"10.",
-		"172.16.", "172.17.", "172.18.", "172.19.",
-		"172.20.", "172.21.", "172.22.", "172.23.",
-		"172.24.", "172.25.", "172.26.", "172.27.",
-		"172.28.", "172.29.", "172.30.", "172.31.",
-		"192.168.",
-		"127.",
-		"169.254.", // link-local
-		"::1",      // IPv6 loopback
-	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
-		return true
-	}
-	for _, r := range privateRanges {
-		if strings.HasPrefix(ip.String(), r) {
-			return true
-		}
-	}
-	return false
 }
