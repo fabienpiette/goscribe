@@ -1,6 +1,6 @@
 services:
   goscribe:
-    image: goscribe:local
+    image: ghcr.io/fabienpiette/goscribe:latest
     container_name: goscribe-app
     ports:
       - 8080:8080
