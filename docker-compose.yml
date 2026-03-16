@@ -7,6 +7,37 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379
+      - MODE=all
+    volumes:
+      - goscribe_uploads:/tmp/goscribe-uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  goscribe-api:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MODE=api
+    volumes:
+      - goscribe_uploads:/tmp/goscribe-uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  goscribe-worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MODE=worker
     volumes:
       - goscribe_uploads:/tmp/goscribe-uploads
     depends_on:
