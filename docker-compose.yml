@@ -7,6 +7,8 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379
+    volumes:
+      - goscribe_uploads:/tmp/goscribe-uploads
     depends_on:
       redis:
         condition: service_healthy
@@ -26,3 +28,4 @@ services:
 
 volumes:
   redis_data:
+  goscribe_uploads:
