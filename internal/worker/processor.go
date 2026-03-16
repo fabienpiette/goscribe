@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -276,13 +277,18 @@ func (p *Processor) fireWebhook(rawURL string, result JobResult) {
 	}
 	b, err := json.Marshal(result)
 	if err != nil {
+		log.Printf("webhook: error marshalling payload for job %s: %v", result.JobID, err)
 		return
 	}
 	resp, err := webhookClient.Post(rawURL, "application/json", bytes.NewReader(b))
 	if err != nil {
+		log.Printf("webhook: error delivering for job %s to %s: %v", result.JobID, rawURL, err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("webhook: job %s got non-2xx response from %s: %d", result.JobID, rawURL, resp.StatusCode)
+	}
 }
 
 func isAllowedWebhookURL(rawURL string) bool {
