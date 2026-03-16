@@ -128,6 +128,8 @@ curl http://localhost:8080/actions
 | `GET /jobs/{id}` | Fetch job status and results |
 | `GET /actions` | List configured post-processing actions |
 | `GET /health` | Health check |
+| `GET /docs` | Swagger UI |
+| `GET /openapi.yaml` | OpenAPI 3.0 spec |
 
 `POST /jobs` accepts: `file` (audio), `transcript` (text), `actions`
 (comma-separated IDs or `auto`), `provider`, `webhook_url` (called with
