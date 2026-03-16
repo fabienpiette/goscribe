@@ -17,6 +17,8 @@ services:
 
   goscribe-api:
     build: .
+    profiles:
+      - split
     ports:
       - "8080:8080"
     env_file:
@@ -33,6 +35,8 @@ services:
 
   goscribe-worker:
     build: .
+    profiles:
+      - split
     env_file:
       - .env
     environment:
