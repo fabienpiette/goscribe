@@ -19,12 +19,17 @@ import (
 )
 
 type mockEnqueuer struct {
-	enqueued []*asynq.Task
-	err      error
+	enqueued    []*asynq.Task
+	lastPayload *worker.ProcessPayload
+	err         error
 }
 
 func (m *mockEnqueuer) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
 	m.enqueued = append(m.enqueued, task)
+	var p worker.ProcessPayload
+	if err := json.Unmarshal(task.Payload(), &p); err == nil {
+		m.lastPayload = &p
+	}
 	return &asynq.TaskInfo{ID: "mock-task-id"}, m.err
 }
 
@@ -163,6 +168,35 @@ func TestHealth(t *testing.T) {
 	h.Health(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("status: got %d, want 200", rec.Code)
+	}
+}
+
+func TestSubmitJob_SongField(t *testing.T) {
+	rdb := newTestRDB(t)
+	enqueuer := &mockEnqueuer{}
+	h := newTestHandler(t, enqueuer, rdb, nil)
+
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	_ = mw.WriteField("song", "true")       //nolint:errcheck
+	_ = mw.WriteField("provider", "openai") //nolint:errcheck
+	fw, _ := mw.CreateFormFile("file", "song.mp3")
+	_, _ = fw.Write([]byte("fake audio")) //nolint:errcheck
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs", body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.SubmitJob(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202", rec.Code)
+	}
+	if enqueuer.lastPayload == nil {
+		t.Fatal("no payload enqueued")
+	}
+	if !enqueuer.lastPayload.Song {
+		t.Error("Song field not propagated to payload")
 	}
 }
 
