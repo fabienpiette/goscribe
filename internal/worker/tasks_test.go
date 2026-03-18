@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"goscribe/internal/worker"
+	"goscribe/pkg/lyrics"
 )
 
 func TestProcessPayloadRoundtrip(t *testing.T) {
@@ -60,5 +61,33 @@ func TestJobResultJSON(t *testing.T) {
 	}
 	if len(b) == 0 {
 		t.Error("expected non-empty JSON")
+	}
+}
+
+func TestProcessPayload_SongField(t *testing.T) {
+	p := worker.ProcessPayload{JobID: "x", Song: true}
+	b, _ := json.Marshal(p)
+	var got worker.ProcessPayload
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Song {
+		t.Error("Song field lost in JSON round-trip")
+	}
+}
+
+func TestJobResult_LyricsValidation(t *testing.T) {
+	lv := &lyrics.LyricsValidation{CoherenceScore: 80, Confidence: 0.9}
+	r := worker.JobResult{JobID: "x", LyricsValidation: lv}
+	b, _ := json.Marshal(r)
+	var got worker.JobResult
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.LyricsValidation == nil {
+		t.Fatal("LyricsValidation is nil after round-trip")
+	}
+	if got.LyricsValidation.CoherenceScore != 80 {
+		t.Errorf("CoherenceScore: got %v, want 80", got.LyricsValidation.CoherenceScore)
 	}
 }
