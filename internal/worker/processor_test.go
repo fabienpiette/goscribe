@@ -221,7 +221,9 @@ func TestProcessTask_SongMode_Success(t *testing.T) {
 	rdb.Set(context.Background(), worker.ResultKeyPrefix+jobID, b, time.Hour)
 
 	audioFile := filepath.Join(t.TempDir(), "song.mp3")
-	os.WriteFile(audioFile, []byte("audio"), 0644)
+	if err := os.WriteFile(audioFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	task := makeTask(t, worker.ProcessPayload{
 		JobID:     jobID,
@@ -272,7 +274,9 @@ func TestProcessTask_SongMode_NoAudioPath(t *testing.T) {
 		Song:     true,
 	})
 
-	proc.ProcessTask(context.Background(), task)
+	if err := proc.ProcessTask(context.Background(), task); err == nil {
+		t.Fatal("expected error from ProcessTask")
+	}
 
 	val, _ := rdb.Get(context.Background(), worker.ResultKeyPrefix+jobID).Result()
 	var result worker.JobResult
@@ -303,13 +307,15 @@ func TestProcessTask_SongMode_ValidationError_JobSucceeds(t *testing.T) {
 		},
 	})
 
-	jobID := "song-val-err"
+	jobID := "song-validation-err"
 	initial := worker.JobResult{JobID: jobID, Status: worker.StatusQueued}
 	b, _ := json.Marshal(initial)
 	rdb.Set(context.Background(), worker.ResultKeyPrefix+jobID, b, time.Hour)
 
 	audioFile := filepath.Join(t.TempDir(), "song.mp3")
-	os.WriteFile(audioFile, []byte("audio"), 0644)
+	if err := os.WriteFile(audioFile, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	task := makeTask(t, worker.ProcessPayload{
 		JobID: jobID, AudioPath: audioFile, Provider: "openai", Song: true,
 	})
