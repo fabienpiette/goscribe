@@ -66,6 +66,13 @@ paths:
                     The request body is the `JobResult` JSON object.
                     Requests to private/loopback addresses are rejected.
                   example: https://example.com/hooks/transcription
+                song:
+                  type: boolean
+                  default: false
+                  description: |
+                    When true, treats the submitted audio as a song. Extracts vocals with
+                    demucs before transcribing, then validates the resulting lyrics.
+                    Requires the server to be running the song-capable image (goscribe:song).
       responses:
         "202":
           description: Job accepted and queued for processing.
@@ -237,6 +244,10 @@ components:
           format: date-time
           nullable: true
           description: Time the job finished (succeeded or failed). Null while still in progress.
+        lyrics_validation:
+          $ref: '#/components/schemas/LyricsValidation'
+          nullable: true
+          description: Lyrics validation result. Only present for song-mode jobs.
 
     PostAction:
       type: object
@@ -279,6 +290,54 @@ components:
         error:
           type: string
           description: Human-readable error message.
+
+    LyricsValidation:
+      type: object
+      properties:
+        coherence_score:
+          type: number
+          description: 0–100
+        viability_score:
+          type: number
+        structure_score:
+          type: number
+        is_plausible_song:
+          type: boolean
+        cleaned_lyrics:
+          type: string
+        confidence:
+          type: number
+          description: 0–1
+        coherence_issues:
+          type: array
+          items:
+            type: object
+            properties:
+              line: { type: string }
+              issue: { type: string }
+        structure_analysis:
+          type: object
+          properties:
+            has_repetition: { type: boolean }
+            has_chorus_pattern: { type: boolean }
+            structure_consistent: { type: boolean }
+            notes: { type: string }
+        semantic_consistency:
+          type: object
+          properties:
+            has_theme: { type: boolean }
+            theme_description: { type: string }
+            contradictions:
+              type: array
+              items: { type: string }
+        suspected_errors:
+          type: array
+          items:
+            type: object
+            properties:
+              original: { type: string }
+              suggestion: { type: string }
+              reason: { type: string }
 
   responses:
     BadRequest:
