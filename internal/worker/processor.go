@@ -153,10 +153,28 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
 
+	if payload.Song && payload.AudioPath == "" {
+		return p.failJob(ctx, payload, "song mode requires an audio file")
+	}
+
 	p.updateStatus(ctx, payload.JobID, StatusProcessing)
 
-	if payload.AudioPath != "" {
-		defer os.Remove(payload.AudioPath)
+	originalAudioPath := payload.AudioPath
+	if originalAudioPath != "" {
+		defer os.Remove(originalAudioPath)
+	}
+
+	if payload.Song && payload.AudioPath != "" {
+		extractor := p.cfg.VocalExtractor
+		if extractor == nil {
+			extractor = song.ExtractVocals
+		}
+		vocalsPath, cleanup, err := extractor(payload.AudioPath)
+		if err != nil {
+			return p.failJob(ctx, payload, fmt.Sprintf("vocal extraction failed: %v", err))
+		}
+		defer cleanup()
+		payload.AudioPath = vocalsPath
 	}
 
 	transcript := payload.Transcript
@@ -205,6 +223,18 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	}
 	if existing := p.loadResult(ctx, payload.JobID); existing != nil {
 		result.CreatedAt = existing.CreatedAt
+	}
+
+	if payload.Song {
+		validation, valErr := p.cfg.Transcriber.ValidateLyrics(
+			transcript, payload.Provider,
+			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
+		)
+		if valErr != nil {
+			fmt.Printf("⚠ Warning: lyrics validation failed: %v\n", valErr)
+		} else {
+			result.LyricsValidation = validation
+		}
 	}
 
 	if err := p.saveResult(ctx, result); err != nil {
