@@ -215,19 +215,25 @@ func TestRunSongMode_WritesValidationFile(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	fakeVocals := filepath.Join(t.TempDir(), "vocals.wav")
-	os.WriteFile(fakeVocals, []byte("fake"), 0644)
+	if err := os.WriteFile(fakeVocals, []byte("fake"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "audio") {
-			w.Write([]byte(`{"text":"I will always love you"}`))
+			if _, err := w.Write([]byte(`{"text":"I will always love you"}`)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
 		} else {
 			lv := lyrics.LyricsValidation{CoherenceScore: 80, Confidence: 0.9}
 			b, _ := json.Marshal(lv)
 			resp := fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b))
-			w.Write([]byte(resp))
+			if _, err := w.Write([]byte(resp)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
 		}
 	}))
 	defer srv.Close()
@@ -235,7 +241,9 @@ func TestRunSongMode_WritesValidationFile(t *testing.T) {
 
 	audioDir := t.TempDir()
 	audioPath := filepath.Join(audioDir, "song.mp3")
-	os.WriteFile(audioPath, []byte("audio"), 0644)
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	opts := runOptions{
 		apiKey:         "test-key",
@@ -264,16 +272,22 @@ func TestRunSongMode_CustomOutputFlag(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	fakeVocals := filepath.Join(t.TempDir(), "vocals.wav")
-	os.WriteFile(fakeVocals, []byte("fake"), 0644)
+	if err := os.WriteFile(fakeVocals, []byte("fake"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "audio") {
-			w.Write([]byte(`{"text":"sweet dreams are made of this"}`))
+			if _, err := w.Write([]byte(`{"text":"sweet dreams are made of this"}`)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
 		} else {
 			lv := lyrics.LyricsValidation{CoherenceScore: 70, Confidence: 0.8}
 			b, _ := json.Marshal(lv)
-			w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b))))
+			if _, err := w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b)))); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
 		}
 	}))
 	defer srv.Close()
@@ -281,7 +295,9 @@ func TestRunSongMode_CustomOutputFlag(t *testing.T) {
 
 	audioDir := t.TempDir()
 	audioPath := filepath.Join(audioDir, "track.mp3")
-	os.WriteFile(audioPath, []byte("audio"), 0644)
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	customOut := filepath.Join(t.TempDir(), "custom.txt")
 
 	opts := runOptions{
@@ -309,16 +325,22 @@ func TestRunSongMode_WithActions(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	fakeVocals := filepath.Join(t.TempDir(), "vocals.wav")
-	os.WriteFile(fakeVocals, []byte("fake"), 0644)
+	if err := os.WriteFile(fakeVocals, []byte("fake"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "audio") {
-			w.Write([]byte(`{"text":"I want to break free"}`))
+			if _, err := w.Write([]byte(`{"text":"I want to break free"}`)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
 		} else {
 			lv := lyrics.LyricsValidation{CoherenceScore: 88, Confidence: 0.93}
 			b, _ := json.Marshal(lv)
-			w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b))))
+			if _, err := w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b)))); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
 		}
 	}))
 	defer srv.Close()
@@ -326,7 +348,9 @@ func TestRunSongMode_WithActions(t *testing.T) {
 
 	audioDir := t.TempDir()
 	audioPath := filepath.Join(audioDir, "song2.mp3")
-	os.WriteFile(audioPath, []byte("audio"), 0644)
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	opts := runOptions{
 		apiKey:         "test-key",

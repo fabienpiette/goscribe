@@ -20,20 +20,7 @@ func writeFakeDemucs(t *testing.T, exitCode int, stderr string) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := filepath.Join(dir, "demucs")
-	body := `#!/bin/sh
-outdir=""
-input=""
-for arg in "$@"; do
-  case "$arg" in
-    -o) shift; outdir="$1" ;;
-    --*|-n|--two-stems=*) ;;
-    *) input="$arg" ;;
-  esac
-  shift 2>/dev/null || true
-done
-# parse -o <dir> properly
-args="$@"
-`
+	var body string
 	if exitCode != 0 {
 		body = `#!/bin/sh
 echo "` + stderr + `" >&2
@@ -56,7 +43,9 @@ mkdir -p "$outdir/htdemucs/$stem"
 touch "$outdir/htdemucs/$stem/vocals.wav"
 `
 	}
-	os.WriteFile(script, []byte(body), 0755)
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	return dir
 }
 
@@ -66,7 +55,9 @@ func TestExtractVocals_Success(t *testing.T) {
 
 	audioDir := t.TempDir()
 	audioPath := filepath.Join(audioDir, "mysong.mp3")
-	os.WriteFile(audioPath, []byte("fake"), 0644)
+	if err := os.WriteFile(audioPath, []byte("fake"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	vocalsPath, cleanup, err := song.ExtractVocals(audioPath)
 	if err != nil {
@@ -124,7 +115,9 @@ func TestValidateLyrics_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := `{"choices":[{"message":{"content":"` + validLyricsJSON() + `"}}]}`
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(resp))
+		if _, err := w.Write([]byte(resp)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
 	}))
 	defer srv.Close()
 	openai.BaseURL = srv.URL
@@ -145,7 +138,9 @@ func TestValidateLyrics_MalformedJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := `{"choices":[{"message":{"content":"not valid json"}}]}`
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(resp))
+		if _, err := w.Write([]byte(resp)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
 	}))
 	defer srv.Close()
 	openai.BaseURL = srv.URL
@@ -169,7 +164,9 @@ func TestValidateLyrics_FallbackToGemini(t *testing.T) {
 	geminiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := `{"candidates":[{"content":{"parts":[{"text":"` + validLyricsJSON() + `"}]}}]}`
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(resp))
+		if _, err := w.Write([]byte(resp)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
 	}))
 	defer geminiSrv.Close()
 	gemini.BaseURL = geminiSrv.URL
