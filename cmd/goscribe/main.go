@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"goscribe/internal/provider"
+	"goscribe/internal/song"
 	"goscribe/pkg/config"
 )
 
@@ -85,6 +87,8 @@ type runOptions struct {
 	configFile      string
 	transcriptFiles []string
 	args            []string
+	song            bool
+	vocalExtractor  func(string) (string, func(), error)
 }
 
 func run(opts runOptions) error {
@@ -136,6 +140,10 @@ func run(opts runOptions) error {
 
 	enableFallback := opts.enableFallback
 
+	if opts.song && len(opts.transcriptFiles) > 0 {
+		return fmt.Errorf("-song requires an audio file; use -transcript to process existing lyrics")
+	}
+
 	if opts.listActions {
 		fmt.Println("Available post-processing actions:")
 		fmt.Println()
@@ -151,6 +159,7 @@ func run(opts runOptions) error {
 
 	var transcription string
 	var audioPath string
+	var originalAudioPath string
 	var transcriptFilename string
 
 	if len(opts.transcriptFiles) > 0 {
@@ -194,6 +203,20 @@ func run(opts runOptions) error {
 		if _, err := os.Stat(audioPath); os.IsNotExist(err) {
 			return fmt.Errorf("audio file '%s' not found", audioPath)
 		}
+		originalAudioPath = audioPath
+
+		if opts.song {
+			extractor := opts.vocalExtractor
+			if extractor == nil {
+				extractor = song.ExtractVocals
+			}
+			vocalsPath, cleanup, err := extractor(audioPath)
+			if err != nil {
+				return fmt.Errorf("vocal extraction: %w", err)
+			}
+			defer cleanup()
+			audioPath = vocalsPath
+		}
 
 		if opts.output == "" {
 			ext := filepath.Ext(audioPath)
@@ -214,6 +237,23 @@ func run(opts runOptions) error {
 			return fmt.Errorf("writing transcript file: %w", err)
 		}
 		fmt.Printf("Raw transcript saved to %s\n", transcriptFilename)
+
+		if opts.song {
+			validation, valErr := song.ValidateLyrics(transcription, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
+			if valErr != nil {
+				fmt.Printf("⚠ Warning: lyrics validation failed: %v\n", valErr)
+			} else {
+				data, _ := json.MarshalIndent(validation, "", "  ")
+				ext := filepath.Ext(opts.args[0])
+				baseName := strings.TrimSuffix(opts.args[0], ext)
+				validationFile := baseName + "-lyrics-validation.json"
+				if err := os.WriteFile(validationFile, data, 0644); err != nil {
+					fmt.Printf("⚠ Error writing validation file: %v\n", err)
+				} else {
+					fmt.Printf("✓ Lyrics validation saved to %s\n", validationFile)
+				}
+			}
+		}
 	}
 
 	var processedFiles []string
@@ -268,6 +308,10 @@ func run(opts runOptions) error {
 					} else {
 						processedFilename = fmt.Sprintf("%s+%d-%s.txt", baseName, len(opts.transcriptFiles)-1, action.ID)
 					}
+				} else if opts.song && originalAudioPath != "" {
+					ext := filepath.Ext(originalAudioPath)
+					baseName := strings.TrimSuffix(originalAudioPath, ext)
+					processedFilename = fmt.Sprintf("%s-%s.txt", baseName, action.ID)
 				} else {
 					ext := filepath.Ext(audioPath)
 					baseName := strings.TrimSuffix(audioPath, ext)
@@ -301,7 +345,11 @@ func run(opts runOptions) error {
 			}
 		}
 	} else {
-		fmt.Printf("  Audio file: %s\n", audioPath)
+		displayPath := audioPath
+		if opts.song && originalAudioPath != "" {
+			displayPath = originalAudioPath
+		}
+		fmt.Printf("  Audio file: %s\n", displayPath)
 		fmt.Printf("  Transcript: %s\n", transcriptFilename)
 	}
 	if len(processedFiles) > 0 {
@@ -343,6 +391,7 @@ func main() {
 	setProviderFlag := flag.String("set-provider", "", "Set default AI provider in config file (openai or gemini)")
 	var transcriptFiles multiStringFlag
 	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
+	songMode := flag.Bool("song", false, "Treat input as a song: extract vocals with demucs, transcribe, then validate lyrics")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI or Gemini\n\n")
@@ -365,6 +414,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting.txt -action openai-meeting-summary\n\n")
 		fmt.Fprintf(os.Stderr, "  # Automatically select best actions\n")
 		fmt.Fprintf(os.Stderr, "  goscribe --auto meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Song mode: extract vocals, transcribe, validate lyrics\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -song concert.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Store API keys in config file\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -set-key YOUR_OPENAI_KEY\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -set-gemini-key YOUR_GEMINI_KEY\n\n")
@@ -434,6 +485,7 @@ func main() {
 		configFile:      *configFile,
 		transcriptFiles: transcriptFiles,
 		args:            flag.Args(),
+		song:            *songMode,
 	}
 
 	if err := run(opts); err != nil {
