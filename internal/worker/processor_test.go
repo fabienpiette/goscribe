@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"goscribe/internal/worker"
 	"goscribe/pkg/config"
+	"goscribe/pkg/lyrics"
 )
 
 type mockTranscriber struct {
@@ -37,6 +38,10 @@ func (m *mockTranscriber) ProcessChunked(transcript string, action *config.PostA
 
 func (m *mockTranscriber) SelectBestActions(transcript string, actions []config.PostAction, prov, openaiKey, geminiKey, geminiModel string) ([]string, error) {
 	return m.selected, m.err
+}
+
+func (m *mockTranscriber) ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (*lyrics.LyricsValidation, error) {
+	return nil, m.err
 }
 
 func makeTask(t *testing.T, payload worker.ProcessPayload) *asynq.Task {
@@ -70,11 +75,12 @@ func TestProcessTask_TranscriptMode(t *testing.T) {
 		processed:  map[string]string{"test-action": "summary text"},
 	}
 	proc := worker.NewProcessor(worker.Config{
-		Transcriber: tr,
-		RDB:         rdb,
-		Provider:    "openai",
-		ResultTTL:   time.Hour,
-		PostActions: []config.PostAction{action},
+		Transcriber:    tr,
+		RDB:            rdb,
+		Provider:       "openai",
+		ResultTTL:      time.Hour,
+		PostActions:    []config.PostAction{action},
+		EnableFallback: true,
 	})
 
 	jobID := "job-transcript-test"
@@ -119,10 +125,11 @@ func TestProcessTask_DeletesTempFile(t *testing.T) {
 
 	tr := &mockTranscriber{transcript: "transcribed"}
 	proc := worker.NewProcessor(worker.Config{
-		Transcriber: tr,
-		RDB:         rdb,
-		Provider:    "openai",
-		ResultTTL:   time.Hour,
+		Transcriber:    tr,
+		RDB:            rdb,
+		Provider:       "openai",
+		ResultTTL:      time.Hour,
+		EnableFallback: true,
 	})
 
 	jobID := "job-file-cleanup"
@@ -152,10 +159,11 @@ func TestProcessTask_WebhookBlockedBySSRF(t *testing.T) {
 
 	tr := &mockTranscriber{transcript: "hello"}
 	proc := worker.NewProcessor(worker.Config{
-		Transcriber: tr,
-		RDB:         rdb,
-		Provider:    "openai",
-		ResultTTL:   time.Hour,
+		Transcriber:    tr,
+		RDB:            rdb,
+		Provider:       "openai",
+		ResultTTL:      time.Hour,
+		EnableFallback: true,
 	})
 
 	jobID := "job-webhook-blocked"
