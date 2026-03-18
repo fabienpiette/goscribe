@@ -17,7 +17,9 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"goscribe/internal/provider"
+	"goscribe/internal/song"
 	"goscribe/pkg/config"
+	"goscribe/pkg/lyrics"
 )
 
 var webhookClient = &http.Client{
@@ -97,6 +99,7 @@ type Transcriber interface {
 	TranscribeAudio(audioPath, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (string, error)
 	ProcessChunked(transcript string, action *config.PostAction, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (string, error)
 	SelectBestActions(transcript string, actions []config.PostAction, prov, openaiKey, geminiKey, geminiModel string) ([]string, error)
+	ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (*lyrics.LyricsValidation, error)
 }
 
 type RealTranscriber struct{}
@@ -113,15 +116,21 @@ func (RealTranscriber) SelectBestActions(transcript string, actions []config.Pos
 	return provider.SelectBestActions(transcript, actions, prov, openaiKey, geminiKey, geminiModel)
 }
 
+func (RealTranscriber) ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (*lyrics.LyricsValidation, error) {
+	return song.ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel, fallback)
+}
+
 type Config struct {
-	Transcriber Transcriber
-	RDB         *redis.Client
-	OpenAIKey   string
-	GeminiKey   string
-	GeminiModel string
-	Provider    string
-	ResultTTL   time.Duration
-	PostActions []config.PostAction
+	Transcriber    Transcriber
+	RDB            *redis.Client
+	OpenAIKey      string
+	GeminiKey      string
+	GeminiModel    string
+	Provider       string
+	ResultTTL      time.Duration
+	PostActions    []config.PostAction
+	EnableFallback bool                                 // controls fallback for all AI calls
+	VocalExtractor func(string) (string, func(), error) // nil → song.ExtractVocals
 }
 
 type Processor struct {
@@ -155,7 +164,7 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		var err error
 		transcript, err = p.cfg.Transcriber.TranscribeAudio(
 			payload.AudioPath, payload.Provider,
-			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, true,
+			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
 		)
 		if err != nil {
 			return p.failJob(ctx, payload, fmt.Sprintf("transcription failed: %v", err))
@@ -176,7 +185,7 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		}
 		out, err := p.cfg.Transcriber.ProcessChunked(
 			transcript, action, payload.Provider,
-			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, true,
+			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
 		)
 		if err != nil {
 			results[id] = fmt.Sprintf("error: %v", err)

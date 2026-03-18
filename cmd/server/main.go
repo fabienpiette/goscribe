@@ -64,13 +64,14 @@ func main() {
 	if asynqSrv != nil {
 		mux := asynq.NewServeMux()
 		proc := worker.NewProcessor(worker.Config{
-			RDB:         rdb,
-			OpenAIKey:   cfg.openAIKey,
-			GeminiKey:   cfg.geminiKey,
-			GeminiModel: cfg.geminiModel,
-			Provider:    cfg.provider,
-			ResultTTL:   cfg.resultTTL,
-			PostActions: postActions,
+			RDB:            rdb,
+			OpenAIKey:      cfg.openAIKey,
+			GeminiKey:      cfg.geminiKey,
+			GeminiModel:    cfg.geminiModel,
+			Provider:       cfg.provider,
+			ResultTTL:      cfg.resultTTL,
+			PostActions:    postActions,
+			EnableFallback: true, // matches previously hardcoded behaviour
 		})
 		mux.HandleFunc(worker.TaskTypeProcess, proc.ProcessTask)
 		go func() {
