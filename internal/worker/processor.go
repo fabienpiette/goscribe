@@ -29,6 +29,10 @@ var webhookClient = &http.Client{
 	},
 }
 
+// webhookClientPrivate is used when WebhookAllowPrivate is enabled — no SSRF
+// protection, for trusted internal networks (e.g. Docker service callbacks).
+var webhookClientPrivate = &http.Client{Timeout: 10 * time.Second}
+
 func dialContextWithValidation(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -121,16 +125,17 @@ func (RealTranscriber) ValidateLyrics(transcript, prov, openaiKey, geminiKey, ge
 }
 
 type Config struct {
-	Transcriber    Transcriber
-	RDB            *redis.Client
-	OpenAIKey      string
-	GeminiKey      string
-	GeminiModel    string
-	Provider       string
-	ResultTTL      time.Duration
-	PostActions    []config.PostAction
-	EnableFallback bool                                 // controls fallback for all AI calls
-	VocalExtractor func(string) (string, func(), error) // nil → song.ExtractVocals
+	Transcriber          Transcriber
+	RDB                  *redis.Client
+	OpenAIKey            string
+	GeminiKey            string
+	GeminiModel          string
+	Provider             string
+	ResultTTL            time.Duration
+	PostActions          []config.PostAction
+	EnableFallback       bool                                 // controls fallback for all AI calls
+	VocalExtractor       func(string) (string, func(), error) // nil → song.ExtractVocals
+	WebhookAllowPrivate  bool                                 // skip SSRF check for internal callbacks
 }
 
 type Processor struct {
@@ -356,7 +361,11 @@ func (p *Processor) fireWebhook(rawURL string, result JobResult) {
 		log.Printf("webhook: error marshalling payload for job %s: %v", result.JobID, err)
 		return
 	}
-	resp, err := webhookClient.Post(rawURL, "application/json", bytes.NewReader(b))
+	client := webhookClient
+	if p.cfg.WebhookAllowPrivate {
+		client = webhookClientPrivate
+	}
+	resp, err := client.Post(rawURL, "application/json", bytes.NewReader(b))
 	if err != nil {
 		log.Printf("webhook: error delivering for job %s to %s: %v", result.JobID, rawURL, err)
 		return
