@@ -12,7 +12,9 @@ two distinct operation modes from the same shared engine.
 
 **CLI mode** (`cmd/goscribe`) is a synchronous, single-binary tool: feed it an
 audio file, get back a transcript and any post-processed results. Everything
-runs in one process, one call stack.
+runs in one process, one call stack. Song mode (`-song`) extends this by
+first extracting vocals with demucs, then running the standard pipeline, then
+validating the resulting lyrics with an AI provider.
 
 **Server mode** (`cmd/server`) is an HTTP API backed by a Redis job queue. A
 client submits a job via `POST /jobs`, receives a job ID immediately, and polls
@@ -26,23 +28,19 @@ in one process (`MODE=all`) or as separate containers (`MODE=api` +
   ────────                         ───────────
 
   cmd/goscribe ──► provider ─┐     HTTP client
-       │                     │          │
+       │           song      │          │
        ▼                     │     cmd/server (MODE=api)
    pkg/config                │          │
-                             │     internal/api ──► asynq ──► Redis
+   pkg/lyrics                │     internal/api ──► asynq ──► Redis
                              │                                   │
                              │     cmd/server (MODE=worker)      │
                              │          │                        │
                              └──► internal/worker ◄─────────────┘
                                         │
                                    provider ──► internal/openai
-                                               internal/gemini
+                                   song    ──► internal/gemini
                                                internal/util
 ```
-
-Both modes share `pkg/config`, `internal/provider`, `internal/openai`,
-`internal/gemini`, and `internal/util`. Neither mode is aware of the other's
-entry point.
 
 ## Code Map
 
@@ -50,7 +48,11 @@ entry point.
 
 CLI entry point. Parses flags, loads config via `pkg/config`, and runs the
 transcription and post-processing pipeline synchronously. The `run()` function
-holds all resolved state as local variables — no globals.
+holds all resolved state as local variables — no globals. When `-song` is set,
+`run()` calls `song.ExtractVocals` (or an injected `vocalExtractor` for tests),
+reassigns `audioPath` to the extracted vocals, runs the normal transcription
+pipeline, then calls `song.ValidateLyrics` and writes the result to
+`<basename>-lyrics-validation.json` alongside the original audio file.
 
 Key files: `main.go` (flag parsing, `run()`, `normalizeArgs()`).
 
@@ -70,34 +72,44 @@ HTTP layer for server mode. `Handler` receives an `asynq.Client` and a Redis
 client at construction time; it never touches the transcription engine directly.
 `SubmitJob` saves an initial result to Redis, then enqueues a `goscribe:process`
 task. `GetJob` reads back the result by job ID. `ListActions` returns the loaded
-`PostAction` slice.
+`PostAction` slice. The `song` form field is read and forwarded into
+`ProcessPayload`; the handler itself performs no song-mode logic.
 
 Key files: `handler.go` (`Handler`, `SubmitJob`, `GetJob`, `ListActions`,
-`Health`), `router.go` (chi router wiring).
+`Health`), `router.go` (chi router wiring), `openapi.yaml` (OpenAPI 3.0 spec,
+embedded via `//go:embed` in `swagger.go`).
 
 **Architecture Invariant:** `internal/api` never imports `internal/provider`,
-`internal/openai`, or `internal/gemini`. All AI work happens in the worker.
+`internal/openai`, `internal/gemini`, or `internal/song`. All AI work happens
+in the worker.
 
 ### `internal/worker/`
 
 Async job processor for server mode. `Processor` implements the asynq handler
 interface: it unmarshals a `ProcessPayload`, runs the full transcription and
 post-processing pipeline via the `Transcriber` interface, writes the `JobResult`
-to Redis, and optionally fires a webhook. The `Transcriber` interface is
-satisfied by `RealTranscriber` in production and a mock in tests.
+to Redis, and optionally fires a webhook. When `payload.Song` is true, it calls
+the injected `VocalExtractor` (defaults to `song.ExtractVocals`), substitutes
+the vocals path for transcription, and calls `Transcriber.ValidateLyrics` after
+the transcript is ready. Validation failure is non-fatal: the job still completes
+with `status=completed` and a nil `LyricsValidation` field.
+
+The `Transcriber` interface is satisfied by `RealTranscriber` in production and
+a mock in tests. `EnableFallback` on `Config` controls provider fallback for all
+AI calls (transcription, post-processing, and lyrics validation).
 
 Key files: `tasks.go` (shared types: `ProcessPayload`, `JobResult`, status
 constants, `TaskTypeProcess`), `processor.go` (`Processor`, `ProcessTask`,
 `fireWebhook`, SSRF protection via `dialContextWithValidation`).
 
 **Architecture Invariant:** `internal/worker` is the only package in server
-mode that imports `internal/provider`. `internal/api` must not reach into
-provider logic directly.
+mode that calls provider logic. `internal/api` must not reach into provider
+logic directly.
 
 ### `pkg/config/`
 
 Configuration types and all config operations. This is the only `pkg/`
-package, making it importable by external tools.
+package alongside `pkg/lyrics`, making it importable by external tools.
 
 Exports `Config`, `PostAction`, `LoadConfig()`, `ValidateConfig()`,
 `CreateDefault()`, `Reset()`, `StoreAPIKey()`, `StoreGeminiAPIKey()`,
@@ -113,6 +125,32 @@ YAML for built-in actions).
 **Architecture Invariant:** `pkg/config` has zero imports from `internal/`.
 It depends only on the standard library and `gopkg.in/yaml.v3`.
 
+### `pkg/lyrics/`
+
+Shared types for the lyrics validation result. Lives in `pkg/` rather than
+`internal/song/` so that `internal/worker` can reference `LyricsValidation`
+without creating a transitive import from the worker to the song package.
+
+Exports `LyricsValidation`, `CoherenceIssue`, `StructureAnalysis`,
+`SemanticConsistency`, `SuspectedError`.
+
+Key files: `lyrics.go`.
+
+**Architecture Invariant:** `pkg/lyrics` has zero imports from `internal/`.
+It depends only on the standard library.
+
+### `internal/song/`
+
+Song-mode support: vocal extraction via demucs and AI-powered lyrics validation.
+`ExtractVocals` shells out to the `demucs` binary, writes output to a temporary
+directory, and returns the `vocals.wav` path plus a cleanup function.
+`ValidateLyrics` sends the transcript to the selected AI provider using the
+embedded `validationPrompt` constant; it calls the AI client packages directly
+(not through `internal/provider`) to avoid double-injecting the transcript into
+the prompt.
+
+Key files: `song.go` (`ExtractVocals`, `ValidateLyrics`, `validationPrompt`).
+
 ### `internal/provider/`
 
 Provider routing and cross-provider fallback. Each function accepts a provider
@@ -123,9 +161,12 @@ enabled.
 Key files: `provider.go` (`TranscribeAudio()`, `ProcessChunked()`,
 `SelectBestActions()`).
 
-**Architecture Invariant:** `internal/provider` is the only package that
-imports both `internal/openai` and `internal/gemini`. No other package may
-import both.
+**Architecture Invariant:** `internal/provider` is the standard path for
+provider-routing with fallback. Both `internal/provider` and `internal/song`
+import the AI client packages directly; `internal/song` does so because
+`ProcessChunked` would double-inject the transcript (it always appends the
+transcript to the prompt, but `ValidateLyrics` embeds the lyrics in the prompt
+itself). No other package may import both AI client packages.
 
 ### `internal/openai/`
 
@@ -166,7 +207,8 @@ this project. It depends only on the standard library.
 1. **Dependency direction flows inward.** `cmd/` imports `pkg/` and `internal/`.
    `internal/worker` and `internal/api` import `pkg/config` but not each other.
    `internal/provider` imports `internal/openai`, `internal/gemini`, and
-   `pkg/config`. The openai and gemini packages import `internal/util` and
+   `pkg/config`. `internal/song` imports `internal/openai`, `internal/gemini`,
+   and `pkg/lyrics`. The openai and gemini packages import `internal/util` and
    `pkg/config`. No cycles exist.
 
 2. **No global mutable state.** `LoadConfig()` returns a value without side
@@ -195,13 +237,21 @@ this project. It depends only on the standard library.
    Small files (<25 MB for OpenAI, <20 MB for Gemini) bypass splitting entirely.
    The Docker image installs ffmpeg in the runtime layer.
 
-7. **Chunk merging is recursive but bounded.** `hierarchicalMerge` halves the
+7. **Song mode requires demucs.** `ExtractVocals` hard-fails if `demucs` is not
+   on PATH. The standard Docker image (`Dockerfile`) does not include demucs;
+   use `Dockerfile.song` for song-capable deployments.
+
+8. **Song mode validation is non-fatal.** If `ValidateLyrics` returns an error,
+   the job (server mode) or CLI run still completes successfully. The transcript
+   is always written; `LyricsValidation` is nil/absent when validation fails.
+
+9. **Chunk merging is recursive but bounded.** `hierarchicalMerge` halves the
    chunk count at each level, guaranteeing O(log N) passes. It cannot
    infinite-loop because each level strictly reduces the count.
 
-8. **Provider fallback only fires on errors, not on empty results.** A
-   successful API call that returns an empty string is treated as an error
-   (`"no response from API"`), which does trigger fallback.
+10. **Provider fallback only fires on errors, not on empty results.** A
+    successful API call that returns an empty string is treated as an error
+    (`"no response from API"`), which does trigger fallback.
 
 ## Cross-Cutting Concerns
 
@@ -224,8 +274,10 @@ API keys always come from environment variables in server deployments.
 Audio chunks from splitting are written to `os.MkdirTemp("", "goscribe-chunks-*")`
 and cleaned up via `defer os.RemoveAll`. Uploaded audio files in server mode are
 written to `UPLOADS_DIR` (default `/tmp/goscribe-uploads`) and removed by
-`defer os.Remove` in the worker after transcription. If the process is killed
-mid-job, orphaned files may remain and must be cleaned up manually.
+`defer os.Remove` in the worker after transcription. Song mode creates a separate
+temp directory (`goscribe-demucs-*`) for demucs output; the caller's cleanup
+function removes it via `defer cleanup()`. If the process is killed mid-job,
+orphaned files may remain and must be cleaned up manually.
 
 ### Retry and Rate-Limit Strategy
 
@@ -238,16 +290,20 @@ for 429 responses, the exact wait time is parsed from the response body
 
 Tests are co-located with each package. No tests hit real APIs — both AI clients
 expose an overridable `BaseURL` that tests redirect to `httptest.NewServer`.
+Song-mode tests use a fake `demucs` shell script written to a temp dir, injected
+via `PATH` override or the `vocalExtractor` function field on `runOptions`/`worker.Config`.
 
 | Package | File | What's tested |
 |---|---|---|
 | `pkg/config` | `config_test.go` | Loading, validation, key storage, defaults |
+| `pkg/lyrics` | `lyrics_test.go` | JSON round-trip, float score unmarshalling |
 | `internal/util` | `util_test.go` | Model limits, MIME types, audio/string ops |
 | `internal/openai` | `openai_test.go` | HTTP-mocked transcription, chunking, merge |
 | `internal/gemini` | `gemini_test.go` | HTTP-mocked transcription, chunking, merge |
-| `cmd/goscribe` | `main_test.go` | `run()` integration, flag parsing, normalizeArgs |
+| `internal/song` | `song_test.go` | Fake-demucs extraction, HTTP-mocked validation |
+| `cmd/goscribe` | `main_test.go` | `run()` integration, flag parsing, song pipeline |
 | `internal/api` | `handler_test.go` | HTTP handler behaviour with mock enqueuer/Redis |
-| `internal/worker` | `processor_test.go`, `tasks_test.go` | Job processing with mock transcriber |
+| `internal/worker` | `processor_test.go`, `tasks_test.go` | Job processing, song pipeline with mock transcriber |
 
 Key patterns: table-driven sub-tests with `t.Run`, `t.TempDir()` for filesystem
 isolation, `os.Setenv("HOME", tmpDir)` to isolate config operations.
@@ -276,4 +332,6 @@ go test -v -run TestValidateConfig ./...  # single test
 5. **Server**: add `ANTHROPIC_API_KEY` to `serverConfig` in
    `cmd/server/main.go`, read it in `loadConfig()`, and thread it through
    `worker.Config` and `Processor`.
-6. Add tests in `internal/anthropic/anthropic_test.go` using `httptest.Server`.
+6. **Song mode**: add the `case "anthropic":` branch in `internal/song/song.go`
+   `ValidateLyrics` switch so lyrics validation works with the new provider.
+7. Add tests in `internal/anthropic/anthropic_test.go` using `httptest.Server`.

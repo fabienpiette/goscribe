@@ -105,7 +105,7 @@ func ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, 
 		if geminiKey == "" {
 			return nil, fmt.Errorf("Gemini API key required")
 		}
-		result, primaryErr = openai.ProcessChunked("", &action, openaiKey)
+		result, primaryErr = gemini.ProcessChunked("", &action, geminiKey, geminiModel)
 		if primaryErr == nil {
 			break
 		}
