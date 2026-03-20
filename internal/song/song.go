@@ -8,7 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	providerPkg "goscribe/internal/provider"
+	"goscribe/internal/gemini"
+	"goscribe/internal/openai"
 	"goscribe/pkg/config"
 	"goscribe/pkg/lyrics"
 )
@@ -79,22 +80,63 @@ Important:
 - Keep cleaned_lyrics close to original`
 
 func ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (*lyrics.LyricsValidation, error) {
-	model := geminiModel
+	primaryModel := geminiModel
 	if prov != "gemini" {
-		model = "gpt-4o-mini"
+		primaryModel = "gpt-4o-mini"
 	}
 	action := config.PostAction{
 		ID:          "lyrics-validate",
 		Name:        "Lyrics Validation",
 		Type:        prov,
-		Model:       model,
+		Model:       primaryModel,
 		MaxTokens:   2000,
 		Temperature: 0.2,
 		Prompt:      strings.ReplaceAll(validationPrompt, "{transcript}", transcript),
 	}
-	result, err := providerPkg.ProcessChunked(transcript, &action, prov, openaiKey, geminiKey, model, fallback)
-	if err != nil {
-		return nil, fmt.Errorf("lyrics validation: %w", err)
+
+	// Call providers directly instead of ProcessChunked to avoid double-injecting
+	// the transcript: action.Prompt already contains the lyrics via {transcript}
+	// replacement, and ProcessChunked would append it again via its basePrompt.
+	var result string
+	var primaryErr error
+
+	switch prov {
+	case "gemini":
+		if geminiKey == "" {
+			return nil, fmt.Errorf("Gemini API key required")
+		}
+		result, primaryErr = openai.ProcessChunked("", &action, openaiKey)
+		if primaryErr == nil {
+			break
+		}
+		if fallback && openaiKey != "" && openaiKey != "XXXX" {
+			fmt.Printf("  ⚠ %s failed, trying fallback provider openai...\n", prov)
+			action.Model = "gpt-4o-mini"
+			result, primaryErr = openai.ProcessChunked("", &action, openaiKey)
+			if primaryErr == nil {
+				fmt.Printf("  ✓ Fallback to openai succeeded\n")
+			}
+		}
+	default:
+		if openaiKey == "" || openaiKey == "XXXX" {
+			return nil, fmt.Errorf("OpenAI API key required")
+		}
+		result, primaryErr = openai.ProcessChunked("", &action, openaiKey)
+		if primaryErr == nil {
+			break
+		}
+		if fallback && geminiKey != "" {
+			fmt.Printf("  ⚠ %s failed, trying fallback provider gemini...\n", prov)
+			action.Model = geminiModel
+			result, primaryErr = gemini.ProcessChunked("", &action, geminiKey, geminiModel)
+			if primaryErr == nil {
+				fmt.Printf("  ✓ Fallback to gemini succeeded\n")
+			}
+		}
+	}
+
+	if primaryErr != nil {
+		return nil, fmt.Errorf("lyrics validation: %w", primaryErr)
 	}
 	var v lyrics.LyricsValidation
 	if err := json.Unmarshal([]byte(result), &v); err != nil {

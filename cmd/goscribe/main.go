@@ -219,8 +219,8 @@ func run(opts runOptions) error {
 		}
 
 		if opts.output == "" {
-			ext := filepath.Ext(audioPath)
-			baseName := strings.TrimSuffix(audioPath, ext)
+			ext := filepath.Ext(originalAudioPath)
+			baseName := strings.TrimSuffix(originalAudioPath, ext)
 			transcriptFilename = baseName + "-transcript.txt"
 		} else {
 			transcriptFilename = opts.output
