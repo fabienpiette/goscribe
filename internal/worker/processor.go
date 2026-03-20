@@ -153,6 +153,15 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
 
+	mode := "transcript"
+	if payload.AudioPath != "" {
+		mode = "audio"
+	}
+	if payload.Song {
+		mode = "song"
+	}
+	log.Printf("job %s started: provider=%s mode=%s", payload.JobID, payload.Provider, mode)
+
 	if payload.Song && payload.AudioPath == "" {
 		return p.failJob(ctx, payload, "song mode requires an audio file")
 	}
@@ -165,6 +174,7 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	}
 
 	if payload.Song && payload.AudioPath != "" {
+		log.Printf("job %s: extracting vocals from %s", payload.JobID, payload.AudioPath)
 		extractor := p.cfg.VocalExtractor
 		if extractor == nil {
 			extractor = song.ExtractVocals
@@ -174,11 +184,13 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 			return p.failJob(ctx, payload, fmt.Sprintf("vocal extraction failed: %v", err))
 		}
 		defer cleanup()
+		log.Printf("job %s: vocals extracted to %s", payload.JobID, vocalsPath)
 		payload.AudioPath = vocalsPath
 	}
 
 	transcript := payload.Transcript
 	if payload.AudioPath != "" && transcript == "" {
+		log.Printf("job %s: transcribing audio with %s", payload.JobID, payload.Provider)
 		var err error
 		transcript, err = p.cfg.Transcriber.TranscribeAudio(
 			payload.AudioPath, payload.Provider,
@@ -187,11 +199,15 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		if err != nil {
 			return p.failJob(ctx, payload, fmt.Sprintf("transcription failed: %v", err))
 		}
+		log.Printf("job %s: transcription complete (%d chars)", payload.JobID, len(transcript))
 	}
 
 	actionIDs := p.resolveActions(ctx, transcript, payload)
 
 	results := make(map[string]string)
+	if len(actionIDs) > 0 {
+		log.Printf("job %s: running %d action(s): %s", payload.JobID, len(actionIDs), strings.Join(actionIDs, ", "))
+	}
 	for _, id := range actionIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -201,13 +217,16 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		if action == nil {
 			continue
 		}
+		log.Printf("job %s: processing action %q with %s", payload.JobID, id, payload.Provider)
 		out, err := p.cfg.Transcriber.ProcessChunked(
 			transcript, action, payload.Provider,
 			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
 		)
 		if err != nil {
+			log.Printf("job %s: action %q failed: %v", payload.JobID, id, err)
 			results[id] = fmt.Sprintf("error: %v", err)
 		} else {
+			log.Printf("job %s: action %q complete (%d chars)", payload.JobID, id, len(out))
 			results[id] = out
 		}
 	}
@@ -226,13 +245,15 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	}
 
 	if payload.Song {
+		log.Printf("song: validating lyrics with %s (job %s)", payload.Provider, payload.JobID)
 		validation, valErr := p.cfg.Transcriber.ValidateLyrics(
 			transcript, payload.Provider,
 			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
 		)
 		if valErr != nil {
-			fmt.Printf("⚠ Warning: lyrics validation failed: %v\n", valErr)
+			log.Printf("song: lyrics validation failed for job %s: %v", payload.JobID, valErr)
 		} else {
+			log.Printf("song: lyrics validation complete for job %s (coherence=%.0f, confidence=%.2f)", payload.JobID, validation.CoherenceScore, validation.Confidence)
 			result.LyricsValidation = validation
 		}
 	}

@@ -206,6 +206,7 @@ func run(opts runOptions) error {
 		originalAudioPath = audioPath
 
 		if opts.song {
+			fmt.Printf("Extracting vocals from %s (this may take a minute)...\n", filepath.Base(audioPath))
 			extractor := opts.vocalExtractor
 			if extractor == nil {
 				extractor = song.ExtractVocals
@@ -215,6 +216,7 @@ func run(opts runOptions) error {
 				return fmt.Errorf("vocal extraction: %w", err)
 			}
 			defer cleanup()
+			fmt.Printf("✓ Vocals extracted to %s\n", vocalsPath)
 			audioPath = vocalsPath
 		}
 
@@ -239,6 +241,7 @@ func run(opts runOptions) error {
 		fmt.Printf("Raw transcript saved to %s\n", transcriptFilename)
 
 		if opts.song {
+			fmt.Printf("Validating lyrics with %s...\n", activeProvider)
 			validation, valErr := song.ValidateLyrics(transcription, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
 			if valErr != nil {
 				fmt.Printf("⚠ Warning: lyrics validation failed: %v\n", valErr)
