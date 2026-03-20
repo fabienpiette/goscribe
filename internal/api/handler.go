@@ -59,6 +59,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	actions := r.FormValue("actions")
 	provider := r.FormValue("provider")
 	webhookURL := r.FormValue("webhook_url")
+	song := r.FormValue("song") == "true"
 
 	if provider == "" {
 		provider = h.cfg.DefaultProvider
@@ -103,6 +104,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		Actions:    actions,
 		Provider:   provider,
 		WebhookURL: webhookURL,
+		Song:       song,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

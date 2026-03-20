@@ -17,7 +17,9 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"goscribe/internal/provider"
+	"goscribe/internal/song"
 	"goscribe/pkg/config"
+	"goscribe/pkg/lyrics"
 )
 
 var webhookClient = &http.Client{
@@ -26,6 +28,10 @@ var webhookClient = &http.Client{
 		DialContext: dialContextWithValidation,
 	},
 }
+
+// webhookClientPrivate is used when WebhookAllowPrivate is enabled — no SSRF
+// protection, for trusted internal networks (e.g. Docker service callbacks).
+var webhookClientPrivate = &http.Client{Timeout: 10 * time.Second}
 
 func dialContextWithValidation(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
@@ -97,6 +103,7 @@ type Transcriber interface {
 	TranscribeAudio(audioPath, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (string, error)
 	ProcessChunked(transcript string, action *config.PostAction, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (string, error)
 	SelectBestActions(transcript string, actions []config.PostAction, prov, openaiKey, geminiKey, geminiModel string) ([]string, error)
+	ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (*lyrics.LyricsValidation, error)
 }
 
 type RealTranscriber struct{}
@@ -113,15 +120,22 @@ func (RealTranscriber) SelectBestActions(transcript string, actions []config.Pos
 	return provider.SelectBestActions(transcript, actions, prov, openaiKey, geminiKey, geminiModel)
 }
 
+func (RealTranscriber) ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, fallback bool) (*lyrics.LyricsValidation, error) {
+	return song.ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel, fallback)
+}
+
 type Config struct {
-	Transcriber Transcriber
-	RDB         *redis.Client
-	OpenAIKey   string
-	GeminiKey   string
-	GeminiModel string
-	Provider    string
-	ResultTTL   time.Duration
-	PostActions []config.PostAction
+	Transcriber          Transcriber
+	RDB                  *redis.Client
+	OpenAIKey            string
+	GeminiKey            string
+	GeminiModel          string
+	Provider             string
+	ResultTTL            time.Duration
+	PostActions          []config.PostAction
+	EnableFallback       bool                                 // controls fallback for all AI calls
+	VocalExtractor       func(string) (string, func(), error) // nil → song.ExtractVocals
+	WebhookAllowPrivate  bool                                 // skip SSRF check for internal callbacks
 }
 
 type Processor struct {
@@ -144,27 +158,63 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
 
+	mode := "transcript"
+	if payload.AudioPath != "" {
+		mode = "audio"
+	}
+	if payload.Song {
+		mode = "song"
+	}
+	log.Printf("job %s started: provider=%s mode=%s", payload.JobID, payload.Provider, mode)
+
+	if payload.Song && payload.AudioPath == "" {
+		return p.failJob(ctx, payload, "song mode requires an audio file")
+	}
+
 	p.updateStatus(ctx, payload.JobID, StatusProcessing)
 
-	if payload.AudioPath != "" {
-		defer os.Remove(payload.AudioPath)
+	originalAudioPath := payload.AudioPath
+	if originalAudioPath != "" {
+		defer os.Remove(originalAudioPath)
+	}
+
+	if payload.Song && payload.AudioPath != "" {
+		log.Printf("job %s: extracting vocals from %s", payload.JobID, payload.AudioPath)
+		p.fireProgressWebhook(ctx, payload, "vocals_extracting")
+		extractor := p.cfg.VocalExtractor
+		if extractor == nil {
+			extractor = song.ExtractVocals
+		}
+		vocalsPath, cleanup, err := extractor(payload.AudioPath)
+		if err != nil {
+			return p.failJob(ctx, payload, fmt.Sprintf("vocal extraction failed: %v", err))
+		}
+		defer cleanup()
+		log.Printf("job %s: vocals extracted to %s", payload.JobID, vocalsPath)
+		payload.AudioPath = vocalsPath
 	}
 
 	transcript := payload.Transcript
 	if payload.AudioPath != "" && transcript == "" {
+		log.Printf("job %s: transcribing audio with %s", payload.JobID, payload.Provider)
+		p.fireProgressWebhook(ctx, payload, "transcribing")
 		var err error
 		transcript, err = p.cfg.Transcriber.TranscribeAudio(
 			payload.AudioPath, payload.Provider,
-			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, true,
+			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
 		)
 		if err != nil {
 			return p.failJob(ctx, payload, fmt.Sprintf("transcription failed: %v", err))
 		}
+		log.Printf("job %s: transcription complete (%d chars)", payload.JobID, len(transcript))
 	}
 
 	actionIDs := p.resolveActions(ctx, transcript, payload)
 
 	results := make(map[string]string)
+	if len(actionIDs) > 0 {
+		log.Printf("job %s: running %d action(s): %s", payload.JobID, len(actionIDs), strings.Join(actionIDs, ", "))
+	}
 	for _, id := range actionIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -174,13 +224,16 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 		if action == nil {
 			continue
 		}
+		log.Printf("job %s: processing action %q with %s", payload.JobID, id, payload.Provider)
 		out, err := p.cfg.Transcriber.ProcessChunked(
 			transcript, action, payload.Provider,
-			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, true,
+			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
 		)
 		if err != nil {
+			log.Printf("job %s: action %q failed: %v", payload.JobID, id, err)
 			results[id] = fmt.Sprintf("error: %v", err)
 		} else {
+			log.Printf("job %s: action %q complete (%d chars)", payload.JobID, id, len(out))
 			results[id] = out
 		}
 	}
@@ -196,6 +249,21 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	}
 	if existing := p.loadResult(ctx, payload.JobID); existing != nil {
 		result.CreatedAt = existing.CreatedAt
+	}
+
+	if payload.Song {
+		log.Printf("song: validating lyrics with %s (job %s)", payload.Provider, payload.JobID)
+		p.fireProgressWebhook(ctx, payload, "validating")
+		validation, valErr := p.cfg.Transcriber.ValidateLyrics(
+			transcript, payload.Provider,
+			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
+		)
+		if valErr != nil {
+			log.Printf("song: lyrics validation failed for job %s: %v", payload.JobID, valErr)
+		} else {
+			log.Printf("song: lyrics validation complete for job %s (coherence=%.0f, confidence=%.2f)", payload.JobID, validation.CoherenceScore, validation.Confidence)
+			result.LyricsValidation = validation
+		}
 	}
 
 	if err := p.saveResult(ctx, result); err != nil {
@@ -242,6 +310,19 @@ func (p *Processor) failJob(ctx context.Context, payload ProcessPayload, errMsg 
 	return errors.New(errMsg)
 }
 
+func (p *Processor) fireProgressWebhook(ctx context.Context, payload ProcessPayload, step string) {
+	if payload.WebhookURL == "" {
+		return
+	}
+	r := p.loadResult(ctx, payload.JobID)
+	if r == nil {
+		return
+	}
+	r.Step = step
+	_ = p.saveResult(ctx, *r)
+	go p.fireWebhook(payload.WebhookURL, *r)
+}
+
 func (p *Processor) updateStatus(ctx context.Context, jobID, status string) {
 	existing := p.loadResult(ctx, jobID)
 	if existing == nil {
@@ -280,7 +361,11 @@ func (p *Processor) fireWebhook(rawURL string, result JobResult) {
 		log.Printf("webhook: error marshalling payload for job %s: %v", result.JobID, err)
 		return
 	}
-	resp, err := webhookClient.Post(rawURL, "application/json", bytes.NewReader(b))
+	client := webhookClient
+	if p.cfg.WebhookAllowPrivate {
+		client = webhookClientPrivate
+	}
+	resp, err := client.Post(rawURL, "application/json", bytes.NewReader(b))
 	if err != nil {
 		log.Printf("webhook: error delivering for job %s to %s: %v", result.JobID, rawURL, err)
 		return

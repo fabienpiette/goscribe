@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"goscribe/internal/openai"
 	"goscribe/pkg/config"
+	"goscribe/pkg/lyrics"
 )
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
@@ -194,6 +196,185 @@ func TestNormalizeArgs(t *testing.T) {
 }
 
 // --- run() integration tests ---
+
+func TestRunSongTranscriptMutualExclusion(t *testing.T) {
+	err := run(runOptions{
+		song:            true,
+		transcriptFiles: []string{"some.txt"},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "-song requires an audio file") {
+		t.Errorf("error %q missing expected message", err.Error())
+	}
+}
+
+func TestRunSongMode_WritesValidationFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	fakeVocals := filepath.Join(t.TempDir(), "vocals.wav")
+	if err := os.WriteFile(fakeVocals, []byte("fake"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "audio") {
+			if _, err := w.Write([]byte(`{"text":"I will always love you"}`)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		} else {
+			lv := lyrics.LyricsValidation{CoherenceScore: 80, Confidence: 0.9}
+			b, _ := json.Marshal(lv)
+			resp := fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b))
+			if _, err := w.Write([]byte(resp)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		}
+	}))
+	defer srv.Close()
+	openai.BaseURL = srv.URL
+
+	audioDir := t.TempDir()
+	audioPath := filepath.Join(audioDir, "song.mp3")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	opts := runOptions{
+		apiKey:         "test-key",
+		provider:       "openai",
+		enableFallback: false,
+		song:           true,
+		vocalExtractor: func(s string) (string, func(), error) {
+			return fakeVocals, func() {}, nil
+		},
+		args: []string{audioPath},
+	}
+	if err := run(opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	ext := filepath.Ext(audioPath)
+	base := strings.TrimSuffix(audioPath, ext)
+	validationFile := base + "-lyrics-validation.json"
+	if _, err := os.Stat(validationFile); err != nil {
+		t.Errorf("validation file not found: %v", err)
+	}
+}
+
+func TestRunSongMode_CustomOutputFlag(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	fakeVocals := filepath.Join(t.TempDir(), "vocals.wav")
+	if err := os.WriteFile(fakeVocals, []byte("fake"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "audio") {
+			if _, err := w.Write([]byte(`{"text":"sweet dreams are made of this"}`)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		} else {
+			lv := lyrics.LyricsValidation{CoherenceScore: 70, Confidence: 0.8}
+			b, _ := json.Marshal(lv)
+			if _, err := w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b)))); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		}
+	}))
+	defer srv.Close()
+	openai.BaseURL = srv.URL
+
+	audioDir := t.TempDir()
+	audioPath := filepath.Join(audioDir, "track.mp3")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	customOut := filepath.Join(t.TempDir(), "custom.txt")
+
+	opts := runOptions{
+		apiKey:         "test-key",
+		provider:       "openai",
+		song:           true,
+		output:         customOut,
+		vocalExtractor: func(s string) (string, func(), error) { return fakeVocals, func() {}, nil },
+		args:           []string{audioPath},
+	}
+	if err := run(opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	ext := filepath.Ext(audioPath)
+	base := strings.TrimSuffix(audioPath, ext)
+	validationFile := base + "-lyrics-validation.json"
+	if _, err := os.Stat(validationFile); err != nil {
+		t.Errorf("validation file not found at %q: %v", validationFile, err)
+	}
+}
+
+func TestRunSongMode_WithActions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	fakeVocals := filepath.Join(t.TempDir(), "vocals.wav")
+	if err := os.WriteFile(fakeVocals, []byte("fake"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "audio") {
+			if _, err := w.Write([]byte(`{"text":"I want to break free"}`)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		} else {
+			lv := lyrics.LyricsValidation{CoherenceScore: 88, Confidence: 0.93}
+			b, _ := json.Marshal(lv)
+			if _, err := w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, string(b)))); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		}
+	}))
+	defer srv.Close()
+	openai.BaseURL = srv.URL
+
+	audioDir := t.TempDir()
+	audioPath := filepath.Join(audioDir, "song2.mp3")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	opts := runOptions{
+		apiKey:         "test-key",
+		provider:       "openai",
+		song:           true,
+		postAction:     "openai-meeting-summary",
+		vocalExtractor: func(s string) (string, func(), error) { return fakeVocals, func() {}, nil },
+		args:           []string{audioPath},
+	}
+	if err := run(opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	ext := filepath.Ext(audioPath)
+	base := strings.TrimSuffix(audioPath, ext)
+	validationFile := base + "-lyrics-validation.json"
+	if _, err := os.Stat(validationFile); err != nil {
+		t.Errorf("validation file not found: %v", err)
+	}
+	actionFile := base + "-openai-meeting-summary.txt"
+	if _, err := os.Stat(actionFile); err != nil {
+		t.Errorf("action result file not found: %v", err)
+	}
+}
 
 func TestRunListActions(t *testing.T) {
 	originalHome := os.Getenv("HOME")

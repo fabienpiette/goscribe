@@ -28,6 +28,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 ## Features
 
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
+- **Song mode** — extracts vocals with demucs before transcribing, then validates the resulting lyrics with an AI provider
 - **18 built-in actions** — meeting summaries, action items, technical notes, retrospectives, and more
 - **Auto-select mode** — let the AI pick the most relevant actions for your transcript
 - **Large file handling** — audio splitting and transcript chunking happen transparently
@@ -56,6 +57,12 @@ make docker-up
 
 The server starts on port 8080 with Redis managed by Docker Compose. See [Server Mode](#server-mode) below.
 
+For song mode in the server, use the song-capable image which bundles Python and demucs:
+
+```bash
+docker build -f Dockerfile.song -t goscribe:song .
+```
+
 ## Usage
 
 ### CLI
@@ -76,13 +83,17 @@ goscribe -transcript meeting-transcript.txt -action openai-action-items
 
 # Process multiple transcripts together
 goscribe -transcript call1.txt call2.txt -action openai-meeting-summary
+
+# Song mode: extract vocals, transcribe, validate lyrics
+goscribe -song concert.mp3
 ```
 
 Output files are written alongside the input:
 
 ```
-<filename>-transcript.txt     Raw transcription
-<filename>-<action-id>.txt    Post-processed output
+<filename>-transcript.txt              Raw transcription
+<filename>-<action-id>.txt             Post-processed output
+<filename>-lyrics-validation.json      Lyrics analysis (song mode only)
 ```
 
 **All flags:**
@@ -93,6 +104,7 @@ Output files are written alongside the input:
 | `-gemini-key` | Gemini API key |
 | `-provider` | `openai` (default) or `gemini` |
 | `-no-fallback` | Disable automatic provider fallback |
+| `-song` | Song mode: extract vocals with demucs, transcribe, validate lyrics |
 | `-action` | Action ID(s), comma-separated |
 | `--auto` | AI picks the best actions |
 | `-transcript` | Process existing transcript file(s) |
@@ -115,6 +127,11 @@ curl -X POST http://localhost:8080/jobs \
   -F "file=@meeting.mp3" \
   -F "actions=openai-meeting-summary"
 
+# Submit a song-mode job (requires goscribe:song image)
+curl -X POST http://localhost:8080/jobs \
+  -F "file=@concert.mp3" \
+  -F "song=true"
+
 # Poll for results
 curl http://localhost:8080/jobs/<job-id>
 
@@ -133,7 +150,7 @@ curl http://localhost:8080/actions
 
 `POST /jobs` accepts: `file` (audio), `transcript` (text), `actions`
 (comma-separated IDs or `auto`), `provider`, `webhook_url` (called with
-results on completion).
+results on completion), `song` (boolean, enables song mode).
 
 **Scaling:** set `MODE=api` and `MODE=worker` in separate containers using
 `docker compose --profile split up`. Both containers must share the same Redis
@@ -204,7 +221,9 @@ When both keys are configured, goscribe automatically falls back to the other pr
 ## Known Issues
 
 - **ffmpeg required for large files** — files over 25 MB (OpenAI) or 20 MB (Gemini) are split using `ffmpeg`. Install it with `brew install ffmpeg` or `apt install ffmpeg`.
+- **demucs required for song mode** — install with `pip install demucs` or use `Dockerfile.song` which bundles it. The standard Docker image does not include demucs.
 - **`--auto` and `actions=auto` call the AI API** for action selection, which incurs additional API costs.
+- **Song mode validation is non-fatal** — if lyrics validation fails (e.g. API error), the transcript is still saved and the job completes successfully.
 
 ## Documentation
 
@@ -217,12 +236,16 @@ When both keys are configured, goscribe automatically falls back to the other pr
 cmd/goscribe/       CLI entry point and orchestration
 cmd/server/         HTTP server + async worker entry point
 pkg/config/         Config types, loading, validation (importable)
+pkg/lyrics/         LyricsValidation types shared between song and worker
 internal/api/       HTTP handlers and chi router (server mode)
 internal/worker/    Async job processor via asynq (server mode)
 internal/provider/  Provider routing and fallback logic
+internal/song/      Vocal extraction (demucs) and lyrics validation
 internal/openai/    OpenAI API client
 internal/gemini/    Gemini API client
 internal/util/      Shared helpers (model limits, audio splitting, etc.)
+Dockerfile          Standard image (Alpine, ~50 MB, no demucs)
+Dockerfile.song     Song-capable image (Debian, ~800 MB, includes demucs)
 ```
 
 ## Development

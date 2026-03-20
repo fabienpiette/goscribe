@@ -64,13 +64,15 @@ func main() {
 	if asynqSrv != nil {
 		mux := asynq.NewServeMux()
 		proc := worker.NewProcessor(worker.Config{
-			RDB:         rdb,
-			OpenAIKey:   cfg.openAIKey,
-			GeminiKey:   cfg.geminiKey,
-			GeminiModel: cfg.geminiModel,
-			Provider:    cfg.provider,
-			ResultTTL:   cfg.resultTTL,
-			PostActions: postActions,
+			RDB:            rdb,
+			OpenAIKey:      cfg.openAIKey,
+			GeminiKey:      cfg.geminiKey,
+			GeminiModel:    cfg.geminiModel,
+			Provider:       cfg.provider,
+			ResultTTL:      cfg.resultTTL,
+			PostActions:    postActions,
+			EnableFallback:      true, // matches previously hardcoded behaviour
+		WebhookAllowPrivate: cfg.webhookAllowPrivate,
 		})
 		mux.HandleFunc(worker.TaskTypeProcess, proc.ProcessTask)
 		go func() {
@@ -107,18 +109,19 @@ func main() {
 }
 
 type serverConfig struct {
-	mode            string
-	port            string
-	redisAddr       string
-	openAIKey       string
-	geminiKey       string
-	geminiModel     string
-	provider        string
-	configFile      string
-	resultTTL       time.Duration
-	maxUploadBytes  int64
-	shutdownTimeout time.Duration
-	uploadsDir      string
+	mode                string
+	port                string
+	redisAddr           string
+	openAIKey           string
+	geminiKey           string
+	geminiModel         string
+	provider            string
+	configFile          string
+	resultTTL           time.Duration
+	maxUploadBytes      int64
+	shutdownTimeout     time.Duration
+	uploadsDir          string
+	webhookAllowPrivate bool
 }
 
 func loadConfig() serverConfig {
@@ -150,7 +153,8 @@ func loadConfig() serverConfig {
 		resultTTL:       time.Duration(resultTTLHours) * time.Hour,
 		maxUploadBytes:  maxUploadMB << 20,
 		shutdownTimeout: time.Duration(shutdownSecs) * time.Second,
-		uploadsDir:      getenv("UPLOADS_DIR", "/tmp/goscribe-uploads"),
+		uploadsDir:          getenv("UPLOADS_DIR", "/tmp/goscribe-uploads"),
+		webhookAllowPrivate: getenv("WEBHOOK_ALLOW_PRIVATE", "") == "true",
 	}
 }
 

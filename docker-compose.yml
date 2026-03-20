@@ -1,6 +1,8 @@
 services:
   goscribe:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.song
     ports:
       - "8080:8080"
     env_file:
