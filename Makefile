@@ -1,4 +1,4 @@
-.PHONY: build install clean test test-coverage test-short lint help docker-build docker-up docker-down docker-logs
+.PHONY: build install clean test test-coverage test-short lint help docker-build docker-up docker-down docker-restart docker-logs
 
 BINARY_NAME=goscribe
 GO=go
@@ -17,6 +17,7 @@ help:
 	@echo "  help           - Show this help"
 	@echo "  docker-build   - Build Docker image"
 	@echo "  docker-up      - Start goscribe + redis via docker compose"
+	@echo "  docker-restart - Stop, rebuild, and start all services"
 	@echo "  docker-down    - Stop all services"
 	@echo "  docker-logs    - Tail goscribe container logs"
 
@@ -61,10 +62,13 @@ run:
 	$(GO) run ./cmd/goscribe
 
 docker-build:
-	docker build -t goscribe:local .
+	docker compose build
 
 docker-up:
-	docker compose up -d
+	docker compose up -d --build
+
+docker-restart:
+	docker compose down && docker compose up -d --build
 
 docker-down:
 	docker compose down

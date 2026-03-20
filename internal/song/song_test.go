@@ -46,6 +46,17 @@ touch "$outdir/htdemucs/$stem/vocals.wav"
 	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
+
+	// Fake ffmpeg: create the output file (last non-flag argument).
+	ffmpeg := filepath.Join(dir, "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte(`#!/bin/sh
+out=""
+for arg; do out="$arg"; done
+touch "$out"
+`), 0755); err != nil {
+		t.Fatalf("WriteFile ffmpeg: %v", err)
+	}
+
 	return dir
 }
 
@@ -65,15 +76,15 @@ func TestExtractVocals_Success(t *testing.T) {
 	}
 	defer cleanup()
 
-	if !strings.HasSuffix(vocalsPath, "vocals.wav") {
-		t.Errorf("vocalsPath %q does not end with vocals.wav", vocalsPath)
+	if !strings.HasSuffix(vocalsPath, "vocals.mp3") {
+		t.Errorf("vocalsPath %q does not end with vocals.mp3", vocalsPath)
 	}
 	if _, err := os.Stat(vocalsPath); err != nil {
-		t.Errorf("vocals.wav not found at %q: %v", vocalsPath, err)
+		t.Errorf("vocals.mp3 not found at %q: %v", vocalsPath, err)
 	}
 
 	cleanup()
-	dir := filepath.Dir(filepath.Dir(filepath.Dir(vocalsPath)))
+	dir := filepath.Dir(vocalsPath)
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("cleanup did not remove tmpdir %q", dir)
 	}
