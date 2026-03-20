@@ -31,8 +31,18 @@ func ExtractVocals(audioPath string) (vocalsPath string, cleanup func(), err err
 	}
 
 	stem := strings.TrimSuffix(filepath.Base(audioPath), filepath.Ext(audioPath))
-	vp := filepath.Join(tmpDir, "htdemucs", stem, "vocals.wav")
-	return vp, func() { os.RemoveAll(tmpDir) }, nil
+	wavPath := filepath.Join(tmpDir, "htdemucs", stem, "vocals.wav")
+
+	// Convert WAV to MP3 to stay within provider upload limits (Gemini: 20 MB, OpenAI: 25 MB).
+	// A 3-minute vocals WAV is ~50 MB uncompressed; MP3 at 192 kbps is ~4 MB.
+	mp3Path := filepath.Join(tmpDir, "vocals.mp3")
+	conv, err := exec.Command("ffmpeg", "-i", wavPath, "-q:a", "0", "-y", mp3Path).CombinedOutput()
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		return "", nil, fmt.Errorf("ffmpeg conversion failed: %w\nOutput: %s", err, string(conv))
+	}
+
+	return mp3Path, func() { os.RemoveAll(tmpDir) }, nil
 }
 
 const validationPrompt = `You are an expert in lyrics validation, linguistics, and speech-to-text error detection.
