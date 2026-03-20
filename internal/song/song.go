@@ -148,6 +148,14 @@ func ValidateLyrics(transcript, prov, openaiKey, geminiKey, geminiModel string, 
 	if primaryErr != nil {
 		return nil, fmt.Errorf("lyrics validation: %w", primaryErr)
 	}
+	// Strip markdown code fences if the model wrapped the JSON (e.g. ```json\n{...}\n```)
+	result = strings.TrimSpace(result)
+	if strings.HasPrefix(result, "```") {
+		result = strings.TrimPrefix(result, "```json")
+		result = strings.TrimPrefix(result, "```")
+		result = strings.TrimSuffix(result, "```")
+		result = strings.TrimSpace(result)
+	}
 	var v lyrics.LyricsValidation
 	if err := json.Unmarshal([]byte(result), &v); err != nil {
 		return nil, fmt.Errorf("parsing lyrics validation response: %w", err)

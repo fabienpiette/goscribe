@@ -30,6 +30,7 @@ type ProcessPayload struct {
 type JobResult struct {
 	JobID            string                   `json:"job_id"`
 	Status           string                   `json:"status"`
+	Step             string                   `json:"step,omitempty"` // progress hint: "vocals_extracting", "transcribing", "validating"
 	ProviderUsed     string                   `json:"provider_used,omitempty"`
 	Transcript       string                   `json:"transcript,omitempty"`
 	Results          map[string]string        `json:"results,omitempty"`

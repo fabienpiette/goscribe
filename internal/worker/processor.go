@@ -175,6 +175,7 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 
 	if payload.Song && payload.AudioPath != "" {
 		log.Printf("job %s: extracting vocals from %s", payload.JobID, payload.AudioPath)
+		p.fireProgressWebhook(ctx, payload, "vocals_extracting")
 		extractor := p.cfg.VocalExtractor
 		if extractor == nil {
 			extractor = song.ExtractVocals
@@ -191,6 +192,7 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	transcript := payload.Transcript
 	if payload.AudioPath != "" && transcript == "" {
 		log.Printf("job %s: transcribing audio with %s", payload.JobID, payload.Provider)
+		p.fireProgressWebhook(ctx, payload, "transcribing")
 		var err error
 		transcript, err = p.cfg.Transcriber.TranscribeAudio(
 			payload.AudioPath, payload.Provider,
@@ -246,6 +248,7 @@ func (p *Processor) ProcessTask(ctx context.Context, t *asynq.Task) error {
 
 	if payload.Song {
 		log.Printf("song: validating lyrics with %s (job %s)", payload.Provider, payload.JobID)
+		p.fireProgressWebhook(ctx, payload, "validating")
 		validation, valErr := p.cfg.Transcriber.ValidateLyrics(
 			transcript, payload.Provider,
 			p.cfg.OpenAIKey, p.cfg.GeminiKey, p.cfg.GeminiModel, p.cfg.EnableFallback,
@@ -300,6 +303,19 @@ func (p *Processor) failJob(ctx context.Context, payload ProcessPayload, errMsg 
 		p.fireWebhook(payload.WebhookURL, result)
 	}
 	return errors.New(errMsg)
+}
+
+func (p *Processor) fireProgressWebhook(ctx context.Context, payload ProcessPayload, step string) {
+	if payload.WebhookURL == "" {
+		return
+	}
+	r := p.loadResult(ctx, payload.JobID)
+	if r == nil {
+		return
+	}
+	r.Step = step
+	_ = p.saveResult(ctx, *r)
+	go p.fireWebhook(payload.WebhookURL, *r)
 }
 
 func (p *Processor) updateStatus(ctx context.Context, jobID, status string) {
