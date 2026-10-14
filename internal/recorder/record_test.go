@@ -35,7 +35,7 @@ func testConfig(t *testing.T) Config {
 
 func TestRecordGracefulStop(t *testing.T) {
 	// Writes audio, reports silence on the mic (fd 3), then waits for "q" on stdin.
-	fakeFFmpeg(t, `printf 'ID3audio' > "$out"
+	fakeFFmpeg(t, `head -c 4096 /dev/zero > "$out"
 echo "lavfi.silence_start=0" >&3
 read -r line
 exit 0`)
@@ -48,7 +48,7 @@ exit 0`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v\n%s", err, status.String())
 	}
-	if !res.Stopped || res.Size != int64(len("ID3audio")) || res.Output != c.Output {
+	if !res.Stopped || res.Size != 4096 || res.Output != c.Output {
 		t.Errorf("result = %+v", res)
 	}
 	if !strings.Contains(status.String(), "⚠ no sound from mic for 30s") {
@@ -57,7 +57,7 @@ exit 0`)
 }
 
 func TestRecordKillsWhenQIgnored(t *testing.T) {
-	fakeFFmpeg(t, `printf 'x' > "$out"
+	fakeFFmpeg(t, `head -c 4096 /dev/zero > "$out"
 trap '' INT TERM
 sleep 30`)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -68,13 +68,13 @@ sleep 30`)
 	if time.Since(start) > 5*time.Second {
 		t.Fatal("Record did not kill ffmpeg after StopTimeout")
 	}
-	if err != nil || !res.Stopped || res.Size != 1 {
+	if err != nil || !res.Stopped || res.Size != 4096 {
 		t.Errorf("killed after timeout should keep the file: res=%+v err=%v", res, err)
 	}
 }
 
 func TestRecordForceKill(t *testing.T) {
-	fakeFFmpeg(t, `printf 'x' > "$out"
+	fakeFFmpeg(t, `head -c 4096 /dev/zero > "$out"
 trap '' INT TERM
 sleep 30`)
 	StopTimeout = time.Hour // only Force can end it quickly
@@ -106,7 +106,7 @@ exit 1`)
 }
 
 func TestRecordFailureKeepsPartialFile(t *testing.T) {
-	fakeFFmpeg(t, `printf 'ID3partial' > "$out"
+	fakeFFmpeg(t, `head -c 4096 /dev/zero > "$out"
 echo "device unplugged" >&2
 exit 1`)
 	c := testConfig(t)
@@ -123,7 +123,7 @@ exit 1`)
 }
 
 func TestRecordDurationEndsOnItsOwn(t *testing.T) {
-	fakeFFmpeg(t, `printf 'ID3done' > "$out"
+	fakeFFmpeg(t, `head -c 4096 /dev/zero > "$out"
 exit 0`)
 	res, err := Record(context.Background(), testConfig(t), UI{Status: &bytes.Buffer{}})
 	if err != nil || res.Stopped || res.Size == 0 {
@@ -133,7 +133,9 @@ exit 0`)
 
 // Review Focus 4: stopped before any audio was written.
 func TestRecordNothingRecorded(t *testing.T) {
-	fakeFFmpeg(t, `: > "$out"
+	// Real ffmpeg 8 writes ~230 bytes of ID3/Xing headers even when no audio
+	// frame was encoded, so "nothing recorded" is not the same as a 0-byte file.
+	fakeFFmpeg(t, `head -c 236 /dev/zero > "$out"
 read -r line
 exit 0`)
 	c := testConfig(t)
@@ -160,5 +162,22 @@ func TestFormatting(t *testing.T) {
 		if got := FormatSize(n); got != want {
 			t.Errorf("FormatSize(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestRecordFailureWithHeadersOnly(t *testing.T) {
+	fakeFFmpeg(t, `head -c 236 /dev/zero > "$out"
+echo "pulse: Connection refused" >&2
+exit 1`)
+	c := testConfig(t)
+	res, err := Record(context.Background(), c, UI{Status: &bytes.Buffer{}})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if res.Size != 0 {
+		t.Errorf("Size = %d, want 0: the header-only file was removed, so nothing is kept", res.Size)
+	}
+	if _, statErr := os.Stat(c.Output); statErr == nil {
+		t.Error("header-only file should be removed")
 	}
 }
