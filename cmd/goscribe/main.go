@@ -149,6 +149,20 @@ func run(opts runOptions) error {
 		return nil
 	}
 
+	// Reject unknown action IDs before transcribing, so a typo doesn't cost API calls.
+	if !opts.autoSelect && opts.postAction != "" {
+		var unknown []string
+		for _, id := range strings.Split(opts.postAction, ",") {
+			id = strings.TrimSpace(id)
+			if id != "" && config.FindAction(postActions, id) == nil {
+				unknown = append(unknown, id)
+			}
+		}
+		if len(unknown) > 0 {
+			return fmt.Errorf("unknown action(s) '%s'. Use -list-actions to see available options", strings.Join(unknown, "', '"))
+		}
+	}
+
 	var transcription string
 	var audioPath string
 	var transcriptFilename string
