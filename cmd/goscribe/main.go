@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"goscribe/internal/harness"
 	"goscribe/internal/provider"
 	"goscribe/pkg/config"
 )
@@ -77,6 +78,10 @@ type runOptions struct {
 	apiKey          string
 	geminiKey       string
 	provider        string
+	transcriber     string
+	elevenLabsKey   string
+	whisperModel    string
+	language        string
 	enableFallback  bool
 	output          string
 	listActions     bool
@@ -129,12 +134,47 @@ func run(opts runOptions) error {
 		activeProvider = cfg.Provider
 	}
 
+	if !config.IsValidProvider(activeProvider) {
+		return fmt.Errorf("invalid provider '%s' (valid: %s)", activeProvider, strings.Join(config.ValidProviders, ", "))
+	}
+
 	geminiModel := cfg.GeminiModel
 	if geminiModel == "" {
 		geminiModel = "gemini-2.0-flash"
 	}
 
 	enableFallback := opts.enableFallback
+
+	transcriber := opts.transcriber
+	if transcriber == "" {
+		transcriber = cfg.Transcriber
+	}
+	if transcriber == "" {
+		// Harnesses can't transcribe audio, so they pair with the offline engine.
+		if harness.IsHarness(activeProvider) {
+			transcriber = "local"
+		} else {
+			transcriber = activeProvider
+		}
+	}
+
+	elevenLabsKey := opts.elevenLabsKey
+	if elevenLabsKey == "" {
+		elevenLabsKey = cfg.ElevenLabsAPIKey
+	}
+	if elevenLabsKey == "" {
+		elevenLabsKey = os.Getenv("ELEVENLABS_API_KEY")
+	}
+
+	whisperModel := opts.whisperModel
+	if whisperModel == "" {
+		whisperModel = cfg.WhisperModel
+	}
+
+	language := opts.language
+	if language == "" {
+		language = cfg.Language
+	}
 
 	if opts.listActions {
 		fmt.Println("Available post-processing actions:")
@@ -147,6 +187,20 @@ func run(opts runOptions) error {
 			fmt.Println(strings.Repeat("-", 70))
 		}
 		return nil
+	}
+
+	// Reject unknown action IDs before transcribing, so a typo doesn't cost API calls.
+	if !opts.autoSelect && opts.postAction != "" {
+		var unknown []string
+		for _, id := range strings.Split(opts.postAction, ",") {
+			id = strings.TrimSpace(id)
+			if id != "" && config.FindAction(postActions, id) == nil {
+				unknown = append(unknown, id)
+			}
+		}
+		if len(unknown) > 0 {
+			return fmt.Errorf("unknown action(s) '%s'. Use -list-actions to see available options", strings.Join(unknown, "', '"))
+		}
 	}
 
 	var transcription string
@@ -191,6 +245,10 @@ func run(opts runOptions) error {
 		}
 		audioPath = opts.args[0]
 
+		if !config.IsValidTranscriber(transcriber) {
+			return fmt.Errorf("invalid transcriber '%s' (valid: %s)", transcriber, strings.Join(config.ValidTranscribers, ", "))
+		}
+
 		if _, err := os.Stat(audioPath); os.IsNotExist(err) {
 			return fmt.Errorf("audio file '%s' not found", audioPath)
 		}
@@ -203,8 +261,19 @@ func run(opts runOptions) error {
 			transcriptFilename = opts.output
 		}
 
-		fmt.Printf("Transcribing audio with %s...\n", activeProvider)
-		transcription, err = provider.TranscribeAudio(audioPath, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
+		fmt.Printf("Transcribing audio with %s...\n", transcriber)
+		transcription, err = provider.Transcribe(audioPath, provider.TranscribeOptions{
+			Transcriber:     transcriber,
+			Provider:        activeProvider,
+			OpenAIKey:       apiKey,
+			GeminiKey:       geminiKey,
+			GeminiModel:     geminiModel,
+			ElevenLabsKey:   elevenLabsKey,
+			ElevenLabsModel: cfg.ElevenLabsModel,
+			WhisperModel:    whisperModel,
+			Language:        language,
+			Fallback:        enableFallback,
+		})
 		if err != nil {
 			return fmt.Errorf("transcription failed: %w", err)
 		}
@@ -330,7 +399,11 @@ func main() {
 
 	apiKey := flag.String("k", "XXXX", "OpenAI API key")
 	geminiKey := flag.String("gemini-key", "", "Gemini API key")
-	providerFlag := flag.String("provider", "", "AI provider: openai or gemini (default: from config or openai)")
+	providerFlag := flag.String("provider", "", "AI provider for actions: openai, gemini, claude or codex (default: from config or openai)")
+	transcriberFlag := flag.String("transcriber", "", "Transcription engine: local, elevenlabs, openai or gemini (default: from config, else same as -provider, or local with claude/codex)")
+	elevenLabsKey := flag.String("elevenlabs-key", "", "ElevenLabs API key (default: from config or $ELEVENLABS_API_KEY)")
+	whisperModel := flag.String("whisper-model", "", "Whisper model for -transcriber local (default: from config or small)")
+	language := flag.String("language", "", "Audio language code, e.g. en or fr, for local and elevenlabs (default: auto-detect)")
 	noFallback := flag.Bool("no-fallback", false, "Disable automatic fallback to alternate provider on failure")
 	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
 	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
@@ -340,12 +413,13 @@ func main() {
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
 	setGeminiKey := flag.String("set-gemini-key", "", "Store Gemini API key in config file")
-	setProviderFlag := flag.String("set-provider", "", "Set default AI provider in config file (openai or gemini)")
+	setProviderFlag := flag.String("set-provider", "", "Set default AI provider in config file (openai, gemini, claude or codex)")
+	setTranscriberFlag := flag.String("set-transcriber", "", "Set default transcription engine in config file (local, elevenlabs, openai or gemini)")
 	var transcriptFiles multiStringFlag
 	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI or Gemini\n\n")
+		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI, Gemini, ElevenLabs or local Whisper\n\n")
 		fmt.Fprintf(os.Stderr, "USAGE:\n")
 		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS:\n")
@@ -355,6 +429,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -k YOUR_API_KEY meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Transcription with Gemini\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -gemini-key YOUR_KEY -provider gemini meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Transcribe locally (offline), summarize with OpenAI\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -transcriber local -action openai-meeting-summary meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Transcribe with ElevenLabs (speaker labels)\n")
+		fmt.Fprintf(os.Stderr, "  ELEVENLABS_API_KEY=... goscribe -transcriber elevenlabs meeting.mp3\n\n")
+		fmt.Fprintf(os.Stderr, "  # Run actions with your local Claude Code (or codex) login\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -transcriber local -provider claude -action openai-meeting-summary meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Transcribe with meeting summary\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -action openai-meeting-summary meeting.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # Custom output file\n")
@@ -370,6 +450,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -set-gemini-key YOUR_GEMINI_KEY\n\n")
 		fmt.Fprintf(os.Stderr, "  # Set default provider\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -set-provider gemini\n\n")
+		fmt.Fprintf(os.Stderr, "  # Set default transcription engine\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -set-transcriber local\n\n")
 		fmt.Fprintf(os.Stderr, "  # Reset config to defaults\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -init\n\n")
 		fmt.Fprintf(os.Stderr, "OUTPUT FILES:\n")
@@ -380,10 +462,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  - provider: default AI provider (openai or gemini)\n")
 		fmt.Fprintf(os.Stderr, "  - openai_api_key: your OpenAI API key\n")
 		fmt.Fprintf(os.Stderr, "  - gemini_api_key: your Gemini API key\n")
-		fmt.Fprintf(os.Stderr, "  - gemini_model: default Gemini model\n\n")
+		fmt.Fprintf(os.Stderr, "  - gemini_model: default Gemini model\n")
+		fmt.Fprintf(os.Stderr, "  - transcriber: default transcription engine\n")
+		fmt.Fprintf(os.Stderr, "  - elevenlabs_api_key / elevenlabs_model: ElevenLabs settings (model default: scribe_v1)\n")
+		fmt.Fprintf(os.Stderr, "  - whisper_model: local Whisper model (default: small)\n")
+		fmt.Fprintf(os.Stderr, "  - language: audio language code for local and elevenlabs\n\n")
 		fmt.Fprintf(os.Stderr, "PROVIDERS:\n")
 		fmt.Fprintf(os.Stderr, "  openai    OpenAI Whisper (transcription) + GPT (processing)\n")
-		fmt.Fprintf(os.Stderr, "  gemini    Google Gemini (transcription + processing)\n\n")
+		fmt.Fprintf(os.Stderr, "  gemini    Google Gemini (transcription + processing)\n")
+		fmt.Fprintf(os.Stderr, "  claude    Local Claude Code CLI (processing only; uses your claude login and default model)\n")
+		fmt.Fprintf(os.Stderr, "  codex     Local Codex CLI (processing only; uses your codex login and default model)\n\n")
+		fmt.Fprintf(os.Stderr, "TRANSCRIBERS (-transcriber, audio to text only; -provider still runs actions):\n")
+		fmt.Fprintf(os.Stderr, "  local       faster-whisper on this machine, offline (needs: uv tool install whisper-ctranslate2)\n")
+		fmt.Fprintf(os.Stderr, "  elevenlabs  ElevenLabs Scribe, with speaker labels (needs an ElevenLabs API key)\n")
+		fmt.Fprintf(os.Stderr, "  openai      OpenAI Whisper API\n")
+		fmt.Fprintf(os.Stderr, "  gemini      Google Gemini\n\n")
 		fmt.Fprintf(os.Stderr, "FALLBACK:\n")
 		fmt.Fprintf(os.Stderr, "  When both API keys are configured, goscribe automatically\n")
 		fmt.Fprintf(os.Stderr, "  falls back to the other provider if one fails.\n")
@@ -414,6 +507,13 @@ func main() {
 		}
 		return
 	}
+	if *setTranscriberFlag != "" {
+		if err := config.SetDefaultTranscriber(*setTranscriberFlag); err != nil {
+			fmt.Printf("Error setting transcriber: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *initConfig {
 		if err := config.Reset(); err != nil {
 			fmt.Printf("Error resetting config: %v\n", err)
@@ -426,6 +526,10 @@ func main() {
 		apiKey:          *apiKey,
 		geminiKey:       *geminiKey,
 		provider:        *providerFlag,
+		transcriber:     *transcriberFlag,
+		elevenLabsKey:   *elevenLabsKey,
+		whisperModel:    *whisperModel,
+		language:        *language,
 		enableFallback:  !*noFallback,
 		output:          *output,
 		listActions:     *listActions,
