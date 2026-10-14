@@ -10,6 +10,7 @@ import (
 	"goscribe/internal/elevenlabs"
 	"goscribe/internal/harness"
 	"goscribe/internal/provider"
+	"goscribe/internal/tags"
 	"goscribe/pkg/config"
 )
 
@@ -88,6 +89,8 @@ type runOptions struct {
 	enableFallback  bool
 	output          string
 	listActions     bool
+	tags            bool
+	tagsRoot        string
 	postAction      string
 	autoSelect      bool
 	configFile      string
@@ -221,8 +224,11 @@ func run(opts runOptions) error {
 	var transcriptFilename string
 
 	if len(opts.transcriptFiles) > 0 {
-		if opts.postAction == "" && !opts.autoSelect {
-			return fmt.Errorf("-action or --auto is required when using -transcript")
+		if opts.postAction == "" && !opts.autoSelect && !opts.tags {
+			return fmt.Errorf("-action, --auto or -tags is required when using -transcript")
+		}
+		if opts.tags && len(opts.transcriptFiles) > 1 {
+			return fmt.Errorf("-tags works with a single -transcript file")
 		}
 
 		var combined strings.Builder
@@ -376,6 +382,28 @@ func run(opts runOptions) error {
 		}
 	}
 
+	if opts.tags {
+		source := transcriptFilename
+		if len(opts.transcriptFiles) > 0 {
+			source = opts.transcriptFiles[0]
+		}
+		tagsRoot := opts.tagsRoot
+		if tagsRoot == "" {
+			tagsRoot = cfg.TagsRoot
+		}
+		fmt.Printf("\n🏷  Tagging transcript with %s...\n", activeProvider)
+		tagsFile, err := writeTags(source, transcription, tagsRoot, func(action *config.PostAction) (string, error) {
+			return provider.ProcessChunked(transcription, action, activeProvider, apiKey, geminiKey, geminiModel, enableFallback)
+		})
+		if err != nil {
+			// Like actions, a tagging failure must not lose the transcript.
+			fmt.Printf("⚠ Warning: Tagging failed: %v\n", err)
+		} else {
+			fmt.Printf("✓ Tags saved to %s\n", tagsFile)
+			processedFiles = append(processedFiles, tagsFile)
+		}
+	}
+
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("Summary:\n")
 	if len(opts.transcriptFiles) > 0 {
@@ -405,6 +433,46 @@ func run(opts runOptions) error {
 	return nil
 }
 
+// writeTags asks the model for tags (via process) and writes them next to source.
+// The vocabulary comes from existing tag files under root (default: the parent
+// of source's folder, i.e. the records root in a records/<date>/ layout).
+func writeTags(source, transcription, root string, process func(*config.PostAction) (string, error)) (string, error) {
+	if n := len(strings.Fields(transcription)); n < tags.MinWords {
+		return "", fmt.Errorf("transcript too short to tag (%d words, need %d)", n, tags.MinWords)
+	}
+	abs, err := filepath.Abs(source)
+	if err != nil {
+		return "", err
+	}
+	if root == "" {
+		root = filepath.Dir(filepath.Dir(abs))
+	}
+
+	action := &config.PostAction{
+		ID:          "tags",
+		Name:        "Tags",
+		Prompt:      tags.Prompt(tags.CollectVocabulary(root)),
+		Model:       "gpt-4o",
+		Temperature: 0.2,
+		MaxTokens:   1000,
+	}
+	answer, err := process(action)
+	if err != nil {
+		return "", err
+	}
+	t, err := tags.Parse(answer)
+	if err != nil {
+		return "", err
+	}
+	t.Date = tags.DateFromName(source)
+
+	path := tags.Path(source)
+	if err := tags.Write(path, t); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		normalized, err := normalizeArgs(os.Args[1:])
@@ -428,6 +496,8 @@ func main() {
 	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
 	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
 	postAction := flag.String("action", "", "Post-processing action ID(s), comma-separated (use -list-actions to see options)")
+	tagsFlag := flag.Bool("tags", false, "Write <name>-tags.yml (type, summary, topics, people, tickets, projects) next to the transcript, for grep")
+	tagsRoot := flag.String("tags-root", "", "Folder whose existing tag files seed the tag vocabulary (default: config tags_root, else the transcript folder's parent)")
 	autoSelect := flag.Bool("auto", false, "Automatically select best post-processing actions based on transcript content")
 	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
@@ -461,6 +531,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -o transcript.txt audio.mp3\n\n")
 		fmt.Fprintf(os.Stderr, "  # List all available post-processing actions\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -list-actions\n\n")
+		fmt.Fprintf(os.Stderr, "  # Tag a transcript for grep (also works on new audio: add -tags)\n")
+		fmt.Fprintf(os.Stderr, "  goscribe -provider codex -transcript meeting-transcript.txt -tags\n")
+		fmt.Fprintf(os.Stderr, "  grep -rlw dark-mode --include='*-tags.yml' ~/records\n\n")
 		fmt.Fprintf(os.Stderr, "  # Process existing transcript file\n")
 		fmt.Fprintf(os.Stderr, "  goscribe -transcript meeting.txt -action openai-meeting-summary\n\n")
 		fmt.Fprintf(os.Stderr, "  # Automatically select best actions\n")
@@ -476,7 +549,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  goscribe -init\n\n")
 		fmt.Fprintf(os.Stderr, "OUTPUT FILES:\n")
 		fmt.Fprintf(os.Stderr, "  <filename>-transcript.txt              Raw transcription\n")
-		fmt.Fprintf(os.Stderr, "  <filename>-<action-id>.txt             Post-processed output\n\n")
+		fmt.Fprintf(os.Stderr, "  <filename>-<action-id>.txt             Post-processed output\n")
+		fmt.Fprintf(os.Stderr, "  <filename>-tags.yml                    Tags for grep (with -tags)\n\n")
 		fmt.Fprintf(os.Stderr, "CONFIGURATION:\n")
 		fmt.Fprintf(os.Stderr, "  Config file: ~/.goscribe/config.yml\n")
 		fmt.Fprintf(os.Stderr, "  - provider: default AI provider (openai or gemini)\n")
@@ -557,6 +631,8 @@ func main() {
 		output:          *output,
 		listActions:     *listActions,
 		postAction:      *postAction,
+		tags:            *tagsFlag,
+		tagsRoot:        *tagsRoot,
 		autoSelect:      *autoSelect,
 		configFile:      *configFile,
 		transcriptFiles: transcriptFiles,

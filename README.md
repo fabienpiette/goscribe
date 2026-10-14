@@ -29,6 +29,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
 - **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
+- **Searchable tags** — `-tags` writes a `<name>-tags.yml` (type, summary, topics, people, tickets, projects) next to the transcript, reusing existing tags, so `grep` finds every meeting on a subject
 - **Pluggable transcription** — transcribe locally and offline (faster-whisper) or with ElevenLabs Scribe (speaker labels), then post-process with OpenAI or Gemini
 - **18 built-in actions** — meeting summaries, action items, technical notes, retrospectives, and more
 - **Auto-select mode** — let the AI pick the most relevant actions for your transcript
@@ -76,6 +77,11 @@ ELEVENLABS_API_KEY=... goscribe -transcriber elevenlabs meeting.mp3
 # Run actions through your local Claude Code (or Codex) login
 goscribe -transcriber local -provider claude -action openai-meeting-summary meeting.mp3
 
+# Tag a meeting for search (new audio, or an existing transcript)
+goscribe -provider codex -tags meeting.mp3
+goscribe -provider codex -transcript meeting-transcript.txt -tags
+grep -rlw dark-mode --include='*-tags.yml' ~/records
+
 # Run multiple actions at once
 goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
 
@@ -94,6 +100,7 @@ Output files are written alongside the input:
 ```
 <filename>-transcript.txt     Raw transcription
 <filename>-<action-id>.txt    Post-processed output
+<filename>-tags.yml           Tags for search (with -tags)
 ```
 
 **All flags:**
@@ -113,6 +120,8 @@ Output files are written alongside the input:
 | `-action` | Action ID(s), comma-separated |
 | `--auto` | AI picks the best actions |
 | `-transcript` | Process existing transcript file(s) |
+| `-tags` | Write `<name>-tags.yml` next to the transcript (works with `-transcript` alone) |
+| `-tags-root` | Folder whose tag files seed the shared vocabulary (default: `tags_root` in config, else the transcript folder's parent) |
 | `-o` | Output file name |
 | `-config` | Custom config file path |
 | `-list-actions` | Show all available actions |
@@ -240,6 +249,27 @@ When both keys are configured, goscribe automatically falls back to the other pr
 **local** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) via the `whisper-ctranslate2` CLI, fully offline. Install with `uv tool install whisper-ctranslate2` (or `pipx`). The model is downloaded on first use; uses the GPU when available, otherwise the CPU.
 
 **elevenlabs** — [ElevenLabs Scribe](https://elevenlabs.io/docs/capabilities/speech-to-text), tuned for meetings: speaker diarization, filler words and false starts removed (`no_verbatim`), no audio-event tags, and one paragraph per speaker turn with its start time, e.g. `[00:12:34] speaker_1: …`. Optional: `-keyterms` / `elevenlabs_keyterms` to favor names and jargon (ElevenLabs adds a 20% surcharge), `-num-speakers` / `elevenlabs_num_speakers` to cap the speaker count, `elevenlabs_verbatim: true` to keep fillers. Needs an ElevenLabs API key.
+
+## Tags
+
+`-tags` asks the `-provider` model for tags and writes them as YAML with one list item per line:
+
+```yaml
+date: "2026-10-13"
+type: standup
+summary: Weekly sync on the design token migration
+topics:
+    - dark-mode
+    - design-tokens
+people:
+    - Sam
+tickets:
+    - PROJ-123
+projects:
+    - billing
+```
+
+goscribe normalizes what the model returns (kebab-case topics and projects, uppercase ticket IDs, a fixed list of meeting types, sorted and de-duplicated lists) rather than trusting its formatting. To keep tags consistent for `grep`, it first reads the topics and projects already used in `*-tags.yml` files under the tags root and its direct subfolders (a `records/<date>/` layout) and asks the model to reuse them. Transcripts under 30 words are not tagged. A tagging failure only prints a warning; the transcript and actions are kept.
 
 ## Known Issues
 
