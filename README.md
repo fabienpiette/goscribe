@@ -226,7 +226,7 @@ When both keys are configured, goscribe automatically falls back to the other pr
 
 ### Local harnesses
 
-**claude** and **codex** run post-processing actions and `--auto` through the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex) CLI, with that CLI's own login and default model (the action's `model` field is ignored). They run headless from an empty temp dir, with no tools, no MCP servers, no hooks or plugins (Claude Code) / a read-only sandbox (Codex), and no saved session. The whole transcript goes in one prompt, without chunking. They can't transcribe audio, so with no `-transcriber` set they pair with `local`. No fallback to an API provider.
+**claude** and **codex** run post-processing actions and `--auto` through the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex) CLI, with that CLI's own login and default model (the action's `model` field is ignored). They run headless from an empty temp dir, with no tools, no MCP servers, no hooks or plugins and no saved session (Codex also gets a read-only sandbox and no web search). The transcript is untrusted input, so the agents get no way to read files or run commands that a spoken prompt injection could abuse. The whole transcript goes in one prompt, without chunking. They can't transcribe audio, so with no `-transcriber` set they pair with `local`. No fallback to an API provider.
 
 ### Transcribers
 
