@@ -28,7 +28,7 @@ func fakeAudio(t *testing.T) {
 		return "", nil
 	}
 	bin := filepath.Join(t.TempDir(), "fake-ffmpeg")
-	script := "#!/bin/sh\nfor a; do out=\"$a\"; done\necho \"$@\" > \"$out.args\"\nprintf 'ID3audio' > \"$out\"\nexit 0\n"
+	script := "#!/bin/sh\nfor a; do out=\"$a\"; done\necho \"$@\" > \"$out.args\"\nhead -c 4096 /dev/zero > \"$out\"\nexit 0\n"
 	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}

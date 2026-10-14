@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -21,6 +20,11 @@ var (
 )
 
 var ErrNothingRecorded = errors.New("nothing was recorded")
+
+// minAudioBytes separates a real recording from the ~230 bytes of ID3/Xing
+// headers ffmpeg writes even when no audio frame was encoded. At 64 kbps,
+// 1 KB is under 0.15 s of audio.
+const minAudioBytes = 1024
 
 // UI is where the session reports progress. Force, when closed, kills ffmpeg
 // at once (second Ctrl+C).
@@ -52,8 +56,7 @@ func Record(ctx context.Context, c Config, ui UI) (Result, error) {
 	}
 
 	cmd := exec.Command(bin, args...)
-	// Own process group: a terminal Ctrl+C reaches goscribe only, never ffmpeg mid-write.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	isolate(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return res, err
@@ -131,15 +134,15 @@ loop:
 			}
 		case <-ctx.Done():
 			res.Stopped = true
-			io.WriteString(stdin, "q")
+			_, _ = io.WriteString(stdin, "q")
 			stdin.Close()
 			select {
 			case waitErr = <-done:
 			case <-time.After(StopTimeout):
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				kill(cmd)
 				waitErr = <-done
 			case <-ui.Force:
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				kill(cmd)
 				waitErr = <-done
 			}
 			break loop
@@ -151,8 +154,9 @@ loop:
 	if info, err := os.Stat(c.Output); err == nil {
 		res.Size = info.Size()
 	}
-	if res.Size == 0 {
+	if res.Size < minAudioBytes {
 		os.Remove(c.Output)
+		res.Size = 0
 	}
 
 	// After our own stop, ffmpeg's exit status (0 on "q", killed after timeout)
