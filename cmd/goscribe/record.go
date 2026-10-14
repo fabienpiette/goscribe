@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -127,27 +128,14 @@ func runRecord(args []string, stdout, stderr io.Writer) int {
 		return usageErr("%v", err)
 	}
 
-	// First Ctrl+C: stop cleanly. Second: kill at once.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigs)
-	force := make(chan struct{})
-	go func() {
-		if _, ok := <-sigs; !ok {
-			return
-		}
-		cancel()
-		if _, ok := <-sigs; ok {
-			close(force)
-		}
-	}()
-	defer close(sigs)
+	ctx, force, stopSignals := watchSignals()
+	defer stopSignals()
 
 	cfg := recorder.Config{Inputs: inputs, Quality: qual, Duration: *duration, Output: out}
 	fmt.Fprintf(stdout, "Recording %s -> %s (Ctrl+C to stop)\n", cfg, out)
 	res, err := recorder.Record(ctx, cfg, recorder.UI{Status: stdout, Interactive: isTerminal(stdout), Force: force})
+	// The recording is over: from here on (e.g. -transcribe), Ctrl+C behaves as usual.
+	stopSignals()
 	if err != nil {
 		if errors.Is(err, recorder.ErrNothingRecorded) {
 			fmt.Fprintln(stderr, "Nothing was recorded.")
@@ -216,4 +204,33 @@ func printSources(stdout, stderr io.Writer) int {
 	section("Computer sound (monitors):", true, defMon)
 	fmt.Fprintln(stdout, "(* = default)")
 	return 0
+}
+
+// watchSignals turns the first Ctrl+C, SIGTERM or SIGHUP into a cancelled ctx (clean
+// stop) and the second into a closed force channel (immediate kill). stop
+// restores the default signal behavior.
+func watchSignals() (ctx context.Context, force <-chan struct{}, stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigs := make(chan os.Signal, 2)
+	// SIGHUP: closing the terminal stops the recording cleanly.
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	forceCh := make(chan struct{})
+	go func() {
+		if _, ok := <-sigs; !ok {
+			return
+		}
+		cancel()
+		if _, ok := <-sigs; ok {
+			close(forceCh)
+		}
+	}()
+	var once sync.Once
+	return ctx, forceCh, func() {
+		once.Do(func() {
+			// Stop before close: a signal sent to a closed channel would panic.
+			signal.Stop(sigs)
+			close(sigs)
+			cancel()
+		})
+	}
 }
