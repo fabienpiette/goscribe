@@ -28,6 +28,8 @@ goscribe -action openai-meeting-summary meeting.mp3
 ## Features
 
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
+- **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
+- **Pluggable transcription** — transcribe locally and offline (faster-whisper) or with ElevenLabs Scribe (speaker labels), then post-process with OpenAI or Gemini
 - **18 built-in actions** — meeting summaries, action items, technical notes, retrospectives, and more
 - **Auto-select mode** — let the AI pick the most relevant actions for your transcript
 - **Large file handling** — audio splitting and transcript chunking happen transparently
@@ -65,6 +67,15 @@ The server starts on port 8080 with Redis managed by Docker Compose. See [Server
 goscribe -set-gemini-key YOUR_GEMINI_KEY
 goscribe -provider gemini meeting.mp3
 
+# Transcribe locally (offline), summarize with OpenAI
+goscribe -transcriber local -action openai-meeting-summary meeting.mp3
+
+# Transcribe with ElevenLabs Scribe (speaker labels)
+ELEVENLABS_API_KEY=... goscribe -transcriber elevenlabs meeting.mp3
+
+# Run actions through your local Claude Code (or Codex) login
+goscribe -transcriber local -provider claude -action openai-meeting-summary meeting.mp3
+
 # Run multiple actions at once
 goscribe -action openai-meeting-summary,openai-action-items meeting.mp3
 
@@ -91,7 +102,11 @@ Output files are written alongside the input:
 |------|-------------|
 | `-k` | OpenAI API key |
 | `-gemini-key` | Gemini API key |
-| `-provider` | `openai` (default) or `gemini` |
+| `-provider` | Actions engine: `openai` (default), `gemini`, `claude` or `codex` |
+| `-transcriber` | Transcription engine: `local`, `elevenlabs`, `openai` or `gemini` (default: config, else same as `-provider`) |
+| `-elevenlabs-key` | ElevenLabs API key (default: config, then `$ELEVENLABS_API_KEY`) |
+| `-whisper-model` | Whisper model for `-transcriber local` (default: `small`) |
+| `-language` | Audio language code for `local` and `elevenlabs`, e.g. `fr` (default: auto-detect) |
 | `-no-fallback` | Disable automatic provider fallback |
 | `-action` | Action ID(s), comma-separated |
 | `--auto` | AI picks the best actions |
@@ -102,6 +117,7 @@ Output files are written alongside the input:
 | `-set-key` | Save OpenAI key to config |
 | `-set-gemini-key` | Save Gemini key to config |
 | `-set-provider` | Save default provider to config |
+| `-set-transcriber` | Save default transcription engine to config |
 | `-init` | Reset config to defaults |
 
 ### Server Mode
@@ -150,6 +166,13 @@ provider: "openai"
 openai_api_key: ""
 gemini_api_key: ""
 gemini_model: "gemini-2.0-flash"
+
+# Optional transcription engine settings
+transcriber: "local"            # local, elevenlabs, openai or gemini
+whisper_model: "small"          # local only; e.g. large-v3-turbo for accuracy
+elevenlabs_api_key: ""
+elevenlabs_model: "scribe_v1"
+language: ""                    # e.g. "fr"; empty = auto-detect
 
 post_actions:
   - id: "custom-summary"
@@ -201,8 +224,21 @@ All configuration is via environment variables. Copy `.env.example` to `.env`:
 
 When both keys are configured, goscribe automatically falls back to the other provider on failure. Disable with `-no-fallback`.
 
+### Local harnesses
+
+**claude** and **codex** run post-processing actions and `--auto` through the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex) CLI, with that CLI's own login and default model (the action's `model` field is ignored). They run headless from an empty temp dir, with no tools, no MCP servers, no hooks or plugins (Claude Code) / a read-only sandbox (Codex), and no saved session. The whole transcript goes in one prompt, without chunking. They can't transcribe audio, so with no `-transcriber` set they pair with `local`. No fallback to an API provider.
+
+### Transcribers
+
+`-transcriber` only picks who turns audio into text; `-provider` still runs actions and `--auto`. `local` and `elevenlabs` never fall back to another engine.
+
+**local** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) via the `whisper-ctranslate2` CLI, fully offline. Install with `uv tool install whisper-ctranslate2` (or `pipx`). The model is downloaded on first use; uses the GPU when available, otherwise the CPU.
+
+**elevenlabs** — [ElevenLabs Scribe](https://elevenlabs.io/docs/capabilities/speech-to-text), with speaker diarization: the transcript is written as `speaker_0: …` paragraphs. Needs an ElevenLabs API key.
+
 ## Known Issues
 
+- **`-transcriber` is CLI only** — server mode still transcribes with the request's provider (OpenAI or Gemini).
 - **ffmpeg required for large files** — files over 25 MB (OpenAI) or 20 MB (Gemini) are split using `ffmpeg`. Install it with `brew install ffmpeg` or `apt install ffmpeg`.
 - **`--auto` and `actions=auto` call the AI API** for action selection, which incurs additional API costs.
 
@@ -222,6 +258,8 @@ internal/worker/    Async job processor via asynq (server mode)
 internal/provider/  Provider routing and fallback logic
 internal/openai/    OpenAI API client
 internal/gemini/    Gemini API client
+internal/elevenlabs/ ElevenLabs Scribe speech-to-text client
+internal/whisperlocal/ Local faster-whisper transcription (whisper-ctranslate2)
 internal/util/      Shared helpers (model limits, audio splitting, etc.)
 ```
 
