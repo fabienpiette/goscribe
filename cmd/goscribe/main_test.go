@@ -299,7 +299,7 @@ func TestRunTranscriptModeNoAction(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when no action specified")
 	}
-	if !strings.Contains(err.Error(), "-action or --auto") {
+	if !strings.Contains(err.Error(), "-action, --auto or -tags") {
 		t.Errorf("error = %q", err.Error())
 	}
 }
@@ -683,5 +683,116 @@ func TestRunElevenLabsTuningFlags(t *testing.T) {
 	}
 	if strings.Join(form["num_speakers"], "") != "3" {
 		t.Errorf("num_speakers = %v", form["num_speakers"])
+	}
+}
+
+// fakeClaude installs a stand-in for the claude CLI that saves its prompt to
+// $FAKE_PROMPT and prints answer.
+func fakeClaude(t *testing.T, answer string) string {
+	t.Helper()
+	dir := t.TempDir()
+	promptFile := filepath.Join(dir, "prompt")
+	t.Setenv("FAKE_PROMPT", promptFile)
+	bin := filepath.Join(dir, "fake-claude")
+	script := "#!/bin/sh\ncat > \"$FAKE_PROMPT\"\ncat <<'EOF'\n" + answer + "\nEOF\n"
+	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write fake claude: %v", err)
+	}
+	orig := harness.ClaudeBinary
+	harness.ClaudeBinary = bin
+	t.Cleanup(func() { harness.ClaudeBinary = orig })
+	return promptFile
+}
+
+// recordsWithTranscript builds records/<date>/ with one transcript, plus an
+// older tagged recording that seeds the vocabulary.
+func recordsWithTranscript(t *testing.T) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	if err := config.CreateDefault(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+	root := filepath.Join(t.TempDir(), "records")
+	for _, d := range []string{"20261001", "20261013"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := "topics:\n  - design-tokens\nprojects:\n  - billing\n"
+	if err := os.WriteFile(filepath.Join(root, "20261001", "old-reduce-tags.yml"), []byte(old), 0644); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(root, "20261013", "vokoscreenNG-2026-10-13_14-09-55-reduce-transcript.txt")
+	if err := os.WriteFile(transcript, []byte(strings.Repeat("We talked about design tokens with Sam. See PROJ-1. ", 5)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return transcript
+}
+
+func TestRunTagsOnTranscript(t *testing.T) {
+	transcript := recordsWithTranscript(t)
+	promptFile := fakeClaude(t, `{"type":"standup","summary":"Token sync","topics":["Design Tokens"],"people":["Sam"],"tickets":["proj-1"],"projects":["billing"]}`)
+
+	err := run(runOptions{apiKey: "XXXX", provider: "claude", tags: true, transcriptFiles: []string{transcript}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tagsFile := strings.TrimSuffix(transcript, "-transcript.txt") + "-tags.yml"
+	data, err := os.ReadFile(tagsFile)
+	if err != nil {
+		t.Fatalf("tags file not written: %v", err)
+	}
+	for _, want := range []string{"date: \"2026-10-13\"", "type: standup", "- design-tokens", "- Sam", "- PROJ-1", "- billing"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("tags file missing %q:\n%s", want, data)
+		}
+	}
+
+	prompt, _ := os.ReadFile(promptFile)
+	if !strings.Contains(string(prompt), "Reuse these existing topics") || !strings.Contains(string(prompt), "design-tokens") {
+		t.Errorf("prompt should carry the vocabulary from sibling folders:\n%s", prompt)
+	}
+	if !strings.Contains(string(prompt), "We talked about design tokens") {
+		t.Error("prompt should include the transcript")
+	}
+}
+
+func TestRunTagsBadAnswerWritesNothing(t *testing.T) {
+	transcript := recordsWithTranscript(t)
+	fakeClaude(t, "Sorry, I can't help with that.")
+
+	if err := run(runOptions{apiKey: "XXXX", provider: "claude", tags: true, transcriptFiles: []string{transcript}}); err != nil {
+		t.Fatalf("a tagging failure must not fail the run: %v", err)
+	}
+	if _, err := os.Stat(strings.TrimSuffix(transcript, "-transcript.txt") + "-tags.yml"); err == nil {
+		t.Error("tags file written from an unparseable answer")
+	}
+}
+
+func TestRunTagsNeedsSingleTranscript(t *testing.T) {
+	transcript := recordsWithTranscript(t)
+
+	err := run(runOptions{apiKey: "XXXX", provider: "claude", tags: true, transcriptFiles: []string{transcript, transcript}})
+	if err == nil || !strings.Contains(err.Error(), "single -transcript") {
+		t.Errorf("error = %v, want single-transcript error", err)
+	}
+}
+
+func TestRunTagsSkipsTooShortTranscript(t *testing.T) {
+	transcript := recordsWithTranscript(t)
+	if err := os.WriteFile(transcript, []byte("This is a test."), 0644); err != nil {
+		t.Fatal(err)
+	}
+	promptFile := fakeClaude(t, `{"type":"other","summary":"s","topics":["x"]}`)
+
+	if err := run(runOptions{apiKey: "XXXX", provider: "claude", tags: true, transcriptFiles: []string{transcript}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(promptFile); err == nil {
+		t.Error("model was called for a 4-word transcript")
+	}
+	if _, err := os.Stat(strings.TrimSuffix(transcript, "-transcript.txt") + "-tags.yml"); err == nil {
+		t.Error("tags file written for a too-short transcript")
 	}
 }
