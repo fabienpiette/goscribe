@@ -703,3 +703,21 @@ func TestSetDefaultTranscriber(t *testing.T) {
 		t.Errorf("Stored transcriber = %q, want local", cfg.Transcriber)
 	}
 }
+
+func TestReadRecordDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	content := "record_source: mic\nrecord_mic: alsa_input.pci\nrecord_quality: music\ntags_root: /r\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadRecordDefaults(path)
+	if got != (RecordDefaults{Source: "mic", Mic: "alsa_input.pci", Quality: "music"}) {
+		t.Errorf("defaults = %+v", got)
+	}
+	if ReadTagsRoot(path) != "/r" {
+		t.Error("ReadTagsRoot broke")
+	}
+	if ReadRecordDefaults(filepath.Join(t.TempDir(), "missing.yml")) != (RecordDefaults{}) {
+		t.Error("missing file should give zero defaults")
+	}
+}
