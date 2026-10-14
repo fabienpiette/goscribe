@@ -14,16 +14,15 @@ import (
 // TranscribeOptions selects the engine that turns audio into text.
 // Transcriber is one of config.ValidTranscribers; empty means "same as Provider".
 type TranscribeOptions struct {
-	Transcriber     string
-	Provider        string
-	OpenAIKey       string
-	GeminiKey       string
-	GeminiModel     string
-	ElevenLabsKey   string
-	ElevenLabsModel string
-	WhisperModel    string
-	Language        string
-	Fallback        bool
+	Transcriber  string
+	Provider     string
+	OpenAIKey    string
+	GeminiKey    string
+	GeminiModel  string
+	ElevenLabs   elevenlabs.Options // Language is filled from Language below
+	WhisperModel string
+	Language     string
+	Fallback     bool
 }
 
 // Transcribe dispatches to the selected engine. local and elevenlabs never fall
@@ -33,7 +32,9 @@ func Transcribe(audioPath string, o TranscribeOptions) (string, error) {
 	case "local":
 		return whisperlocal.Transcribe(audioPath, o.WhisperModel, o.Language)
 	case "elevenlabs":
-		return elevenlabs.Transcribe(audioPath, o.ElevenLabsKey, o.ElevenLabsModel, o.Language)
+		el := o.ElevenLabs
+		el.Language = o.Language
+		return elevenlabs.Transcribe(audioPath, el)
 	case "", "openai", "gemini":
 		prov := o.Transcriber
 		if prov == "" {
