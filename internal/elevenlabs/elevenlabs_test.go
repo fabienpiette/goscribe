@@ -11,6 +11,8 @@ import (
 	"testing"
 )
 
+func at(seconds float64) *float64 { return &seconds }
+
 func overrideBaseURL(t *testing.T, url string) {
 	t.Helper()
 	orig := BaseURL
@@ -51,7 +53,7 @@ func TestTranscribeSendsRequest(t *testing.T) {
 	defer server.Close()
 	overrideBaseURL(t, server.URL)
 
-	got, err := Transcribe(writeAudio(t), "secret", "", "fr")
+	got, err := Transcribe(writeAudio(t), Options{APIKey: "secret", Language: "fr"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -64,8 +66,19 @@ func TestTranscribeSendsRequest(t *testing.T) {
 	if gotPath != "/v1/speech-to-text" {
 		t.Errorf("path = %q", gotPath)
 	}
-	if fields["model_id"] != DefaultModel || fields["diarize"] != "true" || fields["language_code"] != "fr" {
-		t.Errorf("fields = %v", fields)
+	want := map[string]string{
+		"model_id": "scribe_v2", "diarize": "true", "language_code": "fr",
+		"no_verbatim": "true", "tag_audio_events": "false", "timestamps_granularity": "word",
+	}
+	for k, v := range want {
+		if fields[k] != v {
+			t.Errorf("field %s = %q, want %q (all: %v)", k, fields[k], v, fields)
+		}
+	}
+	for _, unset := range []string{"num_speakers", "keyterms"} {
+		if _, ok := fields[unset]; ok {
+			t.Errorf("field %s should not be sent by default", unset)
+		}
 	}
 	if gotFile != "meeting.mp3:fake audio" {
 		t.Errorf("file = %q", gotFile)
@@ -80,15 +93,52 @@ func TestTranscribeAPIError(t *testing.T) {
 	defer server.Close()
 	overrideBaseURL(t, server.URL)
 
-	_, err := Transcribe(writeAudio(t), "bad", "", "")
+	_, err := Transcribe(writeAudio(t), Options{APIKey: "bad"})
 	if err == nil || !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "invalid api key") {
 		t.Errorf("error = %v, want status and body", err)
 	}
 }
 
 func TestTranscribeMissingKey(t *testing.T) {
-	if _, err := Transcribe(writeAudio(t), "", "", ""); err == nil {
+	if _, err := Transcribe(writeAudio(t), Options{}); err == nil {
 		t.Error("expected error without API key")
+	}
+}
+
+func TestFormFields(t *testing.T) {
+	values := func(o Options) map[string][]string {
+		m := map[string][]string{}
+		for _, f := range formFields(o) {
+			m[f[0]] = append(m[f[0]], f[1])
+		}
+		return m
+	}
+
+	got := values(Options{Keyterms: []string{"Acme", " Globex ", ""}, NumSpeakers: 4})
+	if strings.Join(got["keyterms"], "|") != "Acme|Globex" {
+		t.Errorf("keyterms = %v, want one trimmed field per non-empty term", got["keyterms"])
+	}
+	if strings.Join(got["num_speakers"], "") != "4" {
+		t.Errorf("num_speakers = %v", got["num_speakers"])
+	}
+
+	if _, ok := values(Options{Verbatim: true})["no_verbatim"]; ok {
+		t.Error("no_verbatim sent although Verbatim is set")
+	}
+	v1 := values(Options{Model: "scribe_v1"})
+	if _, ok := v1["no_verbatim"]; ok {
+		t.Error("no_verbatim sent to scribe_v1, which rejects it")
+	}
+	if v1["model_id"][0] != "scribe_v1" {
+		t.Errorf("model_id = %v", v1["model_id"])
+	}
+}
+
+func TestFormatTimestamp(t *testing.T) {
+	for in, want := range map[float64]string{0: "00:00:00", 61.9: "00:01:01", 3725.2: "01:02:05"} {
+		if got := formatTimestamp(in); got != want {
+			t.Errorf("formatTimestamp(%v) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -103,17 +153,25 @@ func TestFormatTranscript(t *testing.T) {
 			resp: transcriptionResponse{
 				Text: "Hello there. Hi! (laughs) Bye.",
 				Words: []word{
-					{Text: "Hello", Type: "word", SpeakerID: "speaker_0"},
-					{Text: " ", Type: "spacing", SpeakerID: "speaker_0"},
-					{Text: "there.", Type: "word", SpeakerID: "speaker_0"},
-					{Text: " ", Type: "spacing", SpeakerID: "speaker_0"},
-					{Text: "Hi!", Type: "word", SpeakerID: "speaker_1"},
-					{Text: "(laughs)", Type: "audio_event", SpeakerID: "speaker_1"},
-					{Text: " ", Type: "spacing", SpeakerID: "speaker_0"},
-					{Text: "Bye.", Type: "word", SpeakerID: "speaker_0"},
+					{Text: "Hello", Type: "word", Start: at(1.5), SpeakerID: "speaker_0"},
+					{Text: " ", Type: "spacing", Start: at(1.9), SpeakerID: "speaker_0"},
+					{Text: "there.", Type: "word", Start: at(2), SpeakerID: "speaker_0"},
+					{Text: " ", Type: "spacing", Start: at(2.4), SpeakerID: "speaker_0"},
+					{Text: "Hi!", Type: "word", Start: at(65), SpeakerID: "speaker_1"},
+					{Text: "(laughs)", Type: "audio_event", Start: at(66), SpeakerID: "speaker_1"},
+					{Text: " ", Type: "spacing", Start: at(3699), SpeakerID: "speaker_0"},
+					{Text: "Bye.", Type: "word", Start: at(3700), SpeakerID: "speaker_0"},
 				},
 			},
-			want: "speaker_0: Hello there.\n\nspeaker_1: Hi!\n\nspeaker_0: Bye.",
+			// A turn's timestamp is its first word's, not the leading spacing's.
+			want: "[00:00:01] speaker_0: Hello there.\n\n[00:01:05] speaker_1: Hi!\n\n[01:01:40] speaker_0: Bye.",
+		},
+		{
+			name: "no timestamp when start times are missing",
+			resp: transcriptionResponse{
+				Words: []word{{Text: "Hello", Type: "word", SpeakerID: "speaker_0"}},
+			},
+			want: "speaker_0: Hello",
 		},
 		{
 			name: "falls back to text without speakers",
