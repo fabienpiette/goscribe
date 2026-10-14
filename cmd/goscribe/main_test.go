@@ -9,7 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"goscribe/internal/elevenlabs"
+	"goscribe/internal/harness"
 	"goscribe/internal/openai"
+	"goscribe/internal/whisperlocal"
 	"goscribe/pkg/config"
 )
 
@@ -488,5 +491,163 @@ func TestRunUnknownActionFailsBeforeTranscription(t *testing.T) {
 	}
 	if _, statErr := os.Stat(strings.TrimSuffix(audioFile, ".mp3") + "-transcript.txt"); statErr == nil {
 		t.Error("transcript file was written; validation should happen before transcription")
+	}
+}
+
+// setupTranscriberTest creates a default config in a temp HOME, an audio file, and an
+// OpenAI stub that counts calls. Returns the audio path and a pointer to the call count.
+func setupTranscriberTest(t *testing.T) (string, *int) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	if err := config.CreateDefault(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	apiCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		openAISuccessHandler("summary")(w, r)
+	}))
+	t.Cleanup(server.Close)
+	overrideOpenAIBaseURL(t, server.URL)
+
+	audioFile := filepath.Join(t.TempDir(), "meeting.mp3")
+	if err := os.WriteFile(audioFile, []byte("fake audio"), 0644); err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+	return audioFile, &apiCalls
+}
+
+func TestRunInvalidTranscriber(t *testing.T) {
+	audioFile, apiCalls := setupTranscriberTest(t)
+
+	err := run(runOptions{apiKey: "test-key", transcriber: "whisperx", args: []string{audioFile}})
+	if err == nil || !strings.Contains(err.Error(), "invalid transcriber 'whisperx'") {
+		t.Fatalf("error = %v, want invalid transcriber", err)
+	}
+	if *apiCalls != 0 {
+		t.Errorf("made %d API call(s), want 0", *apiCalls)
+	}
+}
+
+func TestRunLocalTranscriber(t *testing.T) {
+	audioFile, apiCalls := setupTranscriberTest(t)
+
+	fakeWhisper(t)
+
+	err := run(runOptions{
+		apiKey:      "test-key",
+		transcriber: "local",
+		postAction:  "openai-meeting-summary",
+		args:        []string{audioFile},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	base := strings.TrimSuffix(audioFile, ".mp3")
+	transcript, err := os.ReadFile(base + "-transcript.txt")
+	if err != nil || string(transcript) != "local words" {
+		t.Errorf("transcript = %q, err = %v", transcript, err)
+	}
+	if _, err := os.Stat(base + "-openai-meeting-summary.txt"); err != nil {
+		t.Errorf("post-action output missing: %v", err)
+	}
+	// Only the post-action may hit OpenAI; transcription stays local.
+	if *apiCalls != 1 {
+		t.Errorf("made %d OpenAI call(s), want 1 (the summary only)", *apiCalls)
+	}
+}
+
+func TestRunElevenLabsTranscriberKeyFromEnv(t *testing.T) {
+	audioFile, apiCalls := setupTranscriberTest(t)
+	t.Setenv("ELEVENLABS_API_KEY", "env-key")
+
+	var gotKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("xi-api-key")
+		writeJSON(w, map[string]any{"text": "scribe words"})
+	}))
+	defer server.Close()
+	orig := elevenlabs.BaseURL
+	elevenlabs.BaseURL = server.URL
+	t.Cleanup(func() { elevenlabs.BaseURL = orig })
+
+	if err := run(runOptions{apiKey: "test-key", transcriber: "elevenlabs", args: []string{audioFile}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	transcript, _ := os.ReadFile(strings.TrimSuffix(audioFile, ".mp3") + "-transcript.txt")
+	if string(transcript) != "scribe words" {
+		t.Errorf("transcript = %q", transcript)
+	}
+	if gotKey != "env-key" {
+		t.Errorf("xi-api-key = %q, want key from ELEVENLABS_API_KEY", gotKey)
+	}
+	if *apiCalls != 0 {
+		t.Errorf("made %d OpenAI call(s), want 0", *apiCalls)
+	}
+}
+
+// fakeWhisper stands in for whisper-ctranslate2 and always transcribes "local words".
+func fakeWhisper(t *testing.T) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "fake-whisper")
+	script := `#!/bin/sh
+audio="$1"
+while [ $# -gt 0 ]; do [ "$1" = "--output_dir" ] && out="$2"; shift; done
+base=$(basename "$audio"); echo "local words" > "$out/${base%.*}.txt"
+`
+	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write fake binary: %v", err)
+	}
+	orig := whisperlocal.Binary
+	whisperlocal.Binary = bin
+	t.Cleanup(func() { whisperlocal.Binary = orig })
+}
+
+func TestRunClaudeProviderDefaultsToLocalTranscriber(t *testing.T) {
+	audioFile, apiCalls := setupTranscriberTest(t)
+	fakeWhisper(t)
+
+	bin := filepath.Join(t.TempDir(), "fake-claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\necho 'claude summary'\n"), 0755); err != nil {
+		t.Fatalf("failed to write fake claude: %v", err)
+	}
+	orig := harness.ClaudeBinary
+	harness.ClaudeBinary = bin
+	t.Cleanup(func() { harness.ClaudeBinary = orig })
+
+	err := run(runOptions{
+		apiKey:     "test-key",
+		provider:   "claude",
+		postAction: "openai-meeting-summary",
+		args:       []string{audioFile},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	base := strings.TrimSuffix(audioFile, ".mp3")
+	if got, _ := os.ReadFile(base + "-transcript.txt"); string(got) != "local words" {
+		t.Errorf("transcript = %q, want the local transcriber's output", got)
+	}
+	if got, _ := os.ReadFile(base + "-openai-meeting-summary.txt"); string(got) != "claude summary" {
+		t.Errorf("summary = %q, want claude's answer", got)
+	}
+	if *apiCalls != 0 {
+		t.Errorf("made %d OpenAI call(s), want 0", *apiCalls)
+	}
+}
+
+func TestRunInvalidProvider(t *testing.T) {
+	audioFile, apiCalls := setupTranscriberTest(t)
+
+	err := run(runOptions{apiKey: "test-key", provider: "mistral", args: []string{audioFile}})
+	if err == nil || !strings.Contains(err.Error(), "invalid provider 'mistral'") {
+		t.Fatalf("error = %v, want invalid provider", err)
+	}
+	if *apiCalls != 0 {
+		t.Errorf("made %d API call(s), want 0", *apiCalls)
 	}
 }
