@@ -651,3 +651,37 @@ func TestRunInvalidProvider(t *testing.T) {
 		t.Errorf("made %d API call(s), want 0", *apiCalls)
 	}
 }
+
+func TestRunElevenLabsTuningFlags(t *testing.T) {
+	audioFile, _ := setupTranscriberTest(t)
+	t.Setenv("ELEVENLABS_API_KEY", "env-key")
+
+	var form map[string][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err == nil {
+			form = r.MultipartForm.Value
+		}
+		writeJSON(w, map[string]any{"text": "ok"})
+	}))
+	defer server.Close()
+	orig := elevenlabs.BaseURL
+	elevenlabs.BaseURL = server.URL
+	t.Cleanup(func() { elevenlabs.BaseURL = orig })
+
+	err := run(runOptions{
+		apiKey:      "test-key",
+		transcriber: "elevenlabs",
+		keyterms:    "Livestorm,ALAN",
+		numSpeakers: 3,
+		args:        []string{audioFile},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Join(form["keyterms"], ",") != "Livestorm,ALAN" {
+		t.Errorf("keyterms = %v", form["keyterms"])
+	}
+	if strings.Join(form["num_speakers"], "") != "3" {
+		t.Errorf("num_speakers = %v", form["num_speakers"])
+	}
+}

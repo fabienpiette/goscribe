@@ -105,6 +105,8 @@ Output files are written alongside the input:
 | `-provider` | Actions engine: `openai` (default), `gemini`, `claude` or `codex` |
 | `-transcriber` | Transcription engine: `local`, `elevenlabs`, `openai` or `gemini` (default: config, else same as `-provider`) |
 | `-elevenlabs-key` | ElevenLabs API key (default: config, then `$ELEVENLABS_API_KEY`) |
+| `-keyterms` | Comma-separated names/jargon for ElevenLabs to favor (20% surcharge) |
+| `-num-speakers` | Max speakers for ElevenLabs diarization (default: auto) |
 | `-whisper-model` | Whisper model for `-transcriber local` (default: `small`) |
 | `-language` | Audio language code for `local` and `elevenlabs`, e.g. `fr` (default: auto-detect) |
 | `-no-fallback` | Disable automatic provider fallback |
@@ -171,7 +173,10 @@ gemini_model: "gemini-2.0-flash"
 transcriber: "local"            # local, elevenlabs, openai or gemini
 whisper_model: "small"          # local only; e.g. large-v3-turbo for accuracy
 elevenlabs_api_key: ""
-elevenlabs_model: "scribe_v1"
+elevenlabs_model: "scribe_v2"
+elevenlabs_keyterms: ["Livestorm"]  # names/jargon to favor (20% surcharge)
+elevenlabs_num_speakers: 0      # max speakers, 0 = auto
+elevenlabs_verbatim: false      # true keeps filler words
 language: ""                    # e.g. "fr"; empty = auto-detect
 
 post_actions:
@@ -234,7 +239,7 @@ When both keys are configured, goscribe automatically falls back to the other pr
 
 **local** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) via the `whisper-ctranslate2` CLI, fully offline. Install with `uv tool install whisper-ctranslate2` (or `pipx`). The model is downloaded on first use; uses the GPU when available, otherwise the CPU.
 
-**elevenlabs** — [ElevenLabs Scribe](https://elevenlabs.io/docs/capabilities/speech-to-text), with speaker diarization: the transcript is written as `speaker_0: …` paragraphs. Needs an ElevenLabs API key.
+**elevenlabs** — [ElevenLabs Scribe](https://elevenlabs.io/docs/capabilities/speech-to-text), tuned for meetings: speaker diarization, filler words and false starts removed (`no_verbatim`), no audio-event tags, and one paragraph per speaker turn with its start time, e.g. `[00:12:34] speaker_1: …`. Optional: `-keyterms` / `elevenlabs_keyterms` to favor names and jargon (ElevenLabs adds a 20% surcharge), `-num-speakers` / `elevenlabs_num_speakers` to cap the speaker count, `elevenlabs_verbatim: true` to keep fillers. Needs an ElevenLabs API key.
 
 ## Known Issues
 
