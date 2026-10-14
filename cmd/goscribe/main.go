@@ -477,6 +477,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "search" {
 		os.Exit(runSearch(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "record" {
+		os.Exit(runRecord(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	if len(os.Args) > 1 {
 		normalized, err := normalizeArgs(os.Args[1:])
@@ -516,7 +519,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI, Gemini, ElevenLabs or local Whisper\n\n")
 		fmt.Fprintf(os.Stderr, "USAGE:\n")
 		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n")
-		fmt.Fprintf(os.Stderr, "  goscribe search [flags] [terms...]   find meetings by tags (goscribe search -h)\n\n")
+		fmt.Fprintf(os.Stderr, "  goscribe search [flags] [terms...]   find meetings by tags (goscribe search -h)\n")
+		fmt.Fprintf(os.Stderr, "  goscribe record [flags]               record mic and/or computer sound to mp3 (goscribe record -h)\n\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nEXAMPLES:\n")
