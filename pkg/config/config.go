@@ -27,6 +27,10 @@ type Config struct {
 	GeminiModel  string       `yaml:"gemini_model"`
 	PostActions  []PostAction `yaml:"post_actions"`
 
+	// Folder whose tag files (and its subfolders') seed the tag vocabulary.
+	// Default: the parent of the transcript's folder.
+	TagsRoot string `yaml:"tags_root,omitempty"`
+
 	// Transcription engine settings. Empty transcriber means "same as provider".
 	Transcriber      string `yaml:"transcriber,omitempty"`
 	ElevenLabsAPIKey string `yaml:"elevenlabs_api_key,omitempty"`
