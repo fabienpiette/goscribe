@@ -30,6 +30,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
 - **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
 - **Search** — `goscribe search tokens person:adri -since 2026-09-01` finds meetings by their tags
+- **Recording** — `goscribe record` captures the mic and/or computer sound to mp3 (Ctrl+C to stop), warns about silent sources, and can transcribe right after
 - **Searchable tags** — `-tags` writes a `<name>-tags.yml` (type, summary, topics, people, tickets, projects) next to the transcript, reusing existing tags, so `grep` finds every meeting on a subject
 - **Pluggable transcription** — transcribe locally and offline (faster-whisper) or with ElevenLabs Scribe (speaker labels), then post-process with OpenAI or Gemini
 - **18 built-in actions** — meeting summaries, action items, technical notes, retrospectives, and more
@@ -285,6 +286,23 @@ goscribe search -paths staffing | xargs grep -il hubspot
 ```
 
 Terms are case-insensitive substrings, so `adri` finds both "Adrian" and "Adrien". `field:value` limits a term to `topic`, `person`, `ticket`, `project`, `type` or `summary`. It searches `-root`, else `tags_root` from the config, else the current folder, recursively. Exit code: 0 with matches, 1 without (like grep), 2 on errors.
+
+### Recording
+
+`goscribe record` records the mic and/or the computer sound (PipeWire/PulseAudio, through ffmpeg) to an mp3 until Ctrl+C:
+
+```bash
+goscribe record                                   # mic + computer sound -> recording-<date>_<time>.mp3
+goscribe record -source system -o webinar.mp3     # computer sound only
+goscribe record -duration 45m -transcribe -provider codex -tags
+goscribe record -list-sources                     # pick devices for -mic / -system
+```
+
+- `-quality voice` (default) is mono 64 kbps, about 30 MB per hour. `-quality music` is stereo VBR.
+- If a side stays silent for 30 s, goscribe warns (`⚠ no sound from mic for 30s`) and keeps recording.
+- The first Ctrl+C stops cleanly; a second one stops at once. An existing file is never overwritten.
+- Config defaults: `record_source`, `record_mic`, `record_system`, `record_quality`.
+- Use headphones: with speakers, the mic also picks up the computer sound, so the other people are recorded twice.
 
 ## Known Issues
 
