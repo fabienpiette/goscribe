@@ -1,0 +1,229 @@
+package recorder
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// Overridable for tests.
+var (
+	Binary      = "ffmpeg"
+	StopTimeout = 5 * time.Second
+	Tick        = time.Second
+)
+
+var ErrNothingRecorded = errors.New("nothing was recorded")
+
+// UI is where the session reports progress. Force, when closed, kills ffmpeg
+// at once (second Ctrl+C).
+type UI struct {
+	Status      io.Writer
+	Interactive bool
+	Force       <-chan struct{}
+}
+
+type Result struct {
+	Output  string
+	Elapsed time.Duration
+	Size    int64
+	Stopped bool // ended by ctx (Ctrl+C) rather than by ffmpeg itself
+}
+
+// Record runs ffmpeg until it ends on its own (-duration, error) or ctx is
+// cancelled, in which case it asks ffmpeg to quit ("q") and kills it after
+// StopTimeout or when ui.Force closes.
+func Record(ctx context.Context, c Config, ui UI) (Result, error) {
+	res := Result{Output: c.Output}
+	args, err := Args(c)
+	if err != nil {
+		return res, err
+	}
+	bin, err := exec.LookPath(Binary)
+	if err != nil {
+		return res, fmt.Errorf("%s not found on PATH", Binary)
+	}
+
+	cmd := exec.Command(bin, args...)
+	// Own process group: a terminal Ctrl+C reaches goscribe only, never ffmpeg mid-write.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return res, err
+	}
+	stderr := &tail{max: 20}
+	cmd.Stderr = stderr
+
+	// One pipe per recorded side: ffmpeg writes its silence events to fd 3, 4.
+	labels := c.Labels()
+	var readers []*os.File
+	for range labels {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return res, err
+		}
+		readers = append(readers, r)
+		cmd.ExtraFiles = append(cmd.ExtraFiles, w)
+	}
+	closeAll := func(files []*os.File) {
+		for _, f := range files {
+			f.Close()
+		}
+	}
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		closeAll(readers)
+		closeAll(cmd.ExtraFiles)
+		return res, fmt.Errorf("starting %s: %w", Binary, err)
+	}
+	closeAll(cmd.ExtraFiles) // ffmpeg holds its own copies
+
+	events := make(chan Event, 16)
+	var wg sync.WaitGroup
+	for i, r := range readers {
+		wg.Add(1)
+		go func(r *os.File, label string) {
+			defer wg.Done()
+			defer r.Close()
+			ReadEvents(r, label, events)
+		}(r, labels[i])
+	}
+	go func() { wg.Wait(); close(events) }()
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	silence := c.SilenceAfter
+	if silence <= 0 {
+		silence = DefaultSilenceAfter
+	}
+	ticker := time.NewTicker(Tick)
+	defer ticker.Stop()
+	lastLine := start
+
+	var waitErr error
+loop:
+	for {
+		select {
+		case waitErr = <-done:
+			break loop
+		case ev, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			clearLine(ui)
+			fmt.Fprintln(ui.Status, ev.Message(silence))
+		case now := <-ticker.C:
+			if ui.Interactive {
+				fmt.Fprintf(ui.Status, "\r\033[K%s", statusLine(c, now.Sub(start)))
+			} else if now.Sub(lastLine) >= time.Minute {
+				fmt.Fprintln(ui.Status, statusLine(c, now.Sub(start)))
+				lastLine = now
+			}
+		case <-ctx.Done():
+			res.Stopped = true
+			io.WriteString(stdin, "q")
+			stdin.Close()
+			select {
+			case waitErr = <-done:
+			case <-time.After(StopTimeout):
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				waitErr = <-done
+			case <-ui.Force:
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				waitErr = <-done
+			}
+			break loop
+		}
+	}
+	clearLine(ui)
+
+	res.Elapsed = time.Since(start)
+	if info, err := os.Stat(c.Output); err == nil {
+		res.Size = info.Size()
+	}
+	if res.Size == 0 {
+		os.Remove(c.Output)
+	}
+
+	// After our own stop, ffmpeg's exit status (0 on "q", killed after timeout)
+	// doesn't matter: what counts is whether audio was written.
+	if !res.Stopped && waitErr != nil {
+		return res, fmt.Errorf("%s stopped unexpectedly: %v\n%s", Binary, waitErr, stderr.String())
+	}
+	if res.Size == 0 {
+		return res, ErrNothingRecorded
+	}
+	return res, nil
+}
+
+func clearLine(ui UI) {
+	if ui.Interactive {
+		fmt.Fprint(ui.Status, "\r\033[K")
+	}
+}
+
+func statusLine(c Config, elapsed time.Duration) string {
+	size := int64(0)
+	if info, err := os.Stat(c.Output); err == nil {
+		size = info.Size()
+	}
+	return fmt.Sprintf("● REC  %s  %s  %s -> %s   (Ctrl+C to stop)", FormatElapsed(elapsed), FormatSize(size), c, c.Output)
+}
+
+func FormatElapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	return fmt.Sprintf("%02d:%02d:%02d", s/3600, s%3600/60, s%60)
+}
+
+func FormatSize(n int64) string {
+	if n >= 1<<30 {
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+}
+
+// tail keeps the last max lines written to it (ffmpeg's stderr).
+type tail struct {
+	mu    sync.Mutex
+	max   int
+	lines []string
+	part  string
+}
+
+func (t *tail) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.part += string(p)
+	for {
+		line, rest, ok := strings.Cut(t.part, "\n")
+		if !ok {
+			break
+		}
+		t.lines = append(t.lines, line)
+		if len(t.lines) > t.max {
+			t.lines = t.lines[1:]
+		}
+		t.part = rest
+	}
+	return len(p), nil
+}
+
+func (t *tail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	lines := t.lines
+	if t.part != "" {
+		lines = append(append([]string{}, lines...), t.part)
+	}
+	return strings.Join(lines, "\n")
+}
