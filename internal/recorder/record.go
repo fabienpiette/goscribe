@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,11 @@ type Result struct {
 // cancelled, in which case it asks ffmpeg to quit ("q") and kills it after
 // StopTimeout or when ui.Force closes.
 func Record(ctx context.Context, c Config, ui UI) (Result, error) {
+	// ffmpeg's Pdeathsig (Linux) is tied to the thread that starts it: keep this
+	// goroutine on one thread until the session ends.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	res := Result{Output: c.Output}
 	args, err := Args(c)
 	if err != nil {
