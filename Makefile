@@ -2,7 +2,7 @@
 
 BINARY_NAME=goscribe
 GO=go
-INSTALL_PATH=/usr/local/bin
+INSTALL_PATH=$(HOME)/.local/bin
 
 help:
 	@echo "Available targets:"
@@ -34,8 +34,9 @@ build-all:
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe ./cmd/goscribe
 
 install: build
-	sudo mv $(BINARY_NAME) $(INSTALL_PATH)/
-	sudo chmod +x $(INSTALL_PATH)/$(BINARY_NAME)
+	mkdir -p $(INSTALL_PATH)
+	mv $(BINARY_NAME) $(INSTALL_PATH)/
+	chmod +x $(INSTALL_PATH)/$(BINARY_NAME)
 	@echo "Installed to $(INSTALL_PATH)/$(BINARY_NAME)"
 
 clean:

@@ -13,7 +13,7 @@ AI-powered audio transcription with post-processing — supports OpenAI Whisper/
 ```bash
 # Install
 git clone https://github.com/fabienpiette/goscribe && cd goscribe
-make build && sudo make install
+make build && make install
 
 # Store your API key once
 goscribe -set-key YOUR_OPENAI_API_KEY
@@ -43,7 +43,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 ```bash
 git clone https://github.com/fabienpiette/goscribe
 cd goscribe
-make build && sudo make install
+make build && make install
 ```
 
 ### Server / Docker
