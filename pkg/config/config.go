@@ -294,28 +294,49 @@ func SetDefaultTranscriber(name string) error {
 	})
 }
 
-// ReadTagsRoot returns tags_root from the config file (default
-// ~/.goscribe/config.yml), or "" if it is unset or unreadable. Unlike LoadConfig
-// it neither validates nor prints, so commands like search keep a clean stdout.
-func ReadTagsRoot(path string) string {
+// readQuiet unmarshals the config file (default ~/.goscribe/config.yml) into out,
+// without validating or printing. It reports whether it succeeded.
+func readQuiet(path string, out any) bool {
 	if path == "" {
 		p, err := configFilePath()
 		if err != nil {
-			return ""
+			return false
 		}
 		path = p
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return false
 	}
+	return yaml.Unmarshal(data, out) == nil
+}
+
+// ReadTagsRoot returns tags_root from the config file, or "" if it is unset or
+// unreadable. Unlike LoadConfig it neither validates nor prints, so commands
+// like search keep a clean stdout.
+func ReadTagsRoot(path string) string {
 	var cfg struct {
 		TagsRoot string `yaml:"tags_root"`
 	}
-	if yaml.Unmarshal(data, &cfg) != nil {
-		return ""
-	}
+	readQuiet(path, &cfg)
 	return cfg.TagsRoot
+}
+
+// RecordDefaults are the config defaults for "goscribe record".
+type RecordDefaults struct {
+	Source  string `yaml:"record_source"`
+	Mic     string `yaml:"record_mic"`
+	System  string `yaml:"record_system"`
+	Quality string `yaml:"record_quality"`
+}
+
+// ReadRecordDefaults reads the record_* keys quietly; zero value on any problem.
+func ReadRecordDefaults(path string) RecordDefaults {
+	var d RecordDefaults
+	if !readQuiet(path, &d) {
+		return RecordDefaults{}
+	}
+	return d
 }
 
 func FindAction(actions []PostAction, id string) *PostAction {
