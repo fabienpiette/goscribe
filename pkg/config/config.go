@@ -294,6 +294,30 @@ func SetDefaultTranscriber(name string) error {
 	})
 }
 
+// ReadTagsRoot returns tags_root from the config file (default
+// ~/.goscribe/config.yml), or "" if it is unset or unreadable. Unlike LoadConfig
+// it neither validates nor prints, so commands like search keep a clean stdout.
+func ReadTagsRoot(path string) string {
+	if path == "" {
+		p, err := configFilePath()
+		if err != nil {
+			return ""
+		}
+		path = p
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		TagsRoot string `yaml:"tags_root"`
+	}
+	if yaml.Unmarshal(data, &cfg) != nil {
+		return ""
+	}
+	return cfg.TagsRoot
+}
+
 func FindAction(actions []PostAction, id string) *PostAction {
 	for i := range actions {
 		if actions[i].ID == id {

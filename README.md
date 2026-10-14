@@ -29,6 +29,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
 - **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
+- **Search** — `goscribe search tokens person:alex -since 2026-09-01` finds meetings by their tags
 - **Searchable tags** — `-tags` writes a `<name>-tags.yml` (type, summary, topics, people, tickets, projects) next to the transcript, reusing existing tags, so `grep` finds every meeting on a subject
 - **Pluggable transcription** — transcribe locally and offline (faster-whisper) or with ElevenLabs Scribe (speaker labels), then post-process with OpenAI or Gemini
 - **18 built-in actions** — meeting summaries, action items, technical notes, retrospectives, and more
@@ -270,6 +271,20 @@ projects:
 ```
 
 goscribe normalizes what the model returns (kebab-case topics and projects, uppercase ticket IDs, a fixed list of meeting types, sorted and de-duplicated lists) rather than trusting its formatting. To keep tags consistent for `grep`, it first reads the topics and projects already used in `*-tags.yml` files under the tags root and its direct subfolders (a `records/<date>/` layout) and asks the model to reuse them. Transcripts under 30 words are not tagged. A tagging failure only prints a warning; the transcript and actions are kept.
+
+### Searching
+
+`goscribe search` finds meetings by their tags files, newest first:
+
+```bash
+goscribe search dark-mode                          # in any field
+goscribe search tokens person:alex type:1:1        # all terms must match
+goscribe search ticket:PROJ-123 -since 2026-09-01
+goscribe search -v onboarding                      # + topics, people, tickets, related files
+goscribe search -paths onboarding | xargs grep -il invoice
+```
+
+Terms are case-insensitive substrings, so `alex` finds both "Alex" and "Alexis". `field:value` limits a term to `topic`, `person`, `ticket`, `project`, `type` or `summary`. It searches `-root`, else `tags_root` from the config, else the current folder, recursively. Exit code: 0 with matches, 1 without (like grep), 2 on errors.
 
 ## Known Issues
 

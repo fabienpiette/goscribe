@@ -474,6 +474,10 @@ func writeTags(source, transcription, root string, process func(*config.PostActi
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "search" {
+		os.Exit(runSearch(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	if len(os.Args) > 1 {
 		normalized, err := normalizeArgs(os.Args[1:])
 		if err != nil {
@@ -511,7 +515,8 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "goscribe - AI-powered audio transcription with OpenAI, Gemini, ElevenLabs or local Whisper\n\n")
 		fmt.Fprintf(os.Stderr, "USAGE:\n")
-		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n\n")
+		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n")
+		fmt.Fprintf(os.Stderr, "  goscribe search [flags] [terms...]   find meetings by tags (goscribe search -h)\n\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nEXAMPLES:\n")
