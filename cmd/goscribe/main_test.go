@@ -448,3 +448,45 @@ post_actions:
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestRunUnknownActionFailsBeforeTranscription(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+
+	if err := config.CreateDefault(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+
+	apiCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		openAISuccessHandler("should not be called")(w, r)
+	}))
+	defer server.Close()
+	overrideOpenAIBaseURL(t, server.URL)
+
+	audioFile := filepath.Join(t.TempDir(), "meeting.mp3")
+	if err := os.WriteFile(audioFile, []byte("fake audio"), 0644); err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:     "test-key",
+		postAction: "openai-meeting-summary, nonexistent-action",
+		args:       []string{audioFile},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown action")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-action") {
+		t.Errorf("error = %q, want it to name the unknown action", err.Error())
+	}
+	if apiCalls != 0 {
+		t.Errorf("made %d API call(s), want 0: unknown actions must be rejected before transcription", apiCalls)
+	}
+	if _, statErr := os.Stat(strings.TrimSuffix(audioFile, ".mp3") + "-transcript.txt"); statErr == nil {
+		t.Error("transcript file was written; validation should happen before transcription")
+	}
+}
