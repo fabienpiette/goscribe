@@ -31,8 +31,14 @@ type Config struct {
 	Transcriber      string `yaml:"transcriber,omitempty"`
 	ElevenLabsAPIKey string `yaml:"elevenlabs_api_key,omitempty"`
 	ElevenLabsModel  string `yaml:"elevenlabs_model,omitempty"`
-	WhisperModel     string `yaml:"whisper_model,omitempty"`
-	Language         string `yaml:"language,omitempty"`
+	// Terms (names, products, jargon) ElevenLabs should favor. 20% surcharge when set.
+	ElevenLabsKeyterms []string `yaml:"elevenlabs_keyterms,omitempty"`
+	// Upper bound on speakers for diarization (0 = auto).
+	ElevenLabsNumSpeakers int `yaml:"elevenlabs_num_speakers,omitempty"`
+	// Keep filler words and false starts (default: removed).
+	ElevenLabsVerbatim bool   `yaml:"elevenlabs_verbatim,omitempty"`
+	WhisperModel       string `yaml:"whisper_model,omitempty"`
+	Language           string `yaml:"language,omitempty"`
 }
 
 // ValidProviders lists the engines that can run post-processing actions.
