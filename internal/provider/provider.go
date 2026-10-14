@@ -3,10 +3,47 @@ package provider
 import (
 	"fmt"
 
+	"goscribe/internal/elevenlabs"
 	"goscribe/internal/gemini"
+	"goscribe/internal/harness"
 	"goscribe/internal/openai"
+	"goscribe/internal/whisperlocal"
 	"goscribe/pkg/config"
 )
+
+// TranscribeOptions selects the engine that turns audio into text.
+// Transcriber is one of config.ValidTranscribers; empty means "same as Provider".
+type TranscribeOptions struct {
+	Transcriber     string
+	Provider        string
+	OpenAIKey       string
+	GeminiKey       string
+	GeminiModel     string
+	ElevenLabsKey   string
+	ElevenLabsModel string
+	WhisperModel    string
+	Language        string
+	Fallback        bool
+}
+
+// Transcribe dispatches to the selected engine. local and elevenlabs never fall
+// back to a cloud LLM provider: an explicit engine choice should fail loudly.
+func Transcribe(audioPath string, o TranscribeOptions) (string, error) {
+	switch o.Transcriber {
+	case "local":
+		return whisperlocal.Transcribe(audioPath, o.WhisperModel, o.Language)
+	case "elevenlabs":
+		return elevenlabs.Transcribe(audioPath, o.ElevenLabsKey, o.ElevenLabsModel, o.Language)
+	case "", "openai", "gemini":
+		prov := o.Transcriber
+		if prov == "" {
+			prov = o.Provider
+		}
+		return TranscribeAudio(audioPath, prov, o.OpenAIKey, o.GeminiKey, o.GeminiModel, o.Fallback)
+	default:
+		return "", fmt.Errorf("unknown transcriber '%s'", o.Transcriber)
+	}
+}
 
 func TranscribeAudio(audioPath, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
 	var primaryErr error
@@ -65,6 +102,11 @@ func TranscribeAudio(audioPath, provider, openaiKey, geminiKey, geminiModel stri
 }
 
 func ProcessChunked(transcript string, action *config.PostAction, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
+	// Local harnesses (claude, codex) use their own login and never fall back to an API.
+	if harness.IsHarness(provider) {
+		return harness.Process(transcript, action, provider)
+	}
+
 	var primaryErr error
 	var result string
 
@@ -122,6 +164,8 @@ func ProcessChunked(transcript string, action *config.PostAction, provider, open
 
 func SelectBestActions(transcript string, actions []config.PostAction, provider, openaiKey, geminiKey, geminiModel string) ([]string, error) {
 	switch provider {
+	case "claude", "codex":
+		return harness.SelectBestActions(transcript, actions, provider)
 	case "gemini":
 		if geminiKey == "" {
 			return nil, fmt.Errorf("Gemini API key required for auto-selection")

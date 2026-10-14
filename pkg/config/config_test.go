@@ -561,6 +561,8 @@ func TestSetDefaultProvider(t *testing.T) {
 	}{
 		{name: "Set to gemini", provider: "gemini", wantErr: false},
 		{name: "Set to openai", provider: "openai", wantErr: false},
+		{name: "Set to claude", provider: "claude", wantErr: false},
+		{name: "Set to codex", provider: "codex", wantErr: false},
 		{name: "Invalid provider", provider: "invalid", wantErr: true},
 	}
 
@@ -663,5 +665,41 @@ func TestDefaultPostActions(t *testing.T) {
 		if a.Prompt == "" {
 			t.Errorf("action %s has empty prompt", a.ID)
 		}
+	}
+}
+
+func TestValidateConfigTranscriber(t *testing.T) {
+	actions := []PostAction{{ID: "a", Name: "A", Type: "openai", Prompt: "p", Model: "gpt-4o", Temperature: 0.3, MaxTokens: 100}}
+
+	for _, name := range append([]string{""}, ValidTranscribers...) {
+		if err := ValidateConfig(&Config{Transcriber: name, PostActions: actions}); err != nil {
+			t.Errorf("transcriber %q: unexpected error %v", name, err)
+		}
+	}
+	if err := ValidateConfig(&Config{Transcriber: "whisperx", PostActions: actions}); err == nil {
+		t.Error("expected error for invalid transcriber")
+	}
+}
+
+func TestSetDefaultTranscriber(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := CreateDefault(); err != nil {
+		t.Fatalf("Failed to create default config: %v", err)
+	}
+
+	if err := SetDefaultTranscriber("invalid"); err == nil {
+		t.Error("expected error for invalid transcriber")
+	}
+	if err := SetDefaultTranscriber("local"); err != nil {
+		t.Fatalf("SetDefaultTranscriber(local): %v", err)
+	}
+
+	cfg, err := LoadConfig(filepath.Join(tmpHome, ".goscribe", "config.yml"))
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfg.Transcriber != "local" {
+		t.Errorf("Stored transcriber = %q, want local", cfg.Transcriber)
 	}
 }

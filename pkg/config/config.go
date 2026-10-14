@@ -26,6 +26,38 @@ type Config struct {
 	GeminiAPIKey string       `yaml:"gemini_api_key"`
 	GeminiModel  string       `yaml:"gemini_model"`
 	PostActions  []PostAction `yaml:"post_actions"`
+
+	// Transcription engine settings. Empty transcriber means "same as provider".
+	Transcriber      string `yaml:"transcriber,omitempty"`
+	ElevenLabsAPIKey string `yaml:"elevenlabs_api_key,omitempty"`
+	ElevenLabsModel  string `yaml:"elevenlabs_model,omitempty"`
+	WhisperModel     string `yaml:"whisper_model,omitempty"`
+	Language         string `yaml:"language,omitempty"`
+}
+
+// ValidProviders lists the engines that can run post-processing actions.
+// claude and codex run through the local Claude Code / Codex CLIs.
+var ValidProviders = []string{"openai", "gemini", "claude", "codex"}
+
+func IsValidProvider(name string) bool {
+	for _, p := range ValidProviders {
+		if p == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidTranscribers lists the engines that can turn audio into text.
+var ValidTranscribers = []string{"local", "elevenlabs", "openai", "gemini"}
+
+func IsValidTranscriber(name string) bool {
+	for _, t := range ValidTranscribers {
+		if t == name {
+			return true
+		}
+	}
+	return false
 }
 
 func LoadConfig(configPath string) (*Config, error) {
@@ -50,8 +82,12 @@ func LoadConfig(configPath string) (*Config, error) {
 }
 
 func ValidateConfig(config *Config) error {
-	if config.Provider != "" && config.Provider != "openai" && config.Provider != "gemini" {
-		return fmt.Errorf("invalid provider '%s' (valid: openai, gemini)", config.Provider)
+	if config.Provider != "" && !IsValidProvider(config.Provider) {
+		return fmt.Errorf("invalid provider '%s' (valid: %s)", config.Provider, strings.Join(ValidProviders, ", "))
+	}
+
+	if config.Transcriber != "" && !IsValidTranscriber(config.Transcriber) {
+		return fmt.Errorf("invalid transcriber '%s' (valid: %s)", config.Transcriber, strings.Join(ValidTranscribers, ", "))
 	}
 
 	if len(config.PostActions) == 0 {
@@ -225,14 +261,26 @@ func StoreGeminiAPIKey(apiKey string) error {
 }
 
 func SetDefaultProvider(providerName string) error {
-	if providerName != "openai" && providerName != "gemini" {
-		return fmt.Errorf("invalid provider '%s' (valid: openai, gemini)", providerName)
+	if !IsValidProvider(providerName) {
+		return fmt.Errorf("invalid provider '%s' (valid: %s)", providerName, strings.Join(ValidProviders, ", "))
 	}
 
 	return updateConfigField(func(config *Config) {
 		config.Provider = providerName
 	}, func(configFile string) {
 		fmt.Printf("✓ Default provider set to '%s' in: %s\n", providerName, configFile)
+	})
+}
+
+func SetDefaultTranscriber(name string) error {
+	if !IsValidTranscriber(name) {
+		return fmt.Errorf("invalid transcriber '%s' (valid: %s)", name, strings.Join(ValidTranscribers, ", "))
+	}
+
+	return updateConfigField(func(config *Config) {
+		config.Transcriber = name
+	}, func(configFile string) {
+		fmt.Printf("✓ Default transcriber set to '%s' in: %s\n", name, configFile)
 	})
 }
 
