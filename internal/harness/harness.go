@@ -23,6 +23,15 @@ var (
 	CodexBinary  = "codex"
 )
 
+// codexDisabledFeatures turns off every Codex capability that lets the model act
+// (shell, browser, computer use, apps, plugins, hooks). The transcript is untrusted
+// input: without this, a spoken prompt injection could make Codex read local files
+// (a read-only sandbox still allows reads) and leak them into the action output.
+var codexDisabledFeatures = []string{
+	"shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external",
+	"computer_use", "in_app_browser", "plugins", "remote_plugin", "hooks", "tool_suggest",
+}
+
 // Timeout bounds a single harness call.
 var Timeout = 20 * time.Minute
 
@@ -65,14 +74,20 @@ func Run(name, prompt string) (string, error) {
 			return "", fmt.Errorf("%s not found on PATH (install Codex CLI)", CodexBinary)
 		}
 		outFile = filepath.Join(workDir, "answer.txt")
-		cmd = exec.CommandContext(ctx, bin, "exec",
+		// No tools, no user config (MCP servers, profiles), no web search, no saved session.
+		args := []string{"exec",
 			"--skip-git-repo-check",
 			"--sandbox", "read-only",
 			"--ephemeral",
+			"--ignore-user-config",
+			"-c", `web_search="disabled"`,
 			"--color", "never",
 			"--output-last-message", outFile,
-			"-",
-		)
+		}
+		for _, f := range codexDisabledFeatures {
+			args = append(args, "--disable", f)
+		}
+		cmd = exec.CommandContext(ctx, bin, append(args, "-")...)
 	default:
 		return "", fmt.Errorf("unknown harness '%s' (valid: claude, codex)", name)
 	}

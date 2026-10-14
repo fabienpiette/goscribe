@@ -81,7 +81,8 @@ func TestProcessCodexReadsLastMessage(t *testing.T) {
 		t.Errorf("answer = %q, want the last message, not stdout", got)
 	}
 	args := read(t, filepath.Join(dir, "codex.args"))
-	for _, want := range []string{"exec", "--sandbox read-only", "--ephemeral", "--skip-git-repo-check"} {
+	for _, want := range []string{"exec", "--sandbox read-only", "--ephemeral", "--skip-git-repo-check",
+		"--ignore-user-config", "--disable shell_tool", "--disable unified_exec", "--disable computer_use"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("codex args %q missing %q", args, want)
 		}
