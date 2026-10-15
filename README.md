@@ -44,8 +44,8 @@ goscribe -action openai-meeting-summary meeting.mp3
 
 **Prerequisites:** Go 1.24+. Depending on the features you use:
 
-- **ffmpeg** — for `goscribe record`, and to split files over the provider size limits
-- **pactl** (PipeWire or PulseAudio) — for `goscribe record`
+- **ffmpeg** — for `goscribe record` and `goscribe assist`, and to split files over the provider size limits
+- **pactl** (PipeWire or PulseAudio) — for `goscribe record` and `goscribe assist`
 - **whisper-ctranslate2** — for `-transcriber local` (`uv tool install whisper-ctranslate2`)
 - **claude** or **codex** CLI, logged in — for `-provider claude` / `-provider codex`
 
