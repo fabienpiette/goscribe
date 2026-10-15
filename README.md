@@ -1,6 +1,6 @@
 # goscribe
 
-AI-powered audio transcription with post-processing — supports OpenAI Whisper/GPT and Google Gemini with automatic fallback.
+AI-powered audio recording, transcription and post-processing — transcribe with OpenAI Whisper, Gemini, ElevenLabs Scribe or local faster-whisper, then summarize with OpenAI, Gemini, or your Claude Code / Codex login.
 
 ---
 
@@ -129,7 +129,7 @@ Output files are written alongside the input:
 | `-transcript` | Process existing transcript file(s) |
 | `-tags` | Write `<name>-tags.yml` next to the transcript (works with `-transcript` alone) |
 | `-tags-root` | Folder whose tag files seed the shared vocabulary (default: `tags_root` in config, else the transcript folder's parent) |
-| `-o` | Output file name |
+| `-o` | Transcript file name (default: `<audio name>-transcript.txt` next to the audio) |
 | `-config` | Custom config file path |
 | `-list-actions` | Show all available actions |
 | `-set-key` | Save OpenAI key to config |
