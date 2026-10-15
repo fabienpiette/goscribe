@@ -164,13 +164,7 @@ func run(opts runOptions) error {
 		}
 	}
 
-	elevenLabsKey := opts.elevenLabsKey
-	if elevenLabsKey == "" {
-		elevenLabsKey = cfg.ElevenLabsAPIKey
-	}
-	if elevenLabsKey == "" {
-		elevenLabsKey = os.Getenv("ELEVENLABS_API_KEY")
-	}
+	elevenLabsKey := pick(opts.elevenLabsKey, cfg.ElevenLabsAPIKey, os.Getenv("ELEVENLABS_API_KEY"))
 
 	keyterms := cfg.ElevenLabsKeyterms
 	if opts.keyterms != "" {
@@ -480,6 +474,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "record" {
 		os.Exit(runRecord(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "assist" {
+		os.Exit(runAssist(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	if len(os.Args) > 1 {
 		normalized, err := normalizeArgs(os.Args[1:])
@@ -520,7 +517,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "USAGE:\n")
 		fmt.Fprintf(os.Stderr, "  goscribe [options] <audio_file>\n")
 		fmt.Fprintf(os.Stderr, "  goscribe search [flags] [terms...]   find meetings by tags (goscribe search -h)\n")
-		fmt.Fprintf(os.Stderr, "  goscribe record [flags]               record mic and/or computer sound to mp3 (goscribe record -h)\n\n")
+		fmt.Fprintf(os.Stderr, "  goscribe record [flags]               record mic and/or computer sound to mp3 (goscribe record -h)\n")
+		fmt.Fprintf(os.Stderr, "  goscribe assist [flags]               live meeting copilot only you can see (goscribe assist -h)\n\n")
 		fmt.Fprintf(os.Stderr, "OPTIONS:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nEXAMPLES:\n")
