@@ -183,7 +183,7 @@ func TestRunWaitsForEnoughWords(t *testing.T) {
 func TestRunBacksOffAfterFailure(t *testing.T) {
 	fastTimers(t)
 	f := &fakeThink{replies: []func() (string, error){
-		func() (string, error) { return "", errors.New("exit status 1\nstderr: boom") },
+		func() (string, error) { return "", errors.New("exit status 1\nstderr: boom\x1b[2J") },
 		answer("not json"),
 		answer(`{"summary":"ok"}`),
 	}}
@@ -208,7 +208,10 @@ func TestRunBacksOffAfterFailure(t *testing.T) {
 	close(events)
 	<-done
 	feed := out.String()
-	if !strings.Contains(feed, "⚠ fake failed: exit status 1 stderr: boom; next try in") || !strings.Contains(feed, "no JSON object") {
+	if strings.Contains(feed, "\x1b") {
+		t.Errorf("error text from the model call reached the terminal with control characters:\n%q", feed)
+	}
+	if !strings.Contains(feed, "⚠ fake failed: exit status 1 stderr: boom[2J; next try in") || !strings.Contains(feed, "no JSON object") {
 		t.Errorf("failures must be reported on one line each:\n%s", feed)
 	}
 }

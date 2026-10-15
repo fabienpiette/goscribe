@@ -332,6 +332,8 @@ func lastRunes(s string, n int) string {
 	return "…" + string(r[len(r)-n+1:])
 }
 
+// oneLine fits an error message on one line for the feed. Errors can carry
+// an API response or a CLI's stderr, so they are cleaned like transcript text.
 func oneLine(s string, n int) string {
-	return truncate(strings.Join(strings.Fields(s), " "), n)
+	return truncate(strings.Join(strings.Fields(Clean(s)), " "), n)
 }
