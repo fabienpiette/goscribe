@@ -1,6 +1,6 @@
 # goscribe — core
 
-Audio transcription + AI post-processing. Two independent choices: **transcriber** (audio→text: openai, gemini, elevenlabs, local faster-whisper) and **provider** (actions + `--auto`: openai, gemini, or harness claude/codex = local agent CLI). CLI subcommands `record` and `search`. Server mode (HTTP + Redis queue) uses only openai/gemini transcription.
+Audio transcription + AI post-processing. Two independent choices: **transcriber** (audio→text: openai, gemini, elevenlabs, local faster-whisper) and **provider** (actions + `--auto`: openai, gemini, or harness claude/codex = local agent CLI). CLI subcommands `record`, `search` and `assist` (live copilot). Server mode (HTTP + Redis queue) uses only openai/gemini transcription.
 Authoritative design doc: `docs/ARCHITECTURE.md` (code map, numbered invariants, "adding a provider" recipe). Read it before structural changes; keep it in sync when package boundaries change.
 
 ## Source map
@@ -11,14 +11,17 @@ Authoritative design doc: `docs/ARCHITECTURE.md` (code map, numbered invariants,
 - `internal/provider/` — routing + fallback: `Transcribe()` (by transcriber), `TranscribeAudio/ProcessChunked/SelectBestActions` (by provider; claude/codex → harness). Only package importing both openai and gemini. No tests.
 - Engines: `internal/openai`, `internal/gemini` (mirrored; HTTP via `makeRequest()` with retry), `internal/elevenlabs` (single request, no retry), `internal/whisperlocal` (exec `whisper-ctranslate2`), `internal/harness` (exec `claude`/`codex`, no tools, empty temp dir — transcript is untrusted input).
 - `internal/tags/` — `-tags` YAML files + `search`; standalone (no project imports).
-- `internal/recorder/` — ffmpeg + `pactl` recording; standalone. Per-OS `proc_*.go`: own process group, Linux `Pdeathsig` (needs `LockOSThread`).
+- `cmd/goscribe/assist.go` — `goscribe assist`: per side `recorder.Stream` → `realtime.Stream` (one ElevenLabs session per side = speaker attribution, no diarization in realtime) → `assistant.Run`; thinking via `provider.ProcessChunked` with a synthetic PostAction.
+- `internal/realtime/` — ElevenLabs realtime WebSocket client (`github.com/coder/websocket`), reconnects itself; keeps the last partial as a line when a session ends uncommitted (the API answers a final commit with "" while processing, and sends empty commits in silence). Standalone.
+- `internal/assistant/` — memory + JSON contract + update loop + notes; model call injected (`Config.Think`); standalone. Final prompt shares a size budget with the context so `ProcessChunked` never chunks (chunking breaks JSON). Reply parsing is lenient (models return odd shapes).
+- `internal/recorder/` — ffmpeg + `pactl` recording (+ `Stream()` live PCM for assist); standalone. Per-OS `proc_*.go`: own process group, Linux `Pdeathsig` (needs `LockOSThread`).
 - `internal/util/` — stdlib-only helpers; ffmpeg audio splitting.
 - `pkg/config/` — only `pkg/`; zero `internal/` imports. 18 built-in actions as embedded YAML in `defaults.go`. `ReadTagsRoot`/`ReadRecordDefaults` read quietly (keep stdout clean).
 
 ## Invariants (convention, not tooling)
 - `internal/api` never imports provider or engines; AI work only in worker.
 - `local`, `elevenlabs` and harnesses never fall back to another engine.
-- Package-level vars are only test overrides (`BaseURL`, `Binary`, `ClaudeBinary`/`CodexBinary`, `recorder.StopTimeout`/`Tick`/`Runner`), the fixed `recorder.MuteKeys` map, and `worker.webhookClient`. Keep the list in ARCHITECTURE invariant 2 in sync.
+- Package-level vars are only test overrides (`BaseURL`, `Binary`, `ClaudeBinary`/`CodexBinary`, `recorder.StopTimeout`/`Tick`/`Runner`, `realtime.FlushTimeout`/`InitialBackoff`/`MaxBackoff`, `assistant.Tick`/`MaxBackoff`/`MinWatchdog`), the fixed `recorder.MuteKeys` map, and `worker.webhookClient`. Keep the list in ARCHITECTURE invariant 2 in sync.
 - OpenAI key `""` or `"XXXX"` (legacy placeholder, still passed by `record -transcribe`) means "not set".
 - `-action` IDs are validated before transcription (no paid calls on typos); `--auto` picks are checked per action later.
 

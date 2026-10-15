@@ -18,10 +18,12 @@ exposes two distinct operation modes from the same shared engine.
 
 **CLI mode** (`cmd/goscribe`) is a synchronous, single-binary tool: feed it an
 audio file, get back a transcript and any post-processed results. Everything
-runs in one process, one call stack. The CLI also has two subcommands:
+runs in one process, one call stack. The CLI also has three subcommands:
 `goscribe record` (capture mic and/or computer sound to mp3, optionally
-transcribing afterwards) and `goscribe search` (find meetings by the
-`*-tags.yml` files that `-tags` writes).
+transcribing afterwards), `goscribe search` (find meetings by the
+`*-tags.yml` files that `-tags` writes) and `goscribe assist` (a live meeting
+copilot: realtime transcription of each side, and a model that keeps a memory
+of the meeting and suggests what the user could say, in the terminal only).
 
 **Server mode** (`cmd/server`) is an HTTP API backed by a Redis job queue. A
 client submits a job via `POST /jobs`, receives a job ID immediately, and polls
@@ -38,6 +40,8 @@ in one process (`MODE=all`) or as separate containers (`MODE=api` +
    │  │  │                   │          │
    │  │  └► internal/tags    │     cmd/server (MODE=api)
    │  └───► internal/recorder│          │
+   │        internal/realtime│          │
+   │        internal/assistant          │
    ▼                         │     internal/api ──► asynq ──► Redis
  pkg/config                  │                                   │
                              │     cmd/server (MODE=worker)      │
@@ -53,7 +57,8 @@ in one process (`MODE=all`) or as separate containers (`MODE=api` +
 ```
 
 Both modes share `pkg/config`, `internal/provider` and the engines behind it.
-`internal/tags` and `internal/recorder` are CLI-only. Neither mode is aware of
+`internal/tags`, `internal/recorder`, `internal/realtime` and
+`internal/assistant` are CLI-only. Neither mode is aware of
 the other's entry point. Server mode only uses the OpenAI and Gemini
 transcribers: `-transcriber` is CLI only.
 
@@ -71,7 +76,10 @@ Ctrl+C/SIGTERM/SIGHUP into a clean stop and a second one into a forced stop),
 `search.go` (`goscribe search`; accepts flags after the search terms),
 `keys.go` / `keys_linux.go` / `keys_other.go` (mute keys: the terminal reads
 single key presses without echo but keeps Ctrl+C; the reader polls so it stops
-and the terminal is restored before `-transcribe`).
+and the terminal is restored before `-transcribe`), `assist.go`
+(`goscribe assist`: resolves keys, context and devices, then wires each side as
+`recorder.Stream` → `realtime.Stream` → `assistant.Run`; the model call is
+`provider.ProcessChunked` with a synthetic `PostAction`, like `-tags`).
 
 Unknown action IDs given with `-action` are rejected before transcription, so a
 typo costs no API calls.
@@ -241,12 +249,63 @@ ffmpeg if goscribe dies, so the mic is never left recording. `Record()` keeps
 its goroutine locked to one OS thread because `Pdeathsig` is tied to the
 thread that started the child.
 
-Key files: `record.go` (`Record()`), `devices.go` (`ListSources()`,
-`Resolve()`), `ffmpeg.go` (`Args()`), `silence.go` (`ReadEvents()`),
-`proc_linux.go` / `proc_unix.go` / `proc_other.go` (per-OS process isolation).
+`Stream()` is the live variant for `goscribe assist`: one ffmpeg per device
+writing 16 kHz mono s16le to stdout, sent as 200 ms chunks. It never blocks on
+its consumer (it drops the oldest chunk when the channel is full), and on
+cancel it kills ffmpeg at once, since raw PCM has nothing to finalize.
+
+Key files: `record.go` (`Record()`), `stream.go` (`Stream()`, `StreamArgs()`),
+`devices.go` (`ListSources()`, `Resolve()`), `ffmpeg.go` (`Args()`),
+`silence.go` (`ReadEvents()`), `proc_linux.go` / `proc_unix.go` /
+`proc_other.go` (per-OS process isolation).
 
 **Architecture Invariant:** `internal/recorder` imports no other project
 package.
+
+### `internal/realtime/`
+
+ElevenLabs realtime speech-to-text client (`scribe_v2_realtime`) over a
+WebSocket (`github.com/coder/websocket`). `Stream()` keeps one transcription
+going for as long as audio flows: it redials at once after
+`session_time_limit_exceeded`, with backoff (1–30 s) after network errors,
+and only when sound returns after `insufficient_audio_activity`; audio waits in
+the caller's channel meanwhile. Auth, quota and input errors are fatal
+(`*FatalError`). When the audio ends, it commits and waits up to
+`FlushTimeout` for the last text. The API can answer that commit with an empty
+transcript while still processing, and sends empty commits during silence, so
+the last partial text is kept as a line whenever a session ends before
+committing it. The realtime API has no diarization: the caller runs one session
+per side instead.
+
+Key files: `realtime.go` (`Stream()`, `URL()`, `Options`, `Event`).
+
+**Architecture Invariant:** `internal/realtime` imports no other project
+package.
+
+### `internal/assistant/`
+
+The live assistant's brain. `Run()` owns the transcript, the memory and the
+terminal: one goroutine, at most one model call in flight. An update starts
+when the previous one is done, `Interval` has passed (doubled after each
+failure, up to 5 min) and there are at least 12 new words (or the oldest new
+line is 2×Interval old). A watchdog abandons a call that hangs. The model
+returns JSON (summary, complete decisions and open-question lists, 0–3
+suggestions); `Memory.Apply` caps everything and drops repeated suggestions
+(word-set similarity ≥ 0.8), so prompts stay bounded over a long meeting. The
+prompt puts the trusted context and memory in the instructions and the
+untrusted transcript inside `<transcript>` delimiters; all speech-to-text and
+model text goes through `Clean()` before reaching the terminal. On stop, a
+final call writes the summary and action items; context and transcript share
+one size budget so the call is never split into chunks. The notes file is
+replaced atomically after every update.
+
+Key files: `run.go` (`Run()`, `Config`, `Event`), `memory.go` (`Parse()`,
+`Memory.Apply()`), `prompt.go` (`CyclePrompt()`, `FinalPrompt()`),
+`context.go` (`LoadContext()`), `notes.go` (`Render()`, `WriteNotes()`,
+`Clean()`).
+
+**Architecture Invariant:** `internal/assistant` imports no other project
+package: the model call is injected as `Config.Think`.
 
 ### `internal/util/`
 
@@ -271,22 +330,28 @@ this project. It depends only on the standard library.
    `internal/gemini`, `internal/elevenlabs`, `internal/whisperlocal`,
    `internal/harness`, and `pkg/config`. The openai, gemini and harness
    packages import `internal/util` and `pkg/config`; elevenlabs imports only
-   `internal/util`. No cycles exist.
+   `internal/util`. `internal/realtime`, `internal/assistant`,
+   `internal/tags`, `internal/recorder` and `internal/util` import no project
+   package. No cycles exist.
 
 2. **No global mutable state.** `LoadConfig()` returns a value without side
    effects; `FindAction()` takes the actions slice as a parameter. The only
    package-level vars are test overrides (`openai.BaseURL`, `gemini.BaseURL`,
    `elevenlabs.BaseURL`, `whisperlocal.Binary`, `harness.ClaudeBinary`,
    `harness.CodexBinary`, `recorder.Binary`, `recorder.StopTimeout`,
-   `recorder.Tick`, `recorder.Runner`), `recorder.MuteKeys` (the fixed
+   `recorder.Tick`, `recorder.Runner`, `realtime.BaseURL`,
+   `realtime.FlushTimeout`, `realtime.InitialBackoff`, `realtime.MaxBackoff`,
+   `assistant.Tick`, `assistant.MaxBackoff`, `assistant.MinWatchdog`),
+   `recorder.MuteKeys` (the fixed
    key-to-side map for mute keys, never modified) and `worker.webhookClient`
    (shared HTTP client with a timeout and custom dialer).
 
 3. **All OpenAI and Gemini calls go through `makeRequest()`.** No direct
    `http.Client.Do()` calls exist in those packages outside their
    `makeRequest` function. This guarantees retry and rate-limit handling for
-   that traffic. ElevenLabs makes a single request without retry; the
-   harnesses and whisperlocal run local CLIs, not HTTP.
+   that traffic. ElevenLabs batch makes a single request without retry;
+   `internal/realtime` is a long-lived WebSocket with its own reconnect logic;
+   the harnesses and whisperlocal run local CLIs, not HTTP.
 
 4. **Job results are the source of truth for server mode.** The `JobResult`
    written to Redis is the only persistent record of a job's state. Neither
@@ -299,9 +364,9 @@ this project. It depends only on the standard library.
    time (not before), and connects to the validated IP directly — preventing
    both DNS rebinding attacks and IPv4-mapped IPv6 bypasses.
 
-6. **Audio splitting and recording require ffmpeg.** The tool shells out to
-   `ffmpeg` via `exec.Command`. If ffmpeg is not installed, large-file
-   transcription and `goscribe record` fail. Small files (<25 MB for OpenAI,
+6. **Audio splitting, recording and assist require ffmpeg.** The tool shells
+   out to `ffmpeg` via `exec.Command`. If ffmpeg is not installed, large-file
+   transcription, `goscribe record` and `goscribe assist` fail. Small files (<25 MB for OpenAI,
    <20 MB for Gemini) bypass splitting entirely. Recording also needs `pactl`.
    The Docker image installs ffmpeg in the runtime layer.
 
@@ -363,8 +428,10 @@ that tests point at a fake script.
 | `internal/whisperlocal` | `whisperlocal_test.go` | CLI invocation and output parsing |
 | `internal/harness` | `harness_test.go` | CLI invocation and isolation flags |
 | `internal/tags` | `tags_test.go`, `search_test.go` | Normalization, vocabulary, YAML output, query parsing, search |
-| `internal/recorder` | `devices_test.go`, `ffmpeg_test.go`, `silence_test.go`, `record_test.go`, `record_linux_test.go` | Device resolution, ffmpeg args, silence events, mute commands, stop/kill behaviour |
-| `cmd/goscribe` | `main_test.go`, `search_test.go`, `record_test.go`, `record_signals_test.go`, `keys_linux_test.go` | `run()` integration, flag parsing, normalizeArgs, subcommands, signal handling, mute keys on a pseudo-terminal |
+| `internal/recorder` | `devices_test.go`, `ffmpeg_test.go`, `silence_test.go`, `record_test.go`, `record_linux_test.go`, `stream_test.go` | Device resolution, ffmpeg args, silence events, mute commands, stop/kill behaviour, live PCM chunks and drop-oldest |
+| `internal/realtime` | `realtime_test.go` | Against a local WebSocket server: query and auth, chunk JSON, partial/committed events, reconnects (session limit, inactivity), fatal errors, flush keeping the last words |
+| `internal/assistant` | `logic_test.go`, `run_test.go` | Context loading, JSON parsing, memory caps and dedupe, prompts and size budgets, notes rendering, `Clean()`; the update loop with a fake model (one call in flight, backoff, watchdog, final notes, Force) |
+| `cmd/goscribe` | `main_test.go`, `search_test.go`, `record_test.go`, `record_signals_test.go`, `keys_linux_test.go`, `assist_test.go` | `run()` integration, flag parsing, normalizeArgs, subcommands, signal handling, mute keys on a pseudo-terminal, `assist` usage errors and an end-to-end run (fake ffmpeg, WebSocket server and claude) |
 | `internal/api` | `handler_test.go` | HTTP handler behaviour with mock enqueuer/Redis |
 | `internal/worker` | `processor_test.go`, `tasks_test.go` | Job processing with mock transcriber |
 
