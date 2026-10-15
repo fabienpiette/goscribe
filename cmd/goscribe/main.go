@@ -123,7 +123,7 @@ func run(opts runOptions) error {
 	postActions := cfg.PostActions
 
 	apiKey := opts.apiKey
-	if apiKey == "XXXX" && cfg.OpenAIAPIKey != "" {
+	if (apiKey == "" || apiKey == "XXXX") && cfg.OpenAIAPIKey != "" {
 		apiKey = cfg.OpenAIAPIKey
 		fmt.Println("Using API key from config file")
 	}
@@ -490,7 +490,7 @@ func main() {
 		os.Args = append([]string{os.Args[0]}, normalized...)
 	}
 
-	apiKey := flag.String("k", "XXXX", "OpenAI API key")
+	apiKey := flag.String("k", "", "OpenAI API key (default: from config)")
 	geminiKey := flag.String("gemini-key", "", "Gemini API key")
 	providerFlag := flag.String("provider", "", "AI provider for actions: openai, gemini, claude or codex (default: from config or openai)")
 	transcriberFlag := flag.String("transcriber", "", "Transcription engine: local, elevenlabs, openai or gemini (default: from config, else same as -provider, or local with claude/codex)")
@@ -500,13 +500,13 @@ func main() {
 	whisperModel := flag.String("whisper-model", "", "Whisper model for -transcriber local (default: from config or small)")
 	language := flag.String("language", "", "Audio language code, e.g. en or fr, for local and elevenlabs (default: auto-detect)")
 	noFallback := flag.Bool("no-fallback", false, "Disable automatic fallback to alternate provider on failure")
-	output := flag.String("o", "", "Output file name (default: same as audio file with .txt extension)")
+	output := flag.String("o", "", "Transcript file name (default: <audio name>-transcript.txt next to the audio)")
 	listActions := flag.Bool("list-actions", false, "List available post-processing actions")
 	postAction := flag.String("action", "", "Post-processing action ID(s), comma-separated (use -list-actions to see options)")
 	tagsFlag := flag.Bool("tags", false, "Write <name>-tags.yml (type, summary, topics, people, tickets, projects) next to the transcript, for grep")
 	tagsRoot := flag.String("tags-root", "", "Folder whose existing tag files seed the tag vocabulary (default: config tags_root, else the transcript folder's parent)")
 	autoSelect := flag.Bool("auto", false, "Automatically select best post-processing actions based on transcript content")
-	configFile := flag.String("config", "", "Path to YAML config file with custom post-actions (default: ~/.goscribe/config.yml)")
+	configFile := flag.String("config", "", "Config file: keys, defaults and post-processing actions (default: ~/.goscribe/config.yml)")
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
 	setGeminiKey := flag.String("set-gemini-key", "", "Store Gemini API key in config file")

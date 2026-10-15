@@ -796,3 +796,41 @@ func TestRunTagsSkipsTooShortTranscript(t *testing.T) {
 		t.Error("tags file written for a too-short transcript")
 	}
 }
+
+func TestRunEmptyKeyFlagUsesConfigKey(t *testing.T) {
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", t.TempDir())
+
+	if err := config.CreateDefault(); err != nil {
+		t.Fatalf("failed to create config: %v", err)
+	}
+	if err := config.StoreAPIKey("key-from-config"); err != nil {
+		t.Fatalf("failed to store key: %v", err)
+	}
+
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		openAISuccessHandler("processed output")(w, r)
+	}))
+	defer ts.Close()
+	overrideOpenAIBaseURL(t, ts.URL)
+
+	transcriptFile := filepath.Join(t.TempDir(), "t.txt")
+	if err := os.WriteFile(transcriptFile, []byte("This is a test transcript."), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	err := run(runOptions{
+		apiKey:          "", // -k not given
+		postAction:      "openai-meeting-summary",
+		transcriptFiles: []string{transcriptFile},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "Bearer key-from-config" {
+		t.Errorf("Authorization = %q, want the key from the config file", gotAuth)
+	}
+}
