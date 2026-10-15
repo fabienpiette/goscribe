@@ -30,6 +30,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
 - **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
 - **Search** — `goscribe search tokens person:adri -since 2026-09-01` finds meetings by their tags
+- **Live assistant** — `goscribe assist` follows a meeting live (ElevenLabs realtime) and, in your terminal only, suggests questions, answers from your notes, missed points and risks, while keeping a running summary
 - **Recording** — `goscribe record` captures the mic and/or computer sound to mp3 (Ctrl+C to stop), lets you mute either side mid-recording, warns about silent sources, and can transcribe right after
 - **Searchable tags** — `-tags` writes a `<name>-tags.yml` (type, summary, topics, people, tickets, projects) next to the transcript, reusing existing tags, so `grep` finds every meeting on a subject
 - **Pluggable transcription** — transcribe locally and offline (faster-whisper) or with ElevenLabs Scribe (speaker labels), then post-process with OpenAI or Gemini
@@ -320,8 +321,35 @@ goscribe record -list-sources                     # pick devices for -mic / -sys
 - Config defaults: `record_source`, `record_mic`, `record_system`, `record_quality`.
 - Use headphones: with speakers, the mic also picks up the computer sound, so the other people are recorded twice.
 
+### Live assistant
+
+`goscribe assist` is a meeting copilot that only you can see. It listens to your mic (`me`) and the computer sound (`others`) with [ElevenLabs realtime speech-to-text](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime), one live session per side, so it always knows who said what. Every update, the `-provider` model refreshes its memory of the meeting and suggests what you could say:
+
+```bash
+goscribe assist -context ~/notes/standup/                    # background notes: a .md file or a folder
+goscribe assist -context agenda.md -provider claude -o standup-assist.md
+goscribe assist -source system -language fr                   # only the others, in French
+```
+
+```
+  00:12:09 others what about the migration rollback?
+❓ 00:12:15 Ask: Who owns the rollback if the migration fails? — agenda.md requires a named owner
+⚠️ 00:12:15 Risk: Monday falls inside the database freeze (20th–25th). — agenda.md
+✅ 00:13:40 Decision: Ship behind a feature flag
+● ASSIST 00:13:52  others ▸ "so the next step would be…"  · thinking 4s (claude)
+```
+
+- Suggestions are `❓ Ask`, `💬 Answer` (from your context), `📌 Missed` and `⚠️ Risk`, at most 3 per update, never repeated. Nothing is said or posted in the meeting.
+- The notes file (`assist-<date>_<time>.md` by default) is rewritten after every update: summary so far, decisions, open questions and every suggestion. Ctrl+C writes the final summary and action items into it; a second Ctrl+C quits at once.
+- Updates run at most every 20 s with `openai`/`gemini`, 30 s with `claude`/`codex` (`-interval` to change). One update at a time; a failed one is retried later with what it missed.
+- It captures the audio itself, so run it in a second terminal next to `goscribe record`, or alone. Same device flags and `record_*` config defaults as `record` (`-source`, `-mic`, `-system`, `-list-sources`).
+- Needs an ElevenLabs API key (`elevenlabs_api_key` or `$ELEVENLABS_API_KEY`). Live transcription is billed per stream, so two with `-source both`. The context is resent with every update: keep it small (a warning shows above 50 KB, 200 KB is the limit).
+- The transcript is treated as untrusted data: the model is told never to follow instructions spoken in the meeting, and `claude`/`codex` run with no tools.
+- Use headphones: with speakers, the mic also hears the others and their words are labelled `me`.
+
 ## Known Issues
 
+- **`goscribe assist` reacts with a delay** — about 2 s for the transcript, then up to the update interval plus the model's answer time (30–70 s with `claude`/`codex`), so it is better at "missed" and "risk" than at answering live.
 - **`-transcriber` is CLI only** — server mode still transcribes with the request's provider (OpenAI or Gemini).
 - **ffmpeg required for large files** — files over 25 MB (OpenAI) or 20 MB (Gemini) are split using `ffmpeg`. Install it with `brew install ffmpeg` or `apt install ffmpeg`.
 - **`--auto` and `actions=auto` call the AI API** for action selection, which incurs additional API costs.
@@ -346,7 +374,9 @@ internal/elevenlabs/ ElevenLabs Scribe speech-to-text client
 internal/whisperlocal/ Local faster-whisper transcription (whisper-ctranslate2)
 internal/harness/   Claude Code / Codex CLI runner for actions
 internal/tags/      Tags files (-tags) and goscribe search
-internal/recorder/  ffmpeg recording for goscribe record
+internal/recorder/  ffmpeg recording for goscribe record, live PCM capture for assist
+internal/realtime/  ElevenLabs realtime speech-to-text client (WebSocket)
+internal/assistant/ Live assistant: memory, prompts, update loop, notes
 internal/util/      Shared helpers (model limits, audio splitting, etc.)
 ```
 
