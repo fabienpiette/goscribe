@@ -342,9 +342,10 @@ this project. It depends only on the standard library.
    `recorder.Tick`, `recorder.Runner`, `realtime.BaseURL`,
    `realtime.FlushTimeout`, `realtime.InitialBackoff`, `realtime.MaxBackoff`,
    `assistant.Tick`, `assistant.MaxBackoff`, `assistant.MinWatchdog`),
-   `recorder.MuteKeys` (the fixed
-   key-to-side map for mute keys, never modified) and `worker.webhookClient`
-   (shared HTTP client with a timeout and custom dialer).
+   `recorder.MuteKeys` (the fixed key-to-side map for mute keys, never
+   modified), `assistant.suggestionLabels` (the fixed suggestion-type to
+   icon and label map, never modified) and `worker.webhookClient` (shared
+   HTTP client with a timeout and custom dialer).
 
 3. **All OpenAI and Gemini calls go through `makeRequest()`.** No direct
    `http.Client.Do()` calls exist in those packages outside their
@@ -366,8 +367,9 @@ this project. It depends only on the standard library.
 
 6. **Audio splitting, recording and assist require ffmpeg.** The tool shells
    out to `ffmpeg` via `exec.Command`. If ffmpeg is not installed, large-file
-   transcription, `goscribe record` and `goscribe assist` fail. Small files (<25 MB for OpenAI,
-   <20 MB for Gemini) bypass splitting entirely. Recording also needs `pactl`.
+   transcription, `goscribe record` and `goscribe assist` fail. Small files
+   (<25 MB for OpenAI, <20 MB for Gemini) bypass splitting entirely. Recording
+   and assist also need `pactl`.
    The Docker image installs ffmpeg in the runtime layer.
 
 7. **Chunk merging is recursive but bounded.** `hierarchicalMerge` halves the
