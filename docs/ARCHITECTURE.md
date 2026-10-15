@@ -277,8 +277,10 @@ this project. It depends only on the standard library.
    effects; `FindAction()` takes the actions slice as a parameter. The only
    package-level vars are test overrides (`openai.BaseURL`, `gemini.BaseURL`,
    `elevenlabs.BaseURL`, `whisperlocal.Binary`, `harness.ClaudeBinary`,
-   `harness.CodexBinary`) and `worker.webhookClient` (shared HTTP client with
-   a timeout and custom dialer).
+   `harness.CodexBinary`, `recorder.Binary`, `recorder.StopTimeout`,
+   `recorder.Tick`, `recorder.Runner`), `recorder.MuteKeys` (the fixed
+   key-to-side map for mute keys, never modified) and `worker.webhookClient`
+   (shared HTTP client with a timeout and custom dialer).
 
 3. **All OpenAI and Gemini calls go through `makeRequest()`.** No direct
    `http.Client.Do()` calls exist in those packages outside their
@@ -324,9 +326,10 @@ panics are used outside the chi `Recoverer` middleware.
 
 CLI mode reads `~/.goscribe/config.yml` for post-processing actions, API
 keys, default provider and transcriber, transcriber settings, `tags_root` and
-`record_*` defaults. Flags override the config. Server mode is environment-variable-driven; it optionally reads a config
-file path from `GOSCRIBE_CONFIG_FILE` for post-processing actions only —
-API keys always come from environment variables in server deployments.
+`record_*` defaults. Flags override the config. Server mode is
+environment-variable-driven; it optionally reads a config file path from
+`GOSCRIBE_CONFIG_FILE` for post-processing actions only — API keys always come
+from environment variables in server deployments.
 
 ### Temporary Files
 

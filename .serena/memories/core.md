@@ -18,7 +18,7 @@ Authoritative design doc: `docs/ARCHITECTURE.md` (code map, numbered invariants,
 ## Invariants (convention, not tooling)
 - `internal/api` never imports provider or engines; AI work only in worker.
 - `local`, `elevenlabs` and harnesses never fall back to another engine.
-- Package-level mutable vars are only test overrides (`BaseURL`, `Binary`, `ClaudeBinary`/`CodexBinary`) + `worker.webhookClient`.
+- Package-level vars are only test overrides (`BaseURL`, `Binary`, `ClaudeBinary`/`CodexBinary`, `recorder.StopTimeout`/`Tick`/`Runner`), the fixed `recorder.MuteKeys` map, and `worker.webhookClient`. Keep the list in ARCHITECTURE invariant 2 in sync.
 - OpenAI key `""` or `"XXXX"` (legacy placeholder, still passed by `record -transcribe`) means "not set".
 - `-action` IDs are validated before transcription (no paid calls on typos); `--auto` picks are checked per action later.
 
