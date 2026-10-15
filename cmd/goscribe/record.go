@@ -22,6 +22,10 @@ const recordUsage = `goscribe record - record the mic and/or computer sound to a
 USAGE:
   goscribe record [flags]          (Ctrl+C to stop; a second Ctrl+C stops at once)
 
+While recording, press m to mute or unmute the mic and s for the computer
+sound. Muting only affects the recording (it records silence for that side);
+your real mic and speakers are not touched.
+
 EXAMPLES:
   goscribe record                                   mic + computer sound
   goscribe record -source system -o webinar.mp3
@@ -132,9 +136,17 @@ func runRecord(args []string, stdout, stderr io.Writer) int {
 	defer stopSignals()
 
 	cfg := recorder.Config{Inputs: inputs, Quality: qual, Duration: *duration, Output: out}
-	fmt.Fprintf(stdout, "Recording %s -> %s (Ctrl+C to stop)\n", cfg, out)
-	res, err := recorder.Record(ctx, cfg, recorder.UI{Status: stdout, Interactive: isTerminal(stdout), Force: force})
-	// The recording is over: from here on (e.g. -transcribe), Ctrl+C behaves as usual.
+	toggle, restoreKeys := startMuteKeys(os.Stdin)
+	defer restoreKeys()
+	if toggle != nil {
+		fmt.Fprintf(stdout, "Recording %s -> %s (%s to mute or unmute, Ctrl+C to stop)\n", cfg, out, cfg.MuteHint())
+	} else {
+		fmt.Fprintf(stdout, "Recording %s -> %s (Ctrl+C to stop)\n", cfg, out)
+	}
+	res, err := recorder.Record(ctx, cfg, recorder.UI{Status: stdout, Interactive: isTerminal(stdout), Force: force, Toggle: toggle})
+	// The recording is over: from here on (e.g. -transcribe), the terminal and
+	// Ctrl+C behave as usual.
+	restoreKeys()
 	stopSignals()
 	if err != nil {
 		if errors.Is(err, recorder.ErrNothingRecorded) {

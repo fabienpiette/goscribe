@@ -30,7 +30,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
 - **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
 - **Search** — `goscribe search tokens person:alex -since 2026-09-01` finds meetings by their tags
-- **Recording** — `goscribe record` captures the mic and/or computer sound to mp3 (Ctrl+C to stop), warns about silent sources, and can transcribe right after
+- **Recording** — `goscribe record` captures the mic and/or computer sound to mp3 (Ctrl+C to stop), lets you mute either side mid-recording, warns about silent sources, and can transcribe right after
 - **Searchable tags** — `-tags` writes a `<name>-tags.yml` (type, summary, topics, people, tickets, projects) next to the transcript, reusing existing tags, so `grep` finds every meeting on a subject
 - **Pluggable transcription** — transcribe locally and offline (faster-whisper) or with ElevenLabs Scribe (speaker labels), then post-process with OpenAI or Gemini
 - **18 built-in actions** — meeting summaries, action items, technical notes, retrospectives, and more
@@ -314,6 +314,7 @@ goscribe record -list-sources                     # pick devices for -mic / -sys
 ```
 
 - `-quality voice` (default) is mono 64 kbps, about 30 MB per hour. `-quality music` is stereo VBR.
+- Press `m` to mute or unmute the mic and `s` for the computer sound, while recording in a terminal. Muting only affects the recording: that side is recorded as silence, your real mic and speakers are not touched, and the timeline stays continuous. The status line shows `(muted)`, and each change is logged, e.g. `🔇 system muted at 00:12:41`.
 - If a side stays silent for 30 s, goscribe warns (`⚠ no sound from mic for 30s`) and keeps recording.
 - The first Ctrl+C stops cleanly; a second one stops at once. An existing file is never overwritten.
 - Config defaults: `record_source`, `record_mic`, `record_system`, `record_quality`.
