@@ -41,7 +41,12 @@ goscribe -action openai-meeting-summary meeting.mp3
 
 ## Install
 
-**Prerequisites:** Go 1.21+, ffmpeg (required only for files exceeding provider size limits)
+**Prerequisites:** Go 1.24+. Depending on the features you use:
+
+- **ffmpeg** — for `goscribe record`, and to split files over the provider size limits
+- **pactl** (PipeWire or PulseAudio) — for `goscribe record`
+- **whisper-ctranslate2** — for `-transcriber local` (`uv tool install whisper-ctranslate2`)
+- **claude** or **codex** CLI, logged in — for `-provider claude` / `-provider codex`
 
 ### CLI — from source
 
@@ -190,6 +195,13 @@ elevenlabs_num_speakers: 0      # max speakers, 0 = auto
 elevenlabs_verbatim: false      # true keeps filler words
 language: ""                    # e.g. "fr"; empty = auto-detect
 
+# Optional tags, search and record defaults
+tags_root: ""                   # folder holding your recordings, for -tags and search
+record_source: "both"           # mic, system or both
+record_mic: ""                  # device name from `goscribe record -list-sources`
+record_system: ""               # computer sound monitor; empty = default output
+record_quality: "voice"         # voice or music
+
 post_actions:
   - id: "custom-summary"
     name: "Custom Summary"
@@ -219,6 +231,9 @@ All configuration is via environment variables. Copy `.env.example` to `.env`:
 | `MAX_UPLOAD_MB` | `100` | Max audio upload size |
 | `RESULT_TTL_HOURS` | `24` | Job result retention in Redis |
 | `GOSCRIBE_CONFIG_FILE` | — | Path to custom `config.yml` for extra actions |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model |
+| `UPLOADS_DIR` | `/tmp/goscribe-uploads` | Where uploaded audio waits for the worker |
+| `SHUTDOWN_TIMEOUT_SECONDS` | `30` | Graceful shutdown drain timeout |
 
 ## Built-in Actions
 
@@ -328,6 +343,9 @@ internal/openai/    OpenAI API client
 internal/gemini/    Gemini API client
 internal/elevenlabs/ ElevenLabs Scribe speech-to-text client
 internal/whisperlocal/ Local faster-whisper transcription (whisper-ctranslate2)
+internal/harness/   Claude Code / Codex CLI runner for actions
+internal/tags/      Tags files (-tags) and goscribe search
+internal/recorder/  ffmpeg recording for goscribe record
 internal/util/      Shared helpers (model limits, audio splitting, etc.)
 ```
 
