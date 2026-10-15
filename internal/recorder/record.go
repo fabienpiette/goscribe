@@ -28,11 +28,13 @@ var ErrNothingRecorded = errors.New("nothing was recorded")
 const minAudioBytes = 1024
 
 // UI is where the session reports progress. Force, when closed, kills ffmpeg
-// at once (second Ctrl+C).
+// at once (second Ctrl+C). Each label received on Toggle mutes or unmutes that
+// side in the recording; nil means no mute keys.
 type UI struct {
 	Status      io.Writer
 	Interactive bool
 	Force       <-chan struct{}
+	Toggle      <-chan string
 }
 
 type Result struct {
@@ -118,6 +120,14 @@ func Record(ctx context.Context, c Config, ui UI) (Result, error) {
 	defer ticker.Stop()
 	lastLine := start
 
+	toggle := ui.Toggle
+	keys := toggle != nil
+	muted := map[string]bool{}
+	recorded := map[string]bool{}
+	for _, l := range labels {
+		recorded[l] = true
+	}
+
 	var waitErr error
 loop:
 	for {
@@ -131,11 +141,29 @@ loop:
 			}
 			clearLine(ui)
 			fmt.Fprintln(ui.Status, ev.Message(silence))
+		case label, ok := <-toggle:
+			if !ok {
+				toggle = nil
+				continue
+			}
+			if !recorded[label] {
+				continue
+			}
+			muted[label] = !muted[label]
+			volume, icon, word := 1, "🔊", "unmuted"
+			if muted[label] {
+				volume, icon, word = 0, "🔇", "muted"
+			}
+			// Sets the volume filter of that side; a failed write means ffmpeg is
+			// gone, which <-done reports.
+			_, _ = fmt.Fprintf(stdin, "cvolume@%s -1 volume %d\n", label, volume)
+			clearLine(ui)
+			fmt.Fprintf(ui.Status, "%s %s %s at %s\n", icon, label, word, FormatElapsed(time.Since(start)))
 		case now := <-ticker.C:
 			if ui.Interactive {
-				fmt.Fprintf(ui.Status, "\r\033[K%s", statusLine(c, now.Sub(start)))
+				fmt.Fprintf(ui.Status, "\r\033[K%s", statusLine(c, muted, keys, now.Sub(start)))
 			} else if now.Sub(lastLine) >= time.Minute {
-				fmt.Fprintln(ui.Status, statusLine(c, now.Sub(start)))
+				fmt.Fprintln(ui.Status, statusLine(c, muted, keys, now.Sub(start)))
 				lastLine = now
 			}
 		case <-ctx.Done():
@@ -182,12 +210,26 @@ func clearLine(ui UI) {
 	}
 }
 
-func statusLine(c Config, elapsed time.Duration) string {
+// statusLine shows which sides are muted and, when keys is set, the mute keys
+// of the recorded sides.
+func statusLine(c Config, muted map[string]bool, keys bool, elapsed time.Duration) string {
 	size := int64(0)
 	if info, err := os.Stat(c.Output); err == nil {
 		size = info.Size()
 	}
-	return fmt.Sprintf("● REC  %s  %s  %s -> %s   (Ctrl+C to stop)", FormatElapsed(elapsed), FormatSize(size), c, c.Output)
+	var sides []string
+	for _, l := range c.Labels() {
+		if muted[l] {
+			sides = append(sides, l+" (muted)")
+		} else {
+			sides = append(sides, l)
+		}
+	}
+	hint := "(Ctrl+C to stop)"
+	if keys {
+		hint = c.MuteHint() + ": mute · Ctrl+C: stop"
+	}
+	return fmt.Sprintf("● REC  %s  %s  %s -> %s   %s", FormatElapsed(elapsed), FormatSize(size), strings.Join(sides, " + "), c.Output, hint)
 }
 
 func FormatElapsed(d time.Duration) string {
@@ -219,11 +261,15 @@ func (t *tail) Write(p []byte) (int, error) {
 		if !ok {
 			break
 		}
+		t.part = rest
+		// ffmpeg's replies to our mute commands are not errors.
+		if strings.HasPrefix(line, "Enter command:") || strings.HasPrefix(line, "Command reply") || line == "" {
+			continue
+		}
 		t.lines = append(t.lines, line)
 		if len(t.lines) > t.max {
 			t.lines = t.lines[1:]
 		}
-		t.part = rest
 	}
 	return len(p), nil
 }
