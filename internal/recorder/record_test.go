@@ -181,3 +181,66 @@ exit 1`)
 		t.Error("header-only file should be removed")
 	}
 }
+
+func TestRecordMuteToggle(t *testing.T) {
+	// Saves everything it reads on stdin next to the output, until stdin closes.
+	fakeFFmpeg(t, `head -c 4096 /dev/zero > "$out"
+cat > "$out.stdin"
+exit 0`)
+	c := testConfig(t)
+	toggle := make(chan string)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		toggle <- "mic"
+		toggle <- "speakers"               // not a recorded side: ignored
+		time.Sleep(120 * time.Millisecond) // let a status line show the muted mic
+		toggle <- "mic"
+		toggle <- "system"
+		cancel()
+	}()
+
+	var status bytes.Buffer
+	res, err := Record(ctx, c, UI{Status: &status, Interactive: true, Toggle: toggle})
+	if err != nil || !res.Stopped {
+		t.Fatalf("res=%+v err=%v\n%s", res, err, status.String())
+	}
+
+	stdin, err := os.ReadFile(c.Output + ".stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "cvolume@mic -1 volume 0\n" +
+		"cvolume@mic -1 volume 1\n" +
+		"cvolume@system -1 volume 0\n" +
+		"q"
+	if string(stdin) != want {
+		t.Errorf("ffmpeg stdin = %q, want %q", stdin, want)
+	}
+
+	out := status.String()
+	for _, want := range []string{
+		"🔇 mic muted at 00:00:00",
+		"🔊 mic unmuted at 00:00:00",
+		"🔇 system muted at 00:00:00",
+		"mic (muted) + system",
+		"m/s: mute · Ctrl+C: stop",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "speakers") {
+		t.Errorf("unknown side should be ignored silently:\n%s", out)
+	}
+}
+
+func TestStatusHintWithoutToggle(t *testing.T) {
+	c := testConfig(t)
+	if got := statusLine(c, nil, false, 0); !strings.Contains(got, "(Ctrl+C to stop)") || strings.Contains(got, "mute") {
+		t.Errorf("without keys the hint must stay as before: %q", got)
+	}
+	single := Config{Inputs: Inputs{System: "s"}, Output: c.Output}
+	if got := statusLine(single, nil, true, 0); !strings.Contains(got, "s: mute · Ctrl+C: stop") || strings.Contains(got, "m/s") {
+		t.Errorf("hint must only list keys of recorded sides: %q", got)
+	}
+}

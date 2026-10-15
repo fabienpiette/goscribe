@@ -68,7 +68,10 @@ holds all resolved state as local variables — no globals.
 Key files: `main.go` (flag parsing, `run()`, `normalizeArgs()`, subcommand
 dispatch), `record.go` (`goscribe record`; `watchSignals()` turns the first
 Ctrl+C/SIGTERM/SIGHUP into a clean stop and a second one into a forced stop),
-`search.go` (`goscribe search`; accepts flags after the search terms).
+`search.go` (`goscribe search`; accepts flags after the search terms),
+`keys.go` / `keys_linux.go` / `keys_other.go` (mute keys: the terminal reads
+single key presses without echo but keeps Ctrl+C; the reader polls so it stops
+and the terminal is restored before `-transcribe`).
 
 Unknown action IDs given with `-action` are rejected before transcription, so a
 typo costs no API calls.
@@ -229,7 +232,11 @@ Records the mic and/or computer sound to mp3 with ffmpeg on
 PipeWire/PulseAudio; devices are listed and resolved with `pactl`. ffmpeg's
 silence events drive the "no sound from mic for 30s" warning. ffmpeg runs in
 its own process group so a terminal Ctrl+C reaches goscribe only and never
-interrupts ffmpeg mid-write; on Linux, `Pdeathsig` makes the kernel stop
+interrupts ffmpeg mid-write. Each side's chain ends in a `volume@mic` /
+`volume@system` filter placed after `silencedetect`; labels received on
+`UI.Toggle` mute or unmute a side by sending ffmpeg a `c volume@<side> -1
+volume 0|1` command on the stdin it also uses for `q`, so a muted side records
+silence without looking like a dead source. On Linux, `Pdeathsig` makes the kernel stop
 ffmpeg if goscribe dies, so the mic is never left recording. `Record()` keeps
 its goroutine locked to one OS thread because `Pdeathsig` is tied to the
 thread that started the child.
@@ -353,8 +360,8 @@ that tests point at a fake script.
 | `internal/whisperlocal` | `whisperlocal_test.go` | CLI invocation and output parsing |
 | `internal/harness` | `harness_test.go` | CLI invocation and isolation flags |
 | `internal/tags` | `tags_test.go`, `search_test.go` | Normalization, vocabulary, YAML output, query parsing, search |
-| `internal/recorder` | `devices_test.go`, `ffmpeg_test.go`, `silence_test.go`, `record_test.go`, `record_linux_test.go` | Device resolution, ffmpeg args, silence events, stop/kill behaviour |
-| `cmd/goscribe` | `main_test.go`, `search_test.go`, `record_test.go`, `record_signals_test.go` | `run()` integration, flag parsing, normalizeArgs, subcommands, signal handling |
+| `internal/recorder` | `devices_test.go`, `ffmpeg_test.go`, `silence_test.go`, `record_test.go`, `record_linux_test.go` | Device resolution, ffmpeg args, silence events, mute commands, stop/kill behaviour |
+| `cmd/goscribe` | `main_test.go`, `search_test.go`, `record_test.go`, `record_signals_test.go`, `keys_linux_test.go` | `run()` integration, flag parsing, normalizeArgs, subcommands, signal handling, mute keys on a pseudo-terminal |
 | `internal/api` | `handler_test.go` | HTTP handler behaviour with mock enqueuer/Redis |
 | `internal/worker` | `processor_test.go`, `tasks_test.go` | Job processing with mock transcriber |
 
