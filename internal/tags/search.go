@@ -49,16 +49,19 @@ func (m Match) Transcript() string {
 	return strings.TrimSuffix(m.TagsFile, "-tags.yml") + "-transcript.txt"
 }
 
-// Related returns the other text outputs next to the transcript (action results).
+// Related returns the other outputs next to the transcript: action results
+// (<base>-*.txt) and notes such as live-assistant notes (<base>-*.md), sorted.
 func (m Match) Related() []string {
 	base := strings.TrimSuffix(m.TagsFile, "-tags.yml")
-	files, _ := filepath.Glob(base + "-*.txt")
+	texts, _ := filepath.Glob(base + "-*.txt")
+	notes, _ := filepath.Glob(base + "-*.md")
 	var out []string
-	for _, f := range files {
+	for _, f := range append(texts, notes...) {
 		if f != m.Transcript() {
 			out = append(out, f)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 

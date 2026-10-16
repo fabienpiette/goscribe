@@ -55,7 +55,7 @@ func runSearch(args []string, stdout, stderr io.Writer) int {
 	root := fs.String("root", "", "Folder to search recursively (default: tags_root in config, else the current folder)")
 	since := fs.String("since", "", "Only meetings on or after this date (YYYY-MM-DD)")
 	until := fs.String("until", "", "Only meetings on or before this date (YYYY-MM-DD)")
-	verbose := fs.Bool("v", false, "Show topics, people, tickets, projects and related files")
+	verbose := fs.Bool("v", false, "Show topics, people, tickets, projects and related files (action outputs, <name>-*.md notes)")
 	pathsOnly := fs.Bool("paths", false, "Print only transcript paths, one per line")
 	configFile := fs.String("config", "", "Config file (default: ~/.goscribe/config.yml)")
 	fs.Usage = func() {
