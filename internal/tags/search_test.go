@@ -141,15 +141,15 @@ func TestSearch(t *testing.T) {
 // records/<YYYYMMDD>/ folder stands in, so -since doesn't silently drop them.
 func TestSearchDateFromFolder(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, "20261015", "the-ming-disco-2026_10_15-reduce-tags.yml")
+	path := filepath.Join(root, "20261015", "team-sync-2026_10_15-reduce-tags.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Write(path, Normalize(Tags{Topics: []string{"theming"}})); err != nil {
+	if err := Write(path, Normalize(Tags{Topics: []string{"dark-mode"}})); err != nil {
 		t.Fatal(err)
 	}
 
-	q, _ := ParseQuery([]string{"theming"}, "2026-10-01", "")
+	q, _ := ParseQuery([]string{"dark-mode"}, "2026-10-01", "")
 	matches, _, err := Search(root, q)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
