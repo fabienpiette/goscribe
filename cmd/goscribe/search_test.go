@@ -70,7 +70,7 @@ func TestSearchCommand(t *testing.T) {
 		t.Errorf("-paths should print only full transcript paths:\n%s", out)
 	}
 
-	out, _, _ = search(t, "-root", root, "-v", "ticket:liv")
+	out, _, _ = search(t, "-root", root, "-v", "ticket:proj")
 	for _, want := range []string{"topics: dark-mode, design-tokens", "tickets: PROJ-123", "file: " + filepath.Join("20261013", "b-reduce-openai-meeting-summary.txt")} {
 		if !strings.Contains(out, want) {
 			t.Errorf("-v output missing %q:\n%s", want, out)

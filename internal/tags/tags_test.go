@@ -65,7 +65,7 @@ func TestParseToleratesFencesAndNormalizes(t *testing.T) {
 		}
 	}
 	check("topics", got.Topics, "dark-mode,design-tokens")
-	check("people", got.People, "Sam,Marie Curie")
+	check("people", got.People, "Marie Curie,Sam")
 	check("tickets", got.Tickets, "PROJ-123")
 	check("projects", got.Projects, "billing")
 }
