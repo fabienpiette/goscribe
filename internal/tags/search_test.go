@@ -104,6 +104,10 @@ func TestSearch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "20261001", "a-reduce-transcript.txt"), []byte("t"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// Live-assistant notes filed with the recording.
+	if err := os.WriteFile(filepath.Join(root, "20261001", "a-reduce-assist.md"), []byte("n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "20261001", "a-reduce-openai-meeting-summary.txt"), []byte("s"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +132,7 @@ func TestSearch(t *testing.T) {
 	if a.Transcript() != filepath.Join(root, "20261001", "a-reduce-transcript.txt") {
 		t.Errorf("Transcript() = %q", a.Transcript())
 	}
-	if related := a.Related(); len(related) != 1 || !strings.HasSuffix(related[0], "-openai-meeting-summary.txt") {
+	if related := a.Related(); len(related) != 2 || !strings.HasSuffix(related[0], "-assist.md") || !strings.HasSuffix(related[1], "-openai-meeting-summary.txt") {
 		t.Errorf("Related() = %v", related)
 	}
 
