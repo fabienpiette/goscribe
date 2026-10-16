@@ -136,3 +136,25 @@ func TestSearch(t *testing.T) {
 		t.Error("a missing root should be an error")
 	}
 }
+
+// Tags written before a name's date format was understood have no date: the
+// records/<YYYYMMDD>/ folder stands in, so -since doesn't silently drop them.
+func TestSearchDateFromFolder(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "20261015", "team-sync-2026_10_15-reduce-tags.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(path, Normalize(Tags{Topics: []string{"dark-mode"}})); err != nil {
+		t.Fatal(err)
+	}
+
+	q, _ := ParseQuery([]string{"dark-mode"}, "2026-10-01", "")
+	matches, _, err := Search(root, q)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Tags.Date != "2026-10-15" {
+		t.Errorf("matches = %+v, want the undated meeting dated from its folder", matches)
+	}
+}
