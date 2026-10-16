@@ -26,6 +26,11 @@ func TestDateFromName(t *testing.T) {
 		"/records/20261013/meeting-20240313-transcript.txt":         "2024-03-13",
 		"meeting-transcript.txt":                                    "",
 		"call-123456789-transcript.txt":                             "",
+		// Google Meet downloads write the date with underscores.
+		"/r/20261015/the-ming-disco-2026_10_15-15_00-CEST-Recording-reduce-transcript.txt": "2026-10-15",
+		// No date in the name: the records/<YYYYMMDD>/ folder gives it.
+		"/records/20261015/standup-transcript.txt": "2026-10-15",
+		"/records/notes/standup-transcript.txt":    "",
 	}
 	for in, want := range cases {
 		if got := DateFromName(in); got != want {

@@ -52,17 +52,23 @@ func Path(file string) string {
 }
 
 var (
-	dashedDate  = regexp.MustCompile(`(\d{4})-(\d{2})-(\d{2})`)
-	compactDate = regexp.MustCompile(`(?:^|\D)(\d{4})(\d{2})(\d{2})(?:\D|$)`)
+	// 2026-10-15, or 2026_10_15 as in Google Meet downloads.
+	separatedDate = regexp.MustCompile(`(\d{4})[-_](\d{2})[-_](\d{2})`)
+	compactDate   = regexp.MustCompile(`(?:^|\D)(\d{4})(\d{2})(\d{2})(?:\D|$)`)
+	dayFolder     = regexp.MustCompile(`^(\d{4})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$`)
 )
 
-// DateFromName extracts a YYYY-MM-DD date from a file name, or returns "".
-func DateFromName(name string) string {
-	name = filepath.Base(name)
-	if m := dashedDate.FindStringSubmatch(name); m != nil {
+// DateFromName returns the YYYY-MM-DD date in a file name, else the date of its
+// records/<YYYYMMDD>/ folder, else "".
+func DateFromName(path string) string {
+	name := filepath.Base(path)
+	if m := separatedDate.FindStringSubmatch(name); m != nil {
 		return m[1] + "-" + m[2] + "-" + m[3]
 	}
 	if m := compactDate.FindStringSubmatch(name); m != nil {
+		return m[1] + "-" + m[2] + "-" + m[3]
+	}
+	if m := dayFolder.FindStringSubmatch(filepath.Base(filepath.Dir(path))); m != nil {
 		return m[1] + "-" + m[2] + "-" + m[3]
 	}
 	return ""
