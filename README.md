@@ -297,8 +297,8 @@ goscribe normalizes what the model returns (kebab-case topics and projects, uppe
 goscribe search dark-mode                          # in any field
 goscribe search tokens person:alex type:1:1        # all terms must match
 goscribe search ticket:PROJ-123 -since 2026-09-01
-goscribe search -v staffing                        # + topics, people, tickets, related files
-goscribe search -paths staffing | xargs grep -il hubspot
+goscribe search -v onboarding                      # + topics, people, tickets, related files
+goscribe search -paths onboarding | xargs grep -il invoice
 ```
 
 Terms are case-insensitive substrings, so `alex` finds both "Alex" and "Alexis". `field:value` limits a term to `topic`, `person`, `ticket`, `project`, `type` or `summary`. It searches `-root`, else `tags_root` from the config, else the current folder, recursively. Exit code: 0 with matches, 1 without (like grep), 2 on errors.

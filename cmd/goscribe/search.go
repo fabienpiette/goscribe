@@ -26,7 +26,7 @@ EXAMPLES:
   goscribe search dark-mode
   goscribe search tokens person:alex type:1:1
   goscribe search ticket:PROJ-123 -since 2026-09-01
-  goscribe search -paths staffing | xargs grep -il hubspot
+  goscribe search -paths onboarding | xargs grep -il invoice
 
 FLAGS:
 `
