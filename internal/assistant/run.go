@@ -53,7 +53,10 @@ const (
 // Force is closed first. It returns an error only if the notes can't be
 // written at the end.
 func Run(c Config, events <-chan Event) error {
-	s := &state{c: c, start: time.Now(), results: make(chan result, 16), partials: map[string]string{}}
+	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16), partials: map[string]string{}}
+	// Suggestion times are offsets from this start; with the wall clock, they
+	// can be matched against a recording started at another moment.
+	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
 	ticker := time.NewTicker(Tick)
 	defer ticker.Stop()
 
@@ -85,8 +88,10 @@ type result struct {
 }
 
 type state struct {
-	c     Config
-	start time.Time
+	c       Config
+	start   time.Time
+	header  string   // Config.Header with the wall-clock start
+	sources []string // context files an answer may come from
 
 	lines    []Line
 	analysed int // lines already covered by a successful update
@@ -182,12 +187,15 @@ func (s *state) finish(r result) {
 	s.failures = 0
 	s.analysed = r.upto
 	at := s.elapsed(time.Now())
-	suggestions, decisions := s.mem.Apply(parsed, at)
+	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
 		line := fmt.Sprintf("%s %s %s: %s", l.icon, clock(at), l.label, Clean(sg.Text))
-		if sg.Why != "" {
-			line += s.dim(" — " + Clean(sg.Why))
+		if sg.Priority == High {
+			line = "‼ " + line
+		}
+		if note := suggestionNote(sg); note != "" {
+			line += s.dim(" — " + Clean(note))
 		}
 		s.print(line)
 	}
@@ -273,7 +281,7 @@ func (s *state) writeNotes(final bool) error {
 	if s.c.Notes == "" {
 		return nil
 	}
-	err := WriteNotes(s.c.Notes, Render(s.mem, s.c.Header, final, s.elapsed(time.Now())))
+	err := WriteNotes(s.c.Notes, Render(s.mem, s.header, final, s.elapsed(time.Now())))
 	if err != nil && !s.notesErr {
 		s.notesErr = true
 		s.print("⚠ cannot write the notes: " + err.Error())

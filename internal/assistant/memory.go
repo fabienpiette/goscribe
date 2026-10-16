@@ -11,6 +11,7 @@ package assistant
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 	"unicode"
@@ -32,17 +33,23 @@ const (
 )
 
 type Suggestion struct {
-	Type string        `json:"type"`
-	Text string        `json:"text"`
-	Why  string        `json:"why"`
-	At   time.Duration `json:"-"`
+	Type     string        `json:"type"`
+	Priority string        `json:"priority"` // "high" when the moment will pass soon, else ""
+	Text     string        `json:"text"`
+	Why      string        `json:"why"`
+	Source   string        `json:"source"` // context file it comes from, if any
+	At       time.Duration `json:"-"`
 }
+
+// High is the priority of a suggestion whose moment will pass soon.
+const High = "high"
 
 // Memory is everything the assistant remembers between cycles.
 type Memory struct {
 	Summary       string
 	Decisions     []string
 	OpenQuestions []string
+	NotCovered    []string // agenda items and goals from the context not discussed yet
 	Suggestions   []Suggestion
 	ActionItems   []string // only from the final call
 }
@@ -53,6 +60,7 @@ type Reply struct {
 	Summary       string      `json:"summary"`
 	Decisions     []string    `json:"decisions"`
 	OpenQuestions []string    `json:"open_questions"`
+	NotCovered    []string    `json:"not_covered"`
 	Suggestions   Suggestions `json:"suggestions"`
 	ActionItems   []string    `json:"action_items"`
 }
@@ -82,9 +90,10 @@ const (
 	maxFinalSummary   = 6000
 	maxDecisions      = 20
 	maxOpenQuestions  = 15
+	maxNotCovered     = 15
 	maxActionItems    = 30
 	maxItem           = 300
-	maxSuggestionsPer = 3
+	maxSuggestionsPer = 2 // fewer, sharper: a live feed is read at a glance
 	// Two suggestions sharing this share of their words are the same idea. A
 	// rephrasing keeps nearly all words; "who owns the rollback" and "who owns
 	// the budget" (4 of 6) must stay distinct.
@@ -107,7 +116,9 @@ func Parse(answer string) (Reply, error) {
 
 // Apply merges a cycle's reply into the memory and returns what is new, for
 // the feed: suggestions not made before, and decisions not listed before.
-func (m *Memory) Apply(r Reply, at time.Duration) (newSuggestions []Suggestion, newDecisions []string) {
+// sources are the context files: an answer must come from one of them, as an
+// answer from the model's own opinion can contradict what was just said.
+func (m *Memory) Apply(r Reply, at time.Duration, sources []string) (newSuggestions []Suggestion, newDecisions []string) {
 	if s := strings.TrimSpace(r.Summary); s != "" {
 		m.Summary = truncate(s, maxSummary)
 	}
@@ -123,6 +134,9 @@ func (m *Memory) Apply(r Reply, at time.Duration) (newSuggestions []Suggestion, 
 	if r.OpenQuestions != nil {
 		m.OpenQuestions = cleanList(r.OpenQuestions, maxOpenQuestions)
 	}
+	if r.NotCovered != nil {
+		m.NotCovered = cleanList(r.NotCovered, maxNotCovered)
+	}
 	for _, s := range r.Suggestions {
 		if len(newSuggestions) == maxSuggestionsPer {
 			break
@@ -130,7 +144,16 @@ func (m *Memory) Apply(r Reply, at time.Duration) (newSuggestions []Suggestion, 
 		s.Type = strings.ToLower(strings.TrimSpace(s.Type))
 		s.Text = truncate(strings.TrimSpace(s.Text), maxItem)
 		s.Why = truncate(strings.TrimSpace(s.Why), maxItem)
+		s.Source = matchSource(s.Source, sources)
+		if strings.EqualFold(strings.TrimSpace(s.Priority), High) {
+			s.Priority = High
+		} else {
+			s.Priority = ""
+		}
 		if !validType(s.Type) || s.Text == "" || m.repeats(s.Text) || repeatsAny(newSuggestions, s.Text) {
+			continue
+		}
+		if s.Type == TypeAnswer && s.Source == "" {
 			continue
 		}
 		s.At = at
@@ -152,9 +175,28 @@ func (m *Memory) ApplyFinal(r Reply) {
 	if r.OpenQuestions != nil {
 		m.OpenQuestions = cleanList(r.OpenQuestions, maxOpenQuestions)
 	}
+	if r.NotCovered != nil {
+		m.NotCovered = cleanList(r.NotCovered, maxNotCovered)
+	}
 	if r.ActionItems != nil {
 		m.ActionItems = cleanList(r.ActionItems, maxActionItems)
 	}
+}
+
+// matchSource returns the context file a model's "source" names, matched on
+// the path or the base name, ignoring case; "" when it names none.
+func matchSource(source string, files []string) string {
+	src := strings.ToLower(strings.TrimSpace(source))
+	if src == "" {
+		return ""
+	}
+	for _, f := range files {
+		lf := strings.ToLower(f)
+		if strings.Contains(src, lf) || strings.Contains(src, path.Base(lf)) {
+			return f
+		}
+	}
+	return ""
 }
 
 func validType(t string) bool {

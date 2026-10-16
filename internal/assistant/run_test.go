@@ -93,7 +93,8 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 	f := &fakeThink{replies: []func() (string, error){
 		func() (string, error) {
 			<-release // keep the first call in flight
-			return `{"summary":"Shipping plan.","decisions":["Ship Monday"],"suggestions":[{"type":"question","text":"Who owns the rollback?","why":"spec.md"}]}`, nil
+			return `{"summary":"Shipping plan.","decisions":["Ship Monday"],"suggestions":[{"type":"question","text":"Who owns the rollback?","why":"not named yet"},` +
+				`{"type":"answer","priority":"high","text":"The rollback is the feature flag.","source":"spec.md"}]}`, nil
 		},
 		answer(`{"summary":"Shipping plan, rollback owner named.","suggestions":[]}`),
 		answer(`{"summary":"Final.","action_items":["Sam: write the rollback runbook"]}`),
@@ -103,7 +104,7 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 	events := make(chan Event)
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(Config{Notes: notes, Header: "mic · fake", Engine: "fake", Interval: 20 * time.Millisecond,
+		done <- Run(Config{Context: "### file: spec.md\n\nRollback = feature flag.", Notes: notes, Header: "mic · fake", Engine: "fake", Interval: 20 * time.Millisecond,
 			Think: f.think, Out: out}, events)
 	}()
 
@@ -136,7 +137,8 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 	feed := out.String()
 	for _, want := range []string{
 		"others we should ship",
-		"❓ ", "Ask: Who owns the rollback? — spec.md",
+		"❓ ", "Ask: Who owns the rollback? — not named yet",
+		"‼ 💬 ", "Answer: The rollback is the feature flag. — spec.md",
 		"✅ ", "Decision: Ship Monday",
 		"⏳ writing the final notes (fake)…",
 		"✓ Final notes written to " + notes,
@@ -149,7 +151,8 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 		t.Errorf("non-interactive output must have no terminal codes:\n%q", feed)
 	}
 	b, _ := os.ReadFile(notes)
-	for _, want := range []string{"## Final summary\n\nFinal.", "- Sam: write the rollback runbook", "- Ship Monday", "❓ Ask: Who owns the rollback?"} {
+	for _, want := range []string{"mic · fake · started " + time.Now().Format("2006-01-02"), "## Final summary\n\nFinal.",
+		"- Sam: write the rollback runbook", "- Ship Monday", "❓ Ask: Who owns the rollback?"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("notes missing %q:\n%s", want, b)
 		}
