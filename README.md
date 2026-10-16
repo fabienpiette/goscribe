@@ -29,7 +29,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
 - **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
-- **Search** — `goscribe search tokens person:adri -since 2026-09-01` finds meetings by their tags
+- **Search** — `goscribe search tokens person:alex -since 2026-09-01` finds meetings by their tags
 - **Live assistant** — `goscribe assist` follows a meeting live (ElevenLabs realtime) and, in your terminal only, suggests questions, answers from your notes, missed points and risks, while keeping a running summary
 - **Recording** — `goscribe record` captures the mic and/or computer sound to mp3 (Ctrl+C to stop), lets you mute either side mid-recording, warns about silent sources, and can transcribe right after
 - **Searchable tags** — `-tags` writes a `<name>-tags.yml` (type, summary, topics, people, tickets, projects) next to the transcript, reusing existing tags, so `grep` finds every meeting on a subject
@@ -191,7 +191,7 @@ transcriber: "local"            # local, elevenlabs, openai or gemini
 whisper_model: "small"          # local only; e.g. large-v3-turbo for accuracy
 elevenlabs_api_key: ""
 elevenlabs_model: "scribe_v2"
-elevenlabs_keyterms: ["Livestorm"]  # names/jargon to favor (20% surcharge)
+elevenlabs_keyterms: ["Acme"]  # names/jargon to favor (20% surcharge)
 elevenlabs_num_speakers: 0      # max speakers, 0 = auto
 elevenlabs_verbatim: false      # true keeps filler words
 language: ""                    # e.g. "fr"; empty = auto-detect
@@ -280,11 +280,11 @@ topics:
     - dark-mode
     - design-tokens
 people:
-    - Alan
+    - Sam
 tickets:
-    - LIV-17445
+    - PROJ-123
 projects:
-    - cockpit
+    - billing
 ```
 
 goscribe normalizes what the model returns (kebab-case topics and projects, uppercase ticket IDs, a fixed list of meeting types, sorted and de-duplicated lists) rather than trusting its formatting. To keep tags consistent for `grep`, it first reads the topics and projects already used in `*-tags.yml` files under the tags root and its direct subfolders (a `records/<date>/` layout) and asks the model to reuse them. Transcripts under 30 words are not tagged. A tagging failure only prints a warning; the transcript and actions are kept.
@@ -295,13 +295,13 @@ goscribe normalizes what the model returns (kebab-case topics and projects, uppe
 
 ```bash
 goscribe search dark-mode                          # in any field
-goscribe search tokens person:adri type:1:1        # all terms must match
-goscribe search ticket:LIV-17445 -since 2026-09-01
+goscribe search tokens person:alex type:1:1        # all terms must match
+goscribe search ticket:PROJ-123 -since 2026-09-01
 goscribe search -v staffing                        # + topics, people, tickets, related files
 goscribe search -paths staffing | xargs grep -il hubspot
 ```
 
-Terms are case-insensitive substrings, so `adri` finds both "Adrian" and "Adrien". `field:value` limits a term to `topic`, `person`, `ticket`, `project`, `type` or `summary`. It searches `-root`, else `tags_root` from the config, else the current folder, recursively. Exit code: 0 with matches, 1 without (like grep), 2 on errors.
+Terms are case-insensitive substrings, so `alex` finds both "Alex" and "Alexis". `field:value` limits a term to `topic`, `person`, `ticket`, `project`, `type` or `summary`. It searches `-root`, else `tags_root` from the config, else the current folder, recursively. Exit code: 0 with matches, 1 without (like grep), 2 on errors.
 
 ### Recording
 

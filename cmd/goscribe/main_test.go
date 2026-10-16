@@ -671,14 +671,14 @@ func TestRunElevenLabsTuningFlags(t *testing.T) {
 	err := run(runOptions{
 		apiKey:      "test-key",
 		transcriber: "elevenlabs",
-		keyterms:    "Livestorm,ALAN",
+		keyterms:    "Acme,Globex",
 		numSpeakers: 3,
 		args:        []string{audioFile},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if strings.Join(form["keyterms"], ",") != "Livestorm,ALAN" {
+	if strings.Join(form["keyterms"], ",") != "Acme,Globex" {
 		t.Errorf("keyterms = %v", form["keyterms"])
 	}
 	if strings.Join(form["num_speakers"], "") != "3" {
@@ -718,12 +718,12 @@ func recordsWithTranscript(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	old := "topics:\n  - design-tokens\nprojects:\n  - cockpit\n"
+	old := "topics:\n  - design-tokens\nprojects:\n  - billing\n"
 	if err := os.WriteFile(filepath.Join(root, "20261001", "old-reduce-tags.yml"), []byte(old), 0644); err != nil {
 		t.Fatal(err)
 	}
 	transcript := filepath.Join(root, "20261013", "vokoscreenNG-2026-10-13_14-09-55-reduce-transcript.txt")
-	if err := os.WriteFile(transcript, []byte(strings.Repeat("We talked about design tokens with Alan. See LIV-1. ", 5)), 0644); err != nil {
+	if err := os.WriteFile(transcript, []byte(strings.Repeat("We talked about design tokens with Sam. See PROJ-1. ", 5)), 0644); err != nil {
 		t.Fatal(err)
 	}
 	return transcript
@@ -731,7 +731,7 @@ func recordsWithTranscript(t *testing.T) string {
 
 func TestRunTagsOnTranscript(t *testing.T) {
 	transcript := recordsWithTranscript(t)
-	promptFile := fakeClaude(t, `{"type":"standup","summary":"Token sync","topics":["Design Tokens"],"people":["Alan"],"tickets":["liv-1"],"projects":["cockpit"]}`)
+	promptFile := fakeClaude(t, `{"type":"standup","summary":"Token sync","topics":["Design Tokens"],"people":["Sam"],"tickets":["proj-1"],"projects":["billing"]}`)
 
 	err := run(runOptions{apiKey: "XXXX", provider: "claude", tags: true, transcriptFiles: []string{transcript}})
 	if err != nil {
@@ -743,7 +743,7 @@ func TestRunTagsOnTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tags file not written: %v", err)
 	}
-	for _, want := range []string{"date: \"2026-10-13\"", "type: standup", "- design-tokens", "- Alan", "- LIV-1", "- cockpit"} {
+	for _, want := range []string{"date: \"2026-10-13\"", "type: standup", "- design-tokens", "- Sam", "- PROJ-1", "- billing"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("tags file missing %q:\n%s", want, data)
 		}

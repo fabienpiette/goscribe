@@ -121,7 +121,7 @@ func loudChunk() []byte {
 }
 
 func TestURL(t *testing.T) {
-	u, err := url.Parse(URL(Options{Language: "fr", Keyterms: []string{"Livestorm", "ALAN"}}))
+	u, err := url.Parse(URL(Options{Language: "fr", Keyterms: []string{"Acme", "Globex"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestURL(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, q.Get(k), want)
 		}
 	}
-	if got := q["keyterms"]; strings.Join(got, ",") != "Livestorm,ALAN" {
+	if got := q["keyterms"]; strings.Join(got, ",") != "Acme,Globex" {
 		t.Errorf("keyterms = %v", got)
 	}
 

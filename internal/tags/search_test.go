@@ -8,13 +8,13 @@ import (
 )
 
 func TestParseQuery(t *testing.T) {
-	q, err := ParseQuery([]string{"Dark-Mode", "person:Adri", "type:1:1", "1:1", "topics:tokens"}, "2026-09-01", "")
+	q, err := ParseQuery([]string{"Dark-Mode", "person:Alex", "type:1:1", "1:1", "topics:tokens"}, "2026-09-01", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := []Term{
 		{Field: "", Value: "dark-mode"},
-		{Field: "people", Value: "adri"},
+		{Field: "people", Value: "alex"},
 		{Field: "type", Value: "1:1"},
 		{Field: "", Value: "1:1"},
 		{Field: "topics", Value: "tokens"},
@@ -46,8 +46,8 @@ func TestParseQuery(t *testing.T) {
 func TestQueryMatches(t *testing.T) {
 	meeting := Tags{
 		Date: "2026-10-13", Type: "1:1", Summary: "Sync on the token migration",
-		Topics: []string{"design-tokens", "dark-mode"}, People: []string{"Adrien"},
-		Tickets: []string{"LIV-17445"}, Projects: []string{"cockpit"},
+		Topics: []string{"design-tokens", "dark-mode"}, People: []string{"Alexis"},
+		Tickets: []string{"PROJ-123"}, Projects: []string{"billing"},
 	}
 	cases := []struct {
 		args         []string
@@ -55,11 +55,11 @@ func TestQueryMatches(t *testing.T) {
 		want         bool
 	}{
 		{args: []string{"token"}, want: true},                     // substring in topics/summary
-		{args: []string{"ADRI"}, want: true},                      // case-insensitive
-		{args: []string{"person:adri", "topic:dark"}, want: true}, // all terms
-		{args: []string{"person:adri", "topic:hiring"}, want: false},
-		{args: []string{"topic:cockpit"}, want: false}, // field-scoped: cockpit is a project
-		{args: []string{"ticket:liv-17445"}, want: true},
+		{args: []string{"ALEX"}, want: true},                      // case-insensitive
+		{args: []string{"person:alex", "topic:dark"}, want: true}, // all terms
+		{args: []string{"person:alex", "topic:hiring"}, want: false},
+		{args: []string{"topic:billing"}, want: false}, // field-scoped: billing is a project
+		{args: []string{"ticket:proj-123"}, want: true},
 		{args: []string{"type:1:1"}, want: true},
 		{since: "2026-10-13", until: "2026-10-13", want: true},
 		{since: "2026-10-14", want: false},

@@ -170,8 +170,8 @@ func TestApplyCaps(t *testing.T) {
 
 func TestApplyFinal(t *testing.T) {
 	m := Memory{Summary: "live", Suggestions: []Suggestion{{Type: "risk", Text: "x"}}}
-	m.ApplyFinal(Reply{Summary: "final", ActionItems: []string{"Alan: send the spec"}, Suggestions: []Suggestion{{Type: "risk", Text: "y"}}})
-	if m.Summary != "final" || strings.Join(m.ActionItems, "") != "Alan: send the spec" || len(m.Suggestions) != 1 {
+	m.ApplyFinal(Reply{Summary: "final", ActionItems: []string{"Sam: send the spec"}, Suggestions: []Suggestion{{Type: "risk", Text: "y"}}})
+	if m.Summary != "final" || strings.Join(m.ActionItems, "") != "Sam: send the spec" || len(m.Suggestions) != 1 {
 		t.Errorf("memory = %+v", m)
 	}
 }
@@ -255,7 +255,7 @@ func TestRenderAndWriteNotes(t *testing.T) {
 		Decisions:     []string{"Ship Monday"},
 		OpenQuestions: []string{"Who owns rollback?"},
 		Suggestions:   []Suggestion{{Type: TypeRisk, Text: "Monday is in the freeze", Why: "release.md", At: 125 * time.Second}},
-		ActionItems:   []string{"Alan: send spec"},
+		ActionItems:   []string{"Sam: send spec"},
 	}
 	live := Render(m, "mic+system · claude", false, 3*time.Minute)
 	want := "# Meeting notes\n\nmic+system · claude · updated at 00:03:00\n\n" +
@@ -267,7 +267,7 @@ func TestRenderAndWriteNotes(t *testing.T) {
 		t.Errorf("live notes =\n%s\nwant\n%s", live, want)
 	}
 	final := Render(m, "h", true, 0)
-	if !strings.Contains(final, "## Final summary\n\nWe agreed to ship.\n\n## Action items\n\n- Alan: send spec") {
+	if !strings.Contains(final, "## Final summary\n\nWe agreed to ship.\n\n## Action items\n\n- Sam: send spec") {
 		t.Errorf("final notes =\n%s", final)
 	}
 	if !strings.Contains(Render(Memory{}, "h", false, 0), "_Nothing yet._") {

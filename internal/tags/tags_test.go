@@ -44,9 +44,9 @@ func TestParseToleratesFencesAndNormalizes(t *testing.T) {
   "type": "Standup",
   "summary": "  Weekly   sync on\ntokens ",
   "topics": ["Design Tokens", "design-tokens", "Dark mode!", ""],
-  "people": [" Alan ", "alan", "Marie  Curie"],
-  "tickets": ["liv-17445", "not a ticket", "LIV-17445"],
-  "projects": ["Cockpit"]
+  "people": [" Sam ", "sam", "Marie  Curie"],
+  "tickets": ["proj-123", "not a ticket", "PROJ-123"],
+  "projects": ["Billing"]
 }` + "\n```"
 
 	got, err := Parse(answer)
@@ -65,9 +65,9 @@ func TestParseToleratesFencesAndNormalizes(t *testing.T) {
 		}
 	}
 	check("topics", got.Topics, "dark-mode,design-tokens")
-	check("people", got.People, "Alan,Marie Curie")
-	check("tickets", got.Tickets, "LIV-17445")
-	check("projects", got.Projects, "cockpit")
+	check("people", got.People, "Marie Curie,Sam")
+	check("tickets", got.Tickets, "PROJ-123")
+	check("projects", got.Projects, "billing")
 }
 
 func TestParseUnknownTypeAndErrors(t *testing.T) {
@@ -101,7 +101,7 @@ func TestWriteAndCollectVocabulary(t *testing.T) {
 			t.Fatalf("Write: %v", err)
 		}
 	}
-	write("20261001/a-tags.yml", Tags{Topics: []string{"dark-mode", "design-tokens"}, Projects: []string{"cockpit"}})
+	write("20261001/a-tags.yml", Tags{Topics: []string{"dark-mode", "design-tokens"}, Projects: []string{"billing"}})
 	write("20261002/b-tags.yml", Tags{Topics: []string{"design-tokens"}})
 	write("c-tags.yml", Tags{Topics: []string{"hiring"}})
 	// Two levels deep: outside the bounded scan.
@@ -119,14 +119,14 @@ func TestWriteAndCollectVocabulary(t *testing.T) {
 	if strings.Join(v.Topics, ",") != "design-tokens,dark-mode,hiring" {
 		t.Errorf("topics = %v, want most used first and no deep files", v.Topics)
 	}
-	if strings.Join(v.Projects, ",") != "cockpit" {
+	if strings.Join(v.Projects, ",") != "billing" {
 		t.Errorf("projects = %v", v.Projects)
 	}
 }
 
 func TestPromptIncludesVocabulary(t *testing.T) {
-	p := Prompt(Vocabulary{Topics: []string{"design-tokens", "hiring"}, Projects: []string{"cockpit"}})
-	for _, want := range []string{"design-tokens, hiring", "cockpit", "JSON object", "standup"} {
+	p := Prompt(Vocabulary{Topics: []string{"design-tokens", "hiring"}, Projects: []string{"billing"}})
+	for _, want := range []string{"design-tokens, hiring", "billing", "JSON object", "standup"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}

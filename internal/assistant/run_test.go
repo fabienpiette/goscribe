@@ -96,7 +96,7 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 			return `{"summary":"Shipping plan.","decisions":["Ship Monday"],"suggestions":[{"type":"question","text":"Who owns the rollback?","why":"spec.md"}]}`, nil
 		},
 		answer(`{"summary":"Shipping plan, rollback owner named.","suggestions":[]}`),
-		answer(`{"summary":"Final.","action_items":["Alan: write the rollback runbook"]}`),
+		answer(`{"summary":"Final.","action_items":["Sam: write the rollback runbook"]}`),
 	}}
 	out := &syncBuffer{}
 	notes := filepath.Join(t.TempDir(), "notes.md")
@@ -109,7 +109,7 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 
 	events <- line("others", twelveWords)
 	waitUntil(t, "first call", func() bool { return f.count() == 1 })
-	events <- line("me", "Alan owns the rollback and he will write the runbook today for us all before the freeze starts")
+	events <- line("me", "Sam owns the rollback and he will write the runbook today for us all before the freeze starts")
 	time.Sleep(60 * time.Millisecond) // several intervals: still only one call in flight
 	if n := f.count(); n != 1 {
 		t.Fatalf("calls while one is in flight = %d", n)
@@ -117,7 +117,7 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 	close(release)
 	waitUntil(t, "second call", func() bool { return f.count() == 2 })
 	_, tr := f.call(1)
-	if !strings.Contains(tr, "New since the last update:\n[") || !strings.Contains(tr, "me: Alan owns the rollback") ||
+	if !strings.Contains(tr, "New since the last update:\n[") || !strings.Contains(tr, "me: Sam owns the rollback") ||
 		strings.Contains(tr[strings.Index(tr, "New since"):], "others: we should ship") {
 		t.Errorf("second update must send only the line that arrived during the first call:\n%s", tr)
 	}
@@ -149,7 +149,7 @@ func TestRunCycleSuggestsAndWritesNotes(t *testing.T) {
 		t.Errorf("non-interactive output must have no terminal codes:\n%q", feed)
 	}
 	b, _ := os.ReadFile(notes)
-	for _, want := range []string{"## Final summary\n\nFinal.", "- Alan: write the rollback runbook", "- Ship Monday", "❓ Ask: Who owns the rollback?"} {
+	for _, want := range []string{"## Final summary\n\nFinal.", "- Sam: write the rollback runbook", "- Ship Monday", "❓ Ask: Who owns the rollback?"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("notes missing %q:\n%s", want, b)
 		}

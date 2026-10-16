@@ -84,7 +84,7 @@ Reply with ONLY a JSON object, no explanation and no code fence, with these keys
 - "summary": one sentence (max 20 words) saying what the meeting was about
 - "topics": 3 to 8 subjects discussed, as short lowercase kebab-case tags (e.g. "design-tokens", "release-process")
 - "people": names of people mentioned or speaking, as written (first name is fine); empty list if none
-- "tickets": issue or ticket IDs said or shown, like "LIV-17445"; empty list if none
+- "tickets": issue or ticket IDs said or shown, like "PROJ-123"; empty list if none
 - "projects": product, project, team or tool names discussed, as kebab-case tags; empty list if none
 
 Rules:

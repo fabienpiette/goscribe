@@ -114,8 +114,8 @@ func TestFormFields(t *testing.T) {
 		return m
 	}
 
-	got := values(Options{Keyterms: []string{"Livestorm", " ALAN ", ""}, NumSpeakers: 4})
-	if strings.Join(got["keyterms"], "|") != "Livestorm|ALAN" {
+	got := values(Options{Keyterms: []string{"Acme", " Globex ", ""}, NumSpeakers: 4})
+	if strings.Join(got["keyterms"], "|") != "Acme|Globex" {
 		t.Errorf("keyterms = %v, want one trimmed field per non-empty term", got["keyterms"])
 	}
 	if strings.Join(got["num_speakers"], "") != "4" {

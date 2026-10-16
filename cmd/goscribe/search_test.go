@@ -25,9 +25,9 @@ func searchRecords(t *testing.T) string {
 		}
 	}
 	write("20261001/a-reduce-tags.yml", tags.Tags{Date: "2026-10-01", Type: "standup", Summary: "Dark mode rollout",
-		Topics: []string{"dark-mode"}, People: []string{"Adrien"}})
+		Topics: []string{"dark-mode"}, People: []string{"Alexis"}})
 	write("20261013/b-reduce-tags.yml", tags.Tags{Date: "2026-10-13", Type: "1:1", Summary: "Token migration",
-		Topics: []string{"design-tokens", "dark-mode"}, Tickets: []string{"LIV-17445"}})
+		Topics: []string{"design-tokens", "dark-mode"}, Tickets: []string{"PROJ-123"}})
 	if err := os.WriteFile(filepath.Join(root, "20261013", "b-reduce-openai-meeting-summary.txt"), []byte("s"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -60,9 +60,9 @@ func TestSearchCommand(t *testing.T) {
 		t.Errorf("count line = %q", lines[2])
 	}
 
-	out, _, _ = search(t, "-root", root, "person:adri")
+	out, _, _ = search(t, "-root", root, "person:alex")
 	if !strings.Contains(out, "Dark mode rollout") || strings.Contains(out, "Token migration") {
-		t.Errorf("person:adri should only find the standup:\n%s", out)
+		t.Errorf("person:alex should only find the standup:\n%s", out)
 	}
 
 	out, _, _ = search(t, "-root", root, "-since", "2026-10-02", "-paths", "dark")
@@ -70,8 +70,8 @@ func TestSearchCommand(t *testing.T) {
 		t.Errorf("-paths should print only full transcript paths:\n%s", out)
 	}
 
-	out, _, _ = search(t, "-root", root, "-v", "ticket:liv")
-	for _, want := range []string{"topics: dark-mode, design-tokens", "tickets: LIV-17445", "file: " + filepath.Join("20261013", "b-reduce-openai-meeting-summary.txt")} {
+	out, _, _ = search(t, "-root", root, "-v", "ticket:proj")
+	for _, want := range []string{"topics: dark-mode, design-tokens", "tickets: PROJ-123", "file: " + filepath.Join("20261013", "b-reduce-openai-meeting-summary.txt")} {
 		if !strings.Contains(out, want) {
 			t.Errorf("-v output missing %q:\n%s", want, out)
 		}

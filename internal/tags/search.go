@@ -64,7 +64,7 @@ func (m Match) Related() []string {
 
 var fieldName = regexp.MustCompile(`^[a-z]+$`)
 
-// ParseQuery builds a query from command-line terms ("dark-mode", "person:alan")
+// ParseQuery builds a query from command-line terms ("dark-mode", "person:sam")
 // and optional dates.
 func ParseQuery(args []string, since, until string) (Query, error) {
 	q := Query{Since: since, Until: until}
