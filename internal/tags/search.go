@@ -164,6 +164,10 @@ func Search(root string, q Query) (matches []Match, skipped []error, err error) 
 			skipped = append(skipped, fmt.Errorf("%s: %w", path, yamlErr))
 			return nil
 		}
+		if t.Date == "" {
+			// Tagged before its name's date format was understood.
+			t.Date = DateFromName(path)
+		}
 		if q.Matches(t) {
 			matches = append(matches, Match{TagsFile: path, Tags: t})
 		}
