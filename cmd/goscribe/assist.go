@@ -43,6 +43,9 @@ EXAMPLES:
 
 Good to know:
   - The -context files (.md) are sent to the -provider model with every update.
+    Put the agenda or goals in them: points still not covered are raised when
+    the meeting wraps up. A "keyterms: Name, Term" line adds names and jargon to
+    the live speech-to-text, like -keyterms.
   - Needs an ElevenLabs API key (config elevenlabs_api_key or $ELEVENLABS_API_KEY).
     Live transcription is billed per stream: two with -source both.
   - Use headphones. With speakers, the mic also hears the others, and their
@@ -163,6 +166,10 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	if *keyterms != "" {
 		opts.Keyterms = strings.Split(*keyterms, ",")
 	}
+	// Names from the context ("keyterms:" lines) help live speech-to-text
+	// spell what the model will look up in the context.
+	fromContext := assistant.Keyterms(background)
+	opts.Keyterms = assistant.MergeKeyterms(assistant.MergeKeyterms(nil, opts.Keyterms), fromContext)
 
 	sides := assistSides(inputs)
 	var names []string
@@ -172,6 +179,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	header := fmt.Sprintf("%s · %s, updates every ≥%s", strings.Join(names, "+"), prov, every)
 	if len(contextFiles) > 0 {
 		header += fmt.Sprintf(" · context: %d file(s), %d KB", len(contextFiles), (len(background)+1023)>>10)
+	}
+	if len(fromContext) > 0 {
+		header += fmt.Sprintf(" · %d keyterm(s) from the context", len(fromContext))
 	}
 
 	ctx, force, stopSignals := watchSignals()

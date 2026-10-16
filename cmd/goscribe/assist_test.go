@@ -110,7 +110,7 @@ func TestAssistEndToEnd(t *testing.T) {
 	recorder.Binary = ffmpeg
 
 	var mu sync.Mutex
-	var keys []string
+	var keys, terms []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -119,6 +119,7 @@ func TestAssistEndToEnd(t *testing.T) {
 		defer func() { _ = c.CloseNow() }()
 		mu.Lock()
 		keys = append(keys, r.Header.Get("xi-api-key"))
+		terms = r.URL.Query()["keyterms"]
 		n := len(keys)
 		mu.Unlock()
 		ctx := r.Context()
@@ -146,7 +147,7 @@ func TestAssistEndToEnd(t *testing.T) {
 
 	notes := filepath.Join(t.TempDir(), "standup.md")
 	ctxFile := filepath.Join(t.TempDir(), "agenda.md")
-	mustWrite(t, ctxFile, []byte("# Agenda\nMigration go/no-go."), 0644)
+	mustWrite(t, ctxFile, []byte("# Agenda\nMigration go/no-go.\nkeyterms: Acme, Globex"), 0644)
 
 	out := &syncBuf{}
 	done := make(chan int, 1)
@@ -173,7 +174,7 @@ func TestAssistEndToEnd(t *testing.T) {
 
 	feed := out.String()
 	for _, want := range []string{
-		"Assist me+others · claude, updates every ≥20ms · context: 1 file(s), 1 KB → " + notes,
+		"Assist me+others · claude, updates every ≥20ms · context: 1 file(s), 1 KB · 2 keyterm(s) from the context → " + notes,
 		"we ship the migration on monday", "I will write the rollback runbook",
 		"✅ ", "Decision: Ship on Monday",
 		"✓ Final notes written to " + notes,
@@ -197,6 +198,9 @@ func TestAssistEndToEnd(t *testing.T) {
 	defer mu.Unlock()
 	if len(keys) != 2 || keys[0] != "el-key" {
 		t.Errorf("one realtime session per side with the key; got %q", keys)
+	}
+	if strings.Join(terms, ",") != "Acme,Globex" {
+		t.Errorf("keyterms from the context = %q", terms)
 	}
 }
 

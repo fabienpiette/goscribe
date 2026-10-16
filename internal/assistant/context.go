@@ -62,10 +62,61 @@ func LoadContext(path string) (string, []string, error) {
 		if err != nil {
 			rel = f
 		}
-		fmt.Fprintf(&b, "### file: %s\n\n%s\n\n", filepath.ToSlash(rel), strings.TrimSpace(string(data)))
+		fmt.Fprintf(&b, fileHeader+"%s\n\n%s\n\n", filepath.ToSlash(rel), strings.TrimSpace(string(data)))
 		if b.Len() > MaxContextBytes {
 			return "", nil, fmt.Errorf("context is over %d KB; pass fewer or smaller files", MaxContextBytes>>10)
 		}
 	}
 	return strings.TrimSpace(b.String()), files, nil
+}
+
+const fileHeader = "### file: "
+
+// Sources lists the context files named in a LoadContext text, as written in
+// their "### file:" headers.
+func Sources(context string) []string {
+	var files []string
+	for _, l := range strings.Split(context, "\n") {
+		if name, ok := strings.CutPrefix(l, fileHeader); ok && strings.TrimSpace(name) != "" {
+			files = append(files, strings.TrimSpace(name))
+		}
+	}
+	return files
+}
+
+// Keyterm limits of ElevenLabs speech-to-text.
+const (
+	MaxKeyterms   = 100
+	maxKeytermLen = 50
+)
+
+// Keyterms collects the names and jargon listed on "keyterms:" lines of the
+// context (in front matter or in the text), comma-separated, so live
+// speech-to-text spells them as the context does. Brackets and quotes of a
+// YAML list are accepted.
+func Keyterms(context string) []string {
+	var terms []string
+	for _, l := range strings.Split(context, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(l), ":")
+		if !ok || !strings.EqualFold(strings.Trim(key, " *_-"), "keyterms") {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(strings.TrimLeft(value, "*_")), "[]")
+		terms = MergeKeyterms(terms, strings.Split(value, ","))
+	}
+	return terms
+}
+
+// MergeKeyterms appends extra terms to terms, trimmed, without duplicates
+// (ignoring case), skipping terms too long for ElevenLabs and stopping at its
+// limit.
+func MergeKeyterms(terms []string, extra []string) []string {
+	for _, t := range extra {
+		t = strings.Trim(strings.TrimSpace(t), `"'`)
+		if t == "" || len([]rune(t)) > maxKeytermLen || len(terms) == MaxKeyterms || containsExact(terms, t) {
+			continue
+		}
+		terms = append(terms, t)
+	}
+	return terms
 }

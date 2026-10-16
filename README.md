@@ -335,14 +335,18 @@ goscribe assist -source system -language fr                   # only the others,
 
 ```
   00:12:09 others what about the migration rollback?
-❓ 00:12:15 Ask: Who owns the rollback if the migration fails? — agenda.md requires a named owner
+❓ 00:12:15 Ask: Who owns the rollback if the migration fails? — a named owner is required · agenda.md
 ⚠️ 00:12:15 Risk: Monday falls inside the database freeze (20th–25th). — agenda.md
 ✅ 00:13:40 Decision: Ship behind a feature flag
+‼ 📌 00:58:02 Missed: Hiring plan for Q3 is still on the agenda. — agenda.md
 ● ASSIST 00:13:52  others ▸ "so the next step would be…"  · thinking 4s (claude)
 ```
 
-- Suggestions are `❓ Ask`, `💬 Answer` (from your context), `📌 Missed` and `⚠️ Risk`, at most 3 per update, never repeated. Nothing is said or posted in the meeting.
-- The notes file (`assist-<date>_<time>.md` by default) is rewritten after every update: summary so far, decisions, open questions and every suggestion. Ctrl+C writes the final summary and action items into it; a second Ctrl+C quits at once.
+- Suggestions are `❓ Ask`, `💬 Answer`, `📌 Missed` and `⚠️ Risk`, at most 2 per update, never repeated; `‼` marks one whose moment will soon pass. An answer always names the context file it comes from: one that doesn't is dropped. Nothing is said or posted in the meeting.
+- Agenda tracking: the model keeps the agenda items and goals of your context that the meeting has not discussed yet. When the meeting wraps up ("we're out of time", "one last thing"), it raises the important ones as `‼ 📌 Missed`.
+- Names: `others` can be several people. When the talk makes clear who speaks (people address each other, or a name fits the attendees in your context), the summary, decisions and action items use the name.
+- Keyterms: add a `keyterms: Acme, Globex, Marie Curie` line to a context file (in the text or the front matter) and those names are favored by the live speech-to-text, on top of `-keyterms` and `elevenlabs_keyterms`. The model also spells sound-alikes as the context does.
+- The notes file (`assist-<date>_<time>.md` by default) is rewritten after every update: summary so far, agenda items not covered yet, decisions, open questions and every suggestion. Its header gives the wall-clock start, to match suggestion times with a recording started at another moment. Ctrl+C writes the final summary and action items into it; a second Ctrl+C quits at once. These notes are a live draft: a summary made from the full recording (`goscribe` with a summary action) is more reliable.
 - Updates run at most every 20 s with `openai`/`gemini`, 30 s with `claude`/`codex` (`-interval` to change). One update at a time; a failed one is retried later with what it missed.
 - It captures the audio itself, so run it in a second terminal next to `goscribe record`, or alone. Same device flags and `record_*` config defaults as `record` (`-source`, `-mic`, `-system`, `-list-sources`).
 - Needs an ElevenLabs API key (`elevenlabs_api_key` or `$ELEVENLABS_API_KEY`). Live transcription is billed per stream, so two with `-source both`. The context is resent with every update: keep it small (a warning shows above 50 KB, 200 KB is the limit).
