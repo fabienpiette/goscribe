@@ -353,6 +353,34 @@ goscribe assist -source system -language fr                   # only the others,
 - The transcript is treated as untrusted data: the model is told never to follow instructions spoken in the meeting, and `claude`/`codex` run with no tools.
 - Use headphones: with speakers, the mic also hears the others and their words are labelled `me`.
 
+#### Librarian
+
+With `-librarian`, the model can look things up in your own sources while the meeting runs (a past decision, a ticket, a document, someone's earlier work). Each lookup is a short, read-only Claude Code session that gets only a search question, never the transcript. The answer shows in the feed (`🔎 Looking up: …`, then `📚 Librarian: … — titles`), feeds the next updates and is listed under `## Research` in the notes.
+
+```yaml
+librarian:
+  allowed_tools:                 # required; the only tools the librarian may use
+    - Bash(gh search:*)
+    - Bash(gh pr view:*)
+    - mcp__linear__list_issues
+    - mcp__linear__get_issue
+  instructions: "Acme tickets are PROJ-<n> in Linear; code and PRs are in GitHub (acme/*)."
+  mcp_config: ~/.goscribe/librarian-mcp.json   # optional, see below
+  timeout: 3m                    # per lookup (default)
+  max_lookups: 8                 # per meeting (default)
+  model: ""                      # optional Claude model for lookups
+```
+
+```bash
+goscribe assist -librarian -context agenda.md -provider claude
+```
+
+- The header ends with `librarian: claude, N tool(s)`. Without `librarian.allowed_tools`, `-librarian` is a usage error: it is off by default.
+- Read-only only. goscribe refuses an `allowed_tools` entry and does not start when it finds one of these: bare or wildcard `Bash` (`Bash`, `Bash(*)`), shell, `env`, `xargs`, `curl`, `wget` or `gh api` prefixes, `WebFetch` and `WebSearch`, any entry with a write verb (send, post, create, update, delete, save, write, edit, comment, merge, share, trash, upload, react, schedule), MCP tools whose name has no read verb (`get`, `list`, `search`, `read`, `view`, `fetch`, `query`, `find`, `retrieve`, `lookup`) and server-wide or wildcard MCP entries such as `mcp__linear` or `mcp__linear__*`. `gh` rules must be `search`, `view`, `list`, `status`, `diff` or `checks`; `git` rules must be `log`, `show`, `diff`, `status`, `blame`, `grep` or `ls-files`. This check is a heuristic, not a proof: only list tools you know are read-only.
+- MCP servers: the librarian never loads your Claude Code settings, hooks, plugins or permission rules, so MCP servers that come from them are not available to it. To use MCP tools, list those servers in a JSON file (Claude Code `--mcp-config` format) and set `mcp_config` to its path; only those servers are loaded. Check which tools answer with a short test meeting.
+- Data flow: the librarian's answer (with its source titles) is sent to the `-provider` model in the next updates. With `openai` or `gemini`, snippets from your sources therefore go to that API. Its text is marked as untrusted data in the prompts.
+- Cost and latency: each lookup is a Claude Code session of about 30 to 120 s, on your Claude plan. One runs at a time, the newest waiting one is kept (and dropped after 2 minutes), similar questions are skipped, and at most `max_lookups` run per meeting; a failed lookup still counts.
+
 ## Known Issues
 
 - **`goscribe assist` reacts with a delay** — about 2 s for the transcript, then up to the update interval plus the model's answer time (30–70 s with `claude`/`codex`), so it is better at "missed" and "risk" than at answering live.

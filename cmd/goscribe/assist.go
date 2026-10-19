@@ -48,6 +48,11 @@ Good to know:
     the live speech-to-text, like -keyterms.
   - Needs an ElevenLabs API key (config elevenlabs_api_key or $ELEVENLABS_API_KEY).
     Live transcription is billed per stream: two with -source both.
+  - -librarian lets the model look things up in your own sources (past
+    decisions, tickets, documents) through a read-only Claude Code session.
+    It needs librarian.allowed_tools in the config; only list read-only tools.
+    Each lookup takes 30-120 s on your Claude plan, and its answer goes to the
+    -provider model.
   - Use headphones. With speakers, the mic also hears the others, and their
     words are labelled "me".
 
@@ -79,6 +84,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	keyterms := fs.String("keyterms", "", "Comma-separated names/jargon to favor (default: config elevenlabs_keyterms)")
 	elevenLabsKey := fs.String("elevenlabs-key", "", "ElevenLabs API key (default: config, then $ELEVENLABS_API_KEY)")
 	interval := fs.Duration("interval", 0, "Shortest time between two updates (default: 20s, 30s with claude/codex)")
+	librarian := fs.Bool("librarian", false, "Let the model look things up in your sources (librarian in the config; Claude Code)")
 	configFile := fs.String("config", "", "Config file (default: ~/.goscribe/config.yml)")
 	listSources := fs.Bool("list-sources", false, "List inputs and computer sound sources, then exit")
 	fs.Usage = func() {
@@ -114,6 +120,15 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := checkThinker(prov, cfg); err != nil {
 		return usageErr("%v", err)
+	}
+	lib := cfg.Librarian.WithDefaults()
+	if *librarian {
+		if err := lib.Validate(); err != nil {
+			return usageErr("librarian: %v", err)
+		}
+		if _, err := exec.LookPath(harness.ClaudeBinary); err != nil {
+			return usageErr("librarian: needs the %s CLI on PATH", harness.ClaudeBinary)
+		}
 	}
 	elKey := pick(*elevenLabsKey, cfg.ElevenLabsAPIKey, os.Getenv("ELEVENLABS_API_KEY"))
 	if elKey == "" {
@@ -184,6 +199,10 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		header += fmt.Sprintf(" · %d keyterm(s) from the context", len(fromContext))
 	}
 
+	if *librarian {
+		header += fmt.Sprintf(" · librarian: %s, %d tool(s)", lib.Provider, len(lib.AllowedTools))
+	}
+
 	ctx, force, stopSignals := watchSignals()
 	defer stopSignals()
 
@@ -193,7 +212,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 
 	events := streamSides(ctx, force, sides, opts)
-	err = assistant.Run(assistant.Config{
+	acfg := assistant.Config{
 		Context:     background,
 		Notes:       notes,
 		Header:      header,
@@ -203,7 +222,14 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Out:         stdout,
 		Interactive: isTerminal(stdout),
 		Force:       force,
-	}, events)
+	}
+	if *librarian {
+		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig}
+		acfg.Research = func(prompt string) (string, error) { return harness.Research(prompt, ro) }
+		acfg.LibrarianInstructions = lib.Instructions
+		acfg.MaxLookups = lib.MaxLookups
+	}
+	err = assistant.Run(acfg, events)
 	stopSignals()
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)

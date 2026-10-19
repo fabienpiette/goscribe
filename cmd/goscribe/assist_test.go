@@ -18,8 +18,10 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"goscribe/internal/assistant"
+	"goscribe/internal/harness"
 	"goscribe/internal/realtime"
 	"goscribe/internal/recorder"
+	"goscribe/pkg/config"
 )
 
 func assist(t *testing.T, args ...string) (string, string, int) {
@@ -209,4 +211,136 @@ func mustWrite(t *testing.T, path string, data []byte, perm os.FileMode) {
 	if err := os.WriteFile(path, data, perm); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestAssistLibrarianUsageErrors(t *testing.T) {
+	fakeAudio(t)
+	fakeClaude(t, `{"summary":"s"}`)
+	dir := t.TempDir()
+	none := configWith(t, dir, "none.yml", "")
+	web := configWith(t, dir, "web.yml", "librarian:\n  allowed_tools: [WebFetch]\n")
+	for name, tc := range map[string]struct{ cfg, want string }{
+		"no config": {none, "librarian.allowed_tools"},
+		"web fetch": {web, "WebFetch"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, errOut, code := assist(t, "-provider", "claude", "-librarian", "-elevenlabs-key", "k", "-config", tc.cfg,
+				"-o", filepath.Join(dir, name+".md"))
+			if code != 2 || !strings.Contains(errOut, tc.want) {
+				t.Errorf("code = %d, stderr = %q; want 2 and %q", code, errOut, tc.want)
+			}
+		})
+	}
+}
+
+// The librarian runs as a second claude call with its own tool list; the
+// answer shows in the feed and the notes.
+func TestAssistLibrarianEndToEnd(t *testing.T) {
+	fakeAudio(t)
+	guardSignals(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELEVENLABS_API_KEY", "el-key")
+
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	mustWrite(t, ffmpeg, []byte("#!/bin/sh\nhead -c 12800 /dev/zero\nsleep 30\n"), 0755)
+	recorder.Binary = ffmpeg
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.CloseNow() }()
+		ctx := r.Context()
+		var msg map[string]any
+		if wsjson.Read(ctx, c, &msg) != nil {
+			return
+		}
+		_ = wsjson.Write(ctx, c, map[string]any{"message_type": "committed_transcript", "text": "did PROJ-123 ship already or is it still in review for the Acme release"})
+		for wsjson.Read(ctx, c, &msg) == nil {
+		}
+	}))
+	defer srv.Close()
+	origURL, origFlush := realtime.BaseURL, realtime.FlushTimeout
+	realtime.BaseURL, realtime.FlushTimeout = "ws"+strings.TrimPrefix(srv.URL, "http"), 200*time.Millisecond
+	defer func() { realtime.BaseURL, realtime.FlushTimeout = origURL, origFlush }()
+	origTick := assistant.Tick
+	assistant.Tick = 10 * time.Millisecond
+	defer func() { assistant.Tick = origTick }()
+
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "librarian-args")
+	t.Setenv("FAKE_ARGS", argsFile)
+	bin := filepath.Join(dir, "fake-claude")
+	mustWrite(t, bin, []byte(`#!/bin/sh
+cat > /dev/null
+case "$*" in
+*--allowedTools*)
+  echo "$*" > "$FAKE_ARGS"
+  echo '{"found":true,"answer":"PROJ-123 shipped on Monday","sources":[{"title":"PROJ-123","link":"https://example.com/PROJ-123"}]}'
+  ;;
+*)
+  echo '{"summary":"Checking PROJ-123.","decisions":[],"open_questions":[],"action_items":[],"suggestions":[],"lookups":[{"query":"Did PROJ-123 ship?","why":"status unknown"}]}'
+  ;;
+esac
+`), 0755)
+	orig := harness.ClaudeBinary
+	harness.ClaudeBinary = bin
+	defer func() { harness.ClaudeBinary = orig }()
+
+	cfgFile := configWith(t, dir, "config.yml", "librarian:\n  allowed_tools: [\"Bash(gh pr view:*)\", mcp__linear__get_issue]\n  timeout: 20s\n")
+	notes := filepath.Join(dir, "notes.md")
+
+	out := &syncBuf{}
+	done := make(chan int, 1)
+	go func() {
+		done <- runAssist([]string{"-provider", "claude", "-librarian", "-config", cfgFile, "-o", notes, "-interval", "20ms"}, out, &syncBuf{})
+	}()
+	deadline := time.Now().Add(8 * time.Second)
+	for !strings.Contains(out.String(), "PROJ-123 shipped on Monday") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no librarian answer in time; output:\n%s", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit = %d\n%s", code, out.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("assist did not stop:\n%s", out.String())
+	}
+
+	feed := out.String()
+	for _, want := range []string{"librarian: claude, 2 tool(s)", "📚 ", "Librarian: PROJ-123 shipped on Monday"} {
+		if !strings.Contains(feed, want) {
+			t.Errorf("feed missing %q:\n%s", want, feed)
+		}
+	}
+	if b, _ := os.ReadFile(notes); !strings.Contains(string(b), "## Research") {
+		t.Errorf("notes missing ## Research:\n%s", b)
+	}
+	args, _ := os.ReadFile(argsFile)
+	if !strings.Contains(string(args), "--disallowedTools WebFetch,WebSearch") {
+		t.Errorf("librarian args = %q", args)
+	}
+}
+
+// configWith writes the default config plus extra YAML and returns its path.
+func configWith(t *testing.T, dir, name, extra string) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	if err := config.CreateDefault(); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".goscribe", "config.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, name)
+	mustWrite(t, p, append(b, []byte("\n"+extra)...), 0644)
+	return p
 }
