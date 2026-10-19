@@ -21,7 +21,8 @@ const draftNote = "_Live draft from realtime speech-to-text: a summary made from
 
 // Render writes the notes file: the final summary and action items first when
 // the meeting is over, then the live summary, agenda items not covered,
-// decisions, open questions and every suggestion made.
+// decisions, open questions, the librarian's research and every suggestion
+// made.
 func Render(m Memory, header string, final bool, updated time.Duration) string {
 	var b strings.Builder
 	b.WriteString("# Meeting notes\n\n")
@@ -37,6 +38,13 @@ func Render(m Memory, header string, final bool, updated time.Duration) string {
 	listSection(&b, notCoveredTitle, m.NotCovered)
 	listSection(&b, "Decisions", m.Decisions)
 	listSection(&b, "Open questions", m.OpenQuestions)
+	if len(m.Research) > 0 {
+		b.WriteString("## Research\n\n")
+		for _, f := range m.Research {
+			b.WriteString(researchLine(f) + "\n")
+		}
+		b.WriteString("\n")
+	}
 	if len(m.Suggestions) > 0 {
 		b.WriteString("## Suggestions\n\n")
 		for _, s := range m.Suggestions {
@@ -72,6 +80,60 @@ func suggestionNote(s Suggestion) string {
 	return s.Why + " · " + s.Source
 }
 
+// researchLine is "- [hh:mm:ss] query → answer (sources)". Everything in it
+// comes from speech or the librarian, so it is rendered inert: Markdown
+// characters are escaped and links are code spans, never live links or images
+// (an image would load its URL when the notes are viewed).
+func researchLine(f Finding) string {
+	line := fmt.Sprintf("- [%s] %s → ", clock(f.At), escapeMarkdown(f.Query))
+	if !f.Found {
+		return line + "nothing found"
+	}
+	line += escapeMarkdown(f.Answer)
+	if len(f.Sources) == 0 {
+		return line
+	}
+	var parts []string
+	for _, src := range f.Sources {
+		switch {
+		case src.Link == "":
+			parts = append(parts, escapeMarkdown(src.Title))
+		case src.Title == "":
+			parts = append(parts, codeSpan(src.Link))
+		default:
+			parts = append(parts, escapeMarkdown(src.Title)+" ("+codeSpan(src.Link)+")")
+		}
+	}
+	return line + " (" + strings.Join(parts, ", ") + ")"
+}
+
+// markdownActive are the characters escaped in untrusted notes text: links,
+// images, HTML and autolinks, code spans and emphasis.
+var markdownActive = strings.NewReplacer(
+	`\`, `\\`, "!", `\!`, "[", `\[`, "]", `\]`, "<", `\<`, ">", `\>`,
+	"`", "\\`", "*", `\*`, "_", `\_`,
+)
+
+func escapeMarkdown(s string) string { return markdownActive.Replace(s) }
+
+// codeSpan wraps s in a backtick fence longer than any backtick run inside it.
+func codeSpan(s string) string {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	fence := strings.Repeat("`", longest+1)
+	if longest > 0 {
+		return fence + " " + s + " " + fence
+	}
+	return fence + s + fence
+}
+
 func section(b *strings.Builder, title, body string) {
 	if body == "" {
 		body = "_Nothing yet._"
@@ -104,14 +166,16 @@ func WriteNotes(path, content string) error {
 }
 
 // Clean removes control characters (including the ESC of terminal escape
-// sequences) from text that came from speech-to-text or a model, before it is
-// printed: a spoken or injected sequence must not drive the user's terminal.
+// sequences) and format characters (bidi overrides, zero-width characters)
+// from text that came from speech-to-text, a model or the librarian, before it
+// is printed: a spoken or injected sequence must not drive the user's terminal
+// or make a line read as something else.
 func Clean(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
 			return ' '
 		}
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -48,6 +49,11 @@ Good to know:
     the live speech-to-text, like -keyterms.
   - Needs an ElevenLabs API key (config elevenlabs_api_key or $ELEVENLABS_API_KEY).
     Live transcription is billed per stream: two with -source both.
+  - -librarian lets the model look things up in your own sources (past
+    decisions, tickets, documents) through a read-only Claude Code session.
+    It needs librarian.allowed_tools in the config; only list read-only tools.
+    Each lookup takes 30-120 s on your Claude plan, and its answer goes to the
+    -provider model.
   - Use headphones. With speakers, the mic also hears the others, and their
     words are labelled "me".
 
@@ -79,6 +85,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	keyterms := fs.String("keyterms", "", "Comma-separated names/jargon to favor (default: config elevenlabs_keyterms)")
 	elevenLabsKey := fs.String("elevenlabs-key", "", "ElevenLabs API key (default: config, then $ELEVENLABS_API_KEY)")
 	interval := fs.Duration("interval", 0, "Shortest time between two updates (default: 20s, 30s with claude/codex)")
+	librarian := fs.Bool("librarian", false, "Let the model look things up in your sources (librarian in the config; Claude Code)")
 	configFile := fs.String("config", "", "Config file (default: ~/.goscribe/config.yml)")
 	listSources := fs.Bool("list-sources", false, "List inputs and computer sound sources, then exit")
 	fs.Usage = func() {
@@ -114,6 +121,31 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := checkThinker(prov, cfg); err != nil {
 		return usageErr("%v", err)
+	}
+	lib := cfg.Librarian.WithDefaults()
+	if *librarian {
+		if err := lib.Validate(); err != nil {
+			return usageErr("librarian: %v", err)
+		}
+		if lib.MCPConfig != "" {
+			p, err := resolveMCPConfig(lib.MCPConfig)
+			if err != nil {
+				return usageErr("librarian: %v", err)
+			}
+			lib.MCPConfig = p
+		}
+		if lib.UseClaudeSettings {
+			sp, err := claudeSettingsPath()
+			if err == nil {
+				err = checkClaudeSettings(sp)
+			}
+			if err != nil {
+				return usageErr("librarian: %v", err)
+			}
+		}
+		if _, err := exec.LookPath(harness.ClaudeBinary); err != nil {
+			return usageErr("librarian: needs the %s CLI on PATH", harness.ClaudeBinary)
+		}
 	}
 	elKey := pick(*elevenLabsKey, cfg.ElevenLabsAPIKey, os.Getenv("ELEVENLABS_API_KEY"))
 	if elKey == "" {
@@ -184,6 +216,10 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		header += fmt.Sprintf(" · %d keyterm(s) from the context", len(fromContext))
 	}
 
+	if *librarian {
+		header += fmt.Sprintf(" · librarian: %s, %d tool(s)", lib.Provider, len(lib.AllowedTools))
+	}
+
 	ctx, force, stopSignals := watchSignals()
 	defer stopSignals()
 
@@ -193,7 +229,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 
 	events := streamSides(ctx, force, sides, opts)
-	err = assistant.Run(assistant.Config{
+	acfg := assistant.Config{
 		Context:     background,
 		Notes:       notes,
 		Header:      header,
@@ -203,13 +239,78 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Out:         stdout,
 		Interactive: isTerminal(stdout),
 		Force:       force,
-	}, events)
+	}
+	if *librarian {
+		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}
+		acfg.Research = func(prompt string) (string, error) { return harness.Research(prompt, ro) }
+		acfg.LibrarianInstructions = lib.Instructions
+		acfg.MaxLookups = lib.MaxLookups
+	}
+	err = assistant.Run(acfg, events)
 	stopSignals()
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// resolveMCPConfig expands a leading ~ and makes path absolute: the librarian
+// runs from a temp dir, where a relative path would point nowhere. The file
+// must exist.
+func resolveMCPConfig(path string) (string, error) {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("mcp_config: cannot expand ~: %v", err)
+		}
+		path = filepath.Join(home, path[1:])
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("mcp_config: %v", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return "", fmt.Errorf("mcp_config: %v", err)
+	}
+	return abs, nil
+}
+
+// claudeSettingsPath is the user's Claude settings file (a var for tests).
+var claudeSettingsPath = func() (string, error) {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return filepath.Join(dir, "settings.json"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("use_claude_settings: cannot locate the Claude settings file: %v", err)
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
+// checkClaudeSettings refuses user settings with permissions.allow rules: with
+// use_claude_settings they would widen the librarian's tool list. A missing
+// file is fine; an unreadable or invalid one is an error.
+func checkClaudeSettings(path string) error {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("use_claude_settings: cannot read %s: %v", path, err)
+	}
+	var st struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return fmt.Errorf("use_claude_settings: %s is not valid JSON: %v", path, err)
+	}
+	if len(st.Permissions.Allow) > 0 {
+		return fmt.Errorf("use_claude_settings: %s has %d permissions.allow rule(s), which would widen the librarian's tool list; remove them or turn use_claude_settings off", path, len(st.Permissions.Allow))
+	}
+	return nil
 }
 
 // loadAssistConfig reads the config file if there is one; assist works

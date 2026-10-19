@@ -33,6 +33,11 @@ type Config struct {
 	Out         io.Writer
 	Interactive bool            // Out is a terminal: status line and dim lines
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
+	// Research sends one prompt to the librarian and returns its answer; nil
+	// turns the librarian off.
+	Research              func(prompt string) (string, error)
+	LibrarianInstructions string // the user's sources and how to search them
+	MaxLookups            int    // lookups per meeting; 0 or less means defaultMaxLookups
 }
 
 // Overridable for tests.
@@ -40,11 +45,15 @@ var (
 	Tick        = time.Second     // status redraw and scheduling check
 	MaxBackoff  = 5 * time.Minute // longest wait between updates after failures
 	MinWatchdog = 3 * time.Minute // shortest wait before giving up on a call
+	// LookupMaxWait is how long a lookup may wait for the one in progress
+	// before it is dropped.
+	LookupMaxWait = 2 * time.Minute
 )
 
 const (
-	minNewWords   = 12 // words worth an update before 2×Interval has passed
-	minFinalWords = 30 // below this, there is nothing to summarize
+	defaultMaxLookups = 8  // Config.MaxLookups when unset
+	minNewWords       = 12 // words worth an update before 2×Interval has passed
+	minFinalWords     = 30 // below this, there is nothing to summarize
 )
 
 // Run follows the meeting until events is closed: it shows the transcript and
@@ -53,7 +62,8 @@ const (
 // Force is closed first. It returns an error only if the notes can't be
 // written at the end.
 func Run(c Config, events <-chan Event) error {
-	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16), partials: map[string]string{}}
+	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16),
+		lookupResults: make(chan lookupResult, 1), partials: map[string]string{}}
 	// Suggestion times are offsets from this start; with the wall clock, they
 	// can be matched against a recording started at another moment.
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
@@ -71,9 +81,12 @@ func Run(c Config, events <-chan Event) error {
 			s.maybeStart(time.Now())
 		case r := <-s.results:
 			s.finish(r)
+		case r := <-s.lookupResults:
+			s.finishLookup(r)
 		case now := <-ticker.C:
 			s.watchdog(now)
 			s.maybeStart(now)
+			s.maybeLookup(now)
 			s.status(now)
 		}
 	}
@@ -83,6 +96,12 @@ func Run(c Config, events <-chan Event) error {
 type result struct {
 	gen    int
 	upto   int // lines covered by this update
+	answer string
+	err    error
+}
+
+type lookupResult struct {
+	lookup Lookup
 	answer string
 	err    error
 }
@@ -106,6 +125,13 @@ type state struct {
 	failures   int
 	gen        int // abandoned calls carry an older gen and are ignored
 	results    chan result
+
+	looking       bool    // a librarian lookup is in flight
+	pending       *Lookup // the newest lookup waiting for it
+	pendingSince  time.Time
+	limitShown    bool // the lookup limit line was printed
+	ending        bool // the meeting is over: no new lookups
+	lookupResults chan lookupResult
 
 	notesErr bool
 }
@@ -152,7 +178,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto])
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil)
 	s.call(now, upto, instructions, transcript)
 }
 
@@ -203,6 +229,103 @@ func (s *state) finish(r result) {
 		s.print(fmt.Sprintf("✅ %s Decision: %s", clock(at), Clean(d)))
 	}
 	_ = s.writeNotes(false) // a failure is shown in the feed
+	s.queueLookup(parsed, at)
+}
+
+// queueLookup takes the lookup a reply asks, if any: it starts at once when
+// the librarian is idle, else it waits, replacing an older waiting one. A
+// replaced lookup never ran: it leaves Asked, so it frees its slot under the
+// limit and may be asked again.
+func (s *state) queueLookup(r Reply, at time.Duration) {
+	if s.c.Research == nil || s.ending || len(r.Lookups) == 0 {
+		return
+	}
+	limit := s.c.MaxLookups
+	if limit <= 0 {
+		limit = defaultMaxLookups
+	}
+	waiting := s.pending
+	if waiting != nil {
+		s.mem.forgetAsked(waiting.Query)
+	}
+	keepWaiting := func() {
+		if waiting != nil {
+			s.mem.Asked = append(s.mem.Asked, waiting.Query)
+		}
+	}
+	if len(s.mem.Asked) >= limit {
+		keepWaiting()
+		if !s.limitShown {
+			s.limitShown = true
+			s.print(s.dim(fmt.Sprintf("📚 lookup limit reached (%d)", limit)))
+		}
+		return
+	}
+	l, ok := s.mem.TakeLookup(r, at, limit)
+	if !ok {
+		keepWaiting()
+		return
+	}
+	s.pending, s.pendingSince = &l, time.Now()
+	s.maybeLookup(time.Now())
+}
+
+// maybeLookup drops a waiting lookup once it is too old (silently, and out of
+// Asked: it never ran), and starts it when the librarian is idle.
+func (s *state) maybeLookup(now time.Time) {
+	if s.pending == nil || s.looking {
+		return
+	}
+	l := *s.pending
+	s.pending = nil
+	if now.Sub(s.pendingSince) > LookupMaxWait {
+		s.mem.forgetAsked(l.Query)
+		return
+	}
+	s.looking = true
+	s.print(s.dim(fmt.Sprintf("🔎 %s Looking up: %s", clock(s.elapsed(now)), l.Query)))
+	prompt := LibrarianPrompt(s.c.LibrarianInstructions, l, s.mem, now)
+	research, results := s.c.Research, s.lookupResults
+	go func() {
+		answer, err := research(prompt)
+		select {
+		case results <- lookupResult{lookup: l, answer: answer, err: err}:
+		default: // only after the end, when nobody reads results
+		}
+	}()
+}
+
+// finishLookup merges a librarian answer into the memory, the feed and the
+// notes, then starts the waiting lookup, if any.
+func (s *state) finishLookup(r lookupResult) {
+	s.looking = false
+	defer s.maybeLookup(time.Now())
+	f, err := Finding{}, r.err
+	if err == nil {
+		f, err = ParseFinding(r.answer)
+	}
+	if err != nil {
+		s.print("⚠ librarian failed: " + oneLine(err.Error(), 160))
+		return
+	}
+	f.Query, f.At = r.lookup.Query, s.elapsed(time.Now())
+	s.mem.AddFinding(f)
+	if f.Found {
+		line := fmt.Sprintf("📚 %s Librarian: %s", clock(f.At), f.Answer)
+		var titles []string
+		for _, src := range f.Sources {
+			if src.Title != "" {
+				titles = append(titles, src.Title)
+			}
+		}
+		if len(titles) > 0 {
+			line += " — " + strings.Join(titles, ", ")
+		}
+		s.print(line)
+	} else {
+		s.print(s.dim("📚 nothing found for " + f.Query))
+	}
+	_ = s.writeNotes(false) // a failure is shown in the feed
 }
 
 func (s *state) watchdog(now time.Time) {
@@ -216,8 +339,10 @@ func (s *state) watchdog(now time.Time) {
 	s.print(fmt.Sprintf("⚠ %s did not answer in %s; skipping this update", s.c.Engine, limit.Round(time.Second)))
 }
 
-// end waits for the update in progress, then writes the final notes.
+// end waits for the update in progress, then writes the final notes. It
+// ignores lookups: one in flight is not waited for, and none starts.
 func (s *state) end() error {
+	s.ending = true
 	s.clearStatus()
 	if s.thinking {
 		s.print(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))

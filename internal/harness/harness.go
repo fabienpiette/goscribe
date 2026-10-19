@@ -42,17 +42,6 @@ func IsHarness(name string) bool {
 // Run sends prompt on stdin to the named harness and returns its final answer.
 // It runs from an empty temp dir so no project instructions or files are picked up.
 func Run(name, prompt string) (string, error) {
-	workDir, err := os.MkdirTemp("", "goscribe-harness-")
-	if err != nil {
-		return "", fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
-
-	var cmd *exec.Cmd
-	outFile := ""
 	switch name {
 	case "claude":
 		bin, err := exec.LookPath(ClaudeBinary)
@@ -60,39 +49,58 @@ func Run(name, prompt string) (string, error) {
 			return "", fmt.Errorf("%s not found on PATH (install Claude Code)", ClaudeBinary)
 		}
 		// No tools, no MCP servers, no user/project settings (hooks, plugins), no saved session.
-		cmd = exec.CommandContext(ctx, bin, "-p",
+		args := []string{"-p",
 			"--output-format", "text",
 			"--tools", "",
 			"--strict-mcp-config",
 			"--no-session-persistence",
 			"--setting-sources", "",
 			"--disable-slash-commands",
-		)
+		}
+		return runCLI(name, bin, prompt, Timeout, "", func(string) []string { return args })
 	case "codex":
 		bin, err := exec.LookPath(CodexBinary)
 		if err != nil {
 			return "", fmt.Errorf("%s not found on PATH (install Codex CLI)", CodexBinary)
 		}
-		outFile = filepath.Join(workDir, "answer.txt")
 		// No tools, no user config (MCP servers, profiles), no web search, no saved session.
-		args := []string{"exec",
-			"--skip-git-repo-check",
-			"--sandbox", "read-only",
-			"--ephemeral",
-			"--ignore-user-config",
-			"-c", `web_search="disabled"`,
-			"--color", "never",
-			"--output-last-message", outFile,
-		}
-		for _, f := range codexDisabledFeatures {
-			args = append(args, "--disable", f)
-		}
-		cmd = exec.CommandContext(ctx, bin, append(args, "-")...)
+		return runCLI(name, bin, prompt, Timeout, "answer.txt", func(workDir string) []string {
+			args := []string{"exec",
+				"--skip-git-repo-check",
+				"--sandbox", "read-only",
+				"--ephemeral",
+				"--ignore-user-config",
+				"-c", `web_search="disabled"`,
+				"--color", "never",
+				"--output-last-message", filepath.Join(workDir, "answer.txt"),
+			}
+			for _, f := range codexDisabledFeatures {
+				args = append(args, "--disable", f)
+			}
+			return append(args, "-")
+		})
 	default:
 		return "", fmt.Errorf("unknown harness '%s' (valid: claude, codex)", name)
 	}
+}
 
+// runCLI runs bin with prompt on stdin from a fresh empty temp dir (removed
+// afterwards) and returns the trimmed answer: stdout, or the file outName in
+// the temp dir when outName is set. label names the caller in errors; with an
+// empty label the errors give only the cause, for a caller that adds its own.
+func runCLI(label, bin, prompt string, timeout time.Duration, outName string, args func(workDir string) []string) (string, error) {
+	workDir, err := os.MkdirTemp("", "goscribe-harness-")
+	if err != nil {
+		return "", fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, args(workDir)...)
 	cmd.Dir = workDir
+	cmd.WaitDelay = time.Second // do not wait on grandchildren holding the pipes
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -100,29 +108,40 @@ func Run(name, prompt string) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("%s timed out after %s", name, Timeout)
+			return "", fmt.Errorf("%stimed out after %s", subject(label), timeout)
 		}
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
 			detail = strings.TrimSpace(stdout.String())
 		}
-		return "", fmt.Errorf("%s failed: %v: %s", name, err, util.TruncateString(detail, 500))
+		if label == "" {
+			return "", fmt.Errorf("%v: %s", err, util.TruncateString(detail, 500))
+		}
+		return "", fmt.Errorf("%s failed: %v: %s", label, err, util.TruncateString(detail, 500))
 	}
 
 	answer := stdout.String()
-	if outFile != "" {
-		data, err := os.ReadFile(outFile)
+	if outName != "" {
+		data, err := os.ReadFile(filepath.Join(workDir, outName))
 		if err != nil {
-			return "", fmt.Errorf("reading %s answer: %w", name, err)
+			return "", fmt.Errorf("reading the %sanswer: %w", subject(label), err)
 		}
 		answer = string(data)
 	}
 
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
-		return "", fmt.Errorf("%s returned an empty answer", name)
+		return "", fmt.Errorf("%sreturned an empty answer", subject(label))
 	}
 	return answer, nil
+}
+
+// subject is label followed by a space, or "" for no label.
+func subject(label string) string {
+	if label == "" {
+		return ""
+	}
+	return label + " "
 }
 
 // Process applies a post-processing action to the whole transcript. Harness
