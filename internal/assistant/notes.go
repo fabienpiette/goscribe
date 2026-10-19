@@ -21,7 +21,8 @@ const draftNote = "_Live draft from realtime speech-to-text: a summary made from
 
 // Render writes the notes file: the final summary and action items first when
 // the meeting is over, then the live summary, agenda items not covered,
-// decisions, open questions and every suggestion made.
+// decisions, open questions, the librarian's research and every suggestion
+// made.
 func Render(m Memory, header string, final bool, updated time.Duration) string {
 	var b strings.Builder
 	b.WriteString("# Meeting notes\n\n")
@@ -37,6 +38,13 @@ func Render(m Memory, header string, final bool, updated time.Duration) string {
 	listSection(&b, notCoveredTitle, m.NotCovered)
 	listSection(&b, "Decisions", m.Decisions)
 	listSection(&b, "Open questions", m.OpenQuestions)
+	if len(m.Research) > 0 {
+		b.WriteString("## Research\n\n")
+		for _, f := range m.Research {
+			b.WriteString(researchLine(f) + "\n")
+		}
+		b.WriteString("\n")
+	}
 	if len(m.Suggestions) > 0 {
 		b.WriteString("## Suggestions\n\n")
 		for _, s := range m.Suggestions {
@@ -70,6 +78,31 @@ func suggestionNote(s Suggestion) string {
 		return s.Source
 	}
 	return s.Why + " · " + s.Source
+}
+
+// researchLine is "- [hh:mm:ss] query → answer (sources)", a source with a
+// link as a Markdown link.
+func researchLine(f Finding) string {
+	line := fmt.Sprintf("- [%s] %s → ", clock(f.At), f.Query)
+	if !f.Found {
+		return line + "nothing found"
+	}
+	line += f.Answer
+	var sources []string
+	for _, s := range f.Sources {
+		switch {
+		case s.Link == "":
+			sources = append(sources, s.Title)
+		case s.Title == "":
+			sources = append(sources, s.Link)
+		default:
+			sources = append(sources, "["+s.Title+"]("+s.Link+")")
+		}
+	}
+	if len(sources) > 0 {
+		line += " (" + strings.Join(sources, ", ") + ")"
+	}
+	return line
 }
 
 func section(b *strings.Builder, title, body string) {

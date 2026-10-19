@@ -51,7 +51,9 @@ type Memory struct {
 	OpenQuestions []string
 	NotCovered    []string // agenda items and goals from the context not discussed yet
 	Suggestions   []Suggestion
-	ActionItems   []string // only from the final call
+	ActionItems   []string  // only from the final call
+	Research      []Finding // the librarian's results, oldest first
+	Asked         []string  // every lookup query accepted, for dedup and the limit
 }
 
 // Reply is what the model returns. A nil list means "unchanged"; an empty
@@ -63,6 +65,7 @@ type Reply struct {
 	NotCovered    []string    `json:"not_covered"`
 	Suggestions   Suggestions `json:"suggestions"`
 	ActionItems   []string    `json:"action_items"`
+	Lookups       []Lookup    `json:"lookups"`
 }
 
 // Suggestions skips entries that aren't suggestion objects (models sometimes
@@ -103,15 +106,20 @@ const (
 // Parse extracts the JSON object from a model answer, ignoring any prose or
 // code fence around it.
 func Parse(answer string) (Reply, error) {
+	var r Reply
+	return r, parseJSON(answer, &r)
+}
+
+// parseJSON decodes the outermost JSON object of a model answer into v.
+func parseJSON(answer string, v any) error {
 	start, end := strings.Index(answer, "{"), strings.LastIndex(answer, "}")
 	if start < 0 || end <= start {
-		return Reply{}, fmt.Errorf("no JSON object in model answer: %q", truncate(answer, 200))
+		return fmt.Errorf("no JSON object in model answer: %q", truncate(answer, 200))
 	}
-	var r Reply
-	if err := json.Unmarshal([]byte(answer[start:end+1]), &r); err != nil {
-		return Reply{}, fmt.Errorf("parsing model answer: %w", err)
+	if err := json.Unmarshal([]byte(answer[start:end+1]), v); err != nil {
+		return fmt.Errorf("parsing model answer: %w", err)
 	}
-	return r, nil
+	return nil
 }
 
 // Apply merges a cycle's reply into the memory and returns what is new, for
@@ -144,7 +152,7 @@ func (m *Memory) Apply(r Reply, at time.Duration, sources []string) (newSuggesti
 		s.Type = strings.ToLower(strings.TrimSpace(s.Type))
 		s.Text = truncate(strings.TrimSpace(s.Text), maxItem)
 		s.Why = truncate(strings.TrimSpace(s.Why), maxItem)
-		s.Source = matchSource(s.Source, sources)
+		s.Source = m.matchSource(s.Source, sources)
 		if strings.EqualFold(strings.TrimSpace(s.Priority), High) {
 			s.Priority = High
 		} else {
@@ -184,8 +192,9 @@ func (m *Memory) ApplyFinal(r Reply) {
 }
 
 // matchSource returns the context file a model's "source" names, matched on
-// the path or the base name, ignoring case; "" when it names none.
-func matchSource(source string, files []string) string {
+// the path or the base name, ignoring case; or ResearchSource when it names
+// the librarian's research and there is some; "" when it names none.
+func (m *Memory) matchSource(source string, files []string) string {
 	src := strings.ToLower(strings.TrimSpace(source))
 	if src == "" {
 		return ""
@@ -195,6 +204,9 @@ func matchSource(source string, files []string) string {
 		if strings.Contains(src, lf) || strings.Contains(src, path.Base(lf)) {
 			return f
 		}
+	}
+	if src == ResearchSource && len(m.Research) > 0 {
+		return ResearchSource
 	}
 	return ""
 }
@@ -232,9 +244,15 @@ func containsSimilar(list []string, text string) bool {
 // similar compares the word sets of two texts (Jaccard index), ignoring case
 // and punctuation, so a rephrased suggestion still counts as a repeat.
 func similar(a, b string) bool {
+	return jaccard(a, b) >= similarSuggestion
+}
+
+// jaccard is the share of words two texts have in common: 0 when either has
+// none.
+func jaccard(a, b string) float64 {
 	wa, wb := words(a), words(b)
 	if len(wa) == 0 || len(wb) == 0 {
-		return false
+		return 0
 	}
 	inter := 0
 	for w := range wa {
@@ -243,7 +261,7 @@ func similar(a, b string) bool {
 		}
 	}
 	union := len(wa) + len(wb) - inter
-	return float64(inter)/float64(union) >= similarSuggestion
+	return float64(inter) / float64(union)
 }
 
 func words(s string) map[string]bool {
