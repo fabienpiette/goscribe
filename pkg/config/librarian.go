@@ -60,6 +60,14 @@ var readVerbs = map[string]bool{
 	"fetch": true, "query": true, "find": true, "retrieve": true, "lookup": true,
 }
 
+// Read-only gh words (2nd or 3rd word of the rule) and git subcommands.
+var readOnlyGh = map[string]bool{
+	"search": true, "view": true, "list": true, "status": true, "diff": true, "checks": true,
+}
+var readOnlyGit = map[string]bool{
+	"log": true, "show": true, "diff": true, "status": true, "blame": true, "grep": true, "ls-files": true,
+}
+
 // Bash prefixes that can run arbitrary or networked commands.
 var bannedBashCommands = map[string]bool{
 	"sh": true, "bash": true, "env": true, "xargs": true, "curl": true, "wget": true,
@@ -94,6 +102,7 @@ func (l Librarian) Validate() error {
 
 // unsafeTool returns why a tool rule is not accepted, or "" if it passes.
 func unsafeTool(rule string) string {
+	rule = strings.TrimSpace(rule)
 	lower := strings.ToLower(rule)
 	for _, v := range writeVerbs {
 		if strings.Contains(lower, v) {
@@ -139,10 +148,18 @@ func unsafeBashPrefix(prefix string) string {
 	switch {
 	case bannedBashCommands[f[0]]:
 		return "Bash prefix '" + f[0] + "' can run arbitrary commands"
-	case (f[0] == "gh" || f[0] == "git") && len(f) == 1:
-		return "name the " + f[0] + " subcommand, e.g. Bash(gh search:*)"
-	case f[0] == "gh" && f[1] == "api":
-		return "gh api can write"
+	case f[0] == "gh":
+		for _, w := range f[1:min(len(f), 3)] {
+			if readOnlyGh[w] {
+				return ""
+			}
+		}
+		return "gh rules must use a read-only subcommand (search, view, list, status, diff, checks)"
+	case f[0] == "git":
+		if len(f) > 1 && readOnlyGit[f[1]] {
+			return ""
+		}
+		return "git rules must use a read-only subcommand (log, show, diff, status, blame, grep, ls-files)"
 	}
 	return ""
 }
