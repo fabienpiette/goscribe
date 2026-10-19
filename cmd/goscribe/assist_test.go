@@ -257,7 +257,7 @@ func TestAssistLibrarianMCPConfigArgs(t *testing.T) {
 }
 
 func TestAssistLibrarianUserSettingsArgs(t *testing.T) {
-	claudeSettingsPath = func() string { return filepath.Join(t.TempDir(), "missing.json") }
+	claudeSettingsPath = func() (string, error) { return filepath.Join(t.TempDir(), "missing.json"), nil }
 	t.Cleanup(func() { claudeSettingsPath = origSettingsPath })
 	args := librarianRun(t, "  use_claude_settings: true\n")
 	if !strings.Contains(args, "[--setting-sources][user]") {
@@ -278,7 +278,7 @@ func TestAssistLibrarianSettingsAndPathErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			sp := filepath.Join(dir, name+".json")
 			mustWrite(t, sp, []byte(tc.settings), 0644)
-			claudeSettingsPath = func() string { return sp }
+			claudeSettingsPath = func() (string, error) { return sp, nil }
 			_, errOut, code := assist(t, "-provider", "claude", "-librarian", "-elevenlabs-key", "k", "-config", cfg, "-o", filepath.Join(dir, name+".md"))
 			if code != 2 || !strings.Contains(errOut, tc.want) {
 				t.Errorf("code = %d, stderr = %q; want 2 and %q", code, errOut, tc.want)
@@ -288,7 +288,7 @@ func TestAssistLibrarianSettingsAndPathErrors(t *testing.T) {
 	// Settings without allow rules are fine: it gets as far as the claude check.
 	sp := filepath.Join(dir, "ok.json")
 	mustWrite(t, sp, []byte(`{"permissions":{"allow":[]},"model":"x"}`), 0644)
-	claudeSettingsPath = func() string { return sp }
+	claudeSettingsPath = func() (string, error) { return sp, nil }
 	harness.ClaudeBinary = "no-such-claude-binary"
 	cfg = configWith(t, dir, "ok.yml", "librarian:\n  allowed_tools: [mcp__linear__get_issue]\n  use_claude_settings: true\n")
 	b, _ := os.ReadFile(cfg)
@@ -300,6 +300,32 @@ func TestAssistLibrarianSettingsAndPathErrors(t *testing.T) {
 }
 
 var origSettingsPath = claudeSettingsPath
+
+func TestClaudeSettingsPath(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/srv/claude")
+	if p, err := claudeSettingsPath(); err != nil || p != "/srv/claude/settings.json" {
+		t.Errorf("path = %q, %v", p, err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("HOME", "")
+	if _, err := claudeSettingsPath(); err == nil {
+		t.Error("no home and no CLAUDE_CONFIG_DIR: want an error")
+	}
+}
+
+func TestAssistLibrarianConfigDirSettingsRefused(t *testing.T) {
+	fakeAudio(t)
+	fakeClaude(t, `{"summary":"s"}`)
+	dir := t.TempDir()
+	cfg := configWith(t, dir, "c.yml", "librarian:\n  allowed_tools: [mcp__linear__get_issue]\n  use_claude_settings: true\n")
+	cd := t.TempDir()
+	mustWrite(t, filepath.Join(cd, "settings.json"), []byte(`{"permissions":{"allow":["Read"]}}`), 0644)
+	t.Setenv("CLAUDE_CONFIG_DIR", cd)
+	_, errOut, code := assist(t, "-provider", "claude", "-librarian", "-elevenlabs-key", "k", "-config", cfg, "-o", filepath.Join(dir, "n.md"))
+	if code != 2 || !strings.Contains(errOut, "permissions.allow") {
+		t.Errorf("code = %d, stderr = %q", code, errOut)
+	}
+}
 
 // librarianRun runs assist with -librarian against fake claude and ElevenLabs
 // until the librarian answers, checks the feed and notes, and returns the

@@ -68,7 +68,7 @@ var readOnlyGh = map[string]bool{
 	"search": true, "view": true, "list": true, "status": true, "diff": true, "checks": true,
 }
 var readOnlyGit = map[string]bool{
-	"status": true, "blame": true, "ls-files": true,
+	"status": true, "ls-files": true,
 }
 
 // Built-in file tools: only accepted with a folder scope.
@@ -129,6 +129,9 @@ func unsafeTool(rule string) string {
 		if !hasArgs {
 			return "name a folder, e.g. " + name + "(~/notes/**); a bare " + name + " can read any file"
 		}
+		if strings.Contains(args, "..") {
+			return "scope must not contain '..'"
+		}
 		if strings.Trim(strings.TrimSuffix(args, ")"), "/*~. ") == "" {
 			return "scope is empty or too broad; name a folder, e.g. " + name + "(~/notes/**)"
 		}
@@ -173,7 +176,7 @@ func unsafeBashPrefix(prefix string) string {
 		if len(f) > 1 && readOnlyGit[f[1]] {
 			return ""
 		}
-		return "git rules must use a read-only subcommand (status, blame, ls-files; log, show, diff and grep take options that run commands or write files)"
+		return "git rules must use a read-only subcommand (status, ls-files; log, show, diff, grep and blame take options that run commands, write files or print any file)"
 	}
 	return ""
 }

@@ -128,7 +128,11 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 			return usageErr("librarian: %v", err)
 		}
 		if lib.UseClaudeSettings {
-			if err := checkClaudeSettings(claudeSettingsPath()); err != nil {
+			sp, err := claudeSettingsPath()
+			if err == nil {
+				err = checkClaudeSettings(sp)
+			}
+			if err != nil {
 				return usageErr("librarian: %v", err)
 			}
 		}
@@ -245,21 +249,21 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 }
 
 // claudeSettingsPath is the user's Claude settings file (a var for tests).
-var claudeSettingsPath = func() string {
+var claudeSettingsPath = func() (string, error) {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return filepath.Join(dir, "settings.json"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("use_claude_settings: cannot locate the Claude settings file: %v", err)
 	}
-	return filepath.Join(home, ".claude", "settings.json")
+	return filepath.Join(home, ".claude", "settings.json"), nil
 }
 
 // checkClaudeSettings refuses user settings with permissions.allow rules: with
 // use_claude_settings they would widen the librarian's tool list. A missing
 // file is fine; an unreadable or invalid one is an error.
 func checkClaudeSettings(path string) error {
-	if path == "" {
-		return nil
-	}
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil

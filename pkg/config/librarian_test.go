@@ -24,7 +24,7 @@ func TestLibrarianDefaults(t *testing.T) {
 func TestLibrarianValidate(t *testing.T) {
 	ok := Librarian{AllowedTools: []string{
 		"Bash(gh search:*)", "Bash(gh pr view:*)", "Bash(gh issue list:*)", "Bash(gh pr checks:*)",
-		"Bash(git status:*)", "Bash(git blame:*)", "Read(~/notes/**)", "Grep(/srv/docs/**)",
+		"Bash(git status:*)", "Bash(git ls-files:*)", "Read(~/notes/**)", "Grep(//srv/docs/**)",
 		"mcp__linear__list_issues", "mcp__notion__notion-search", "mcp__x__getIssue",
 	}}
 	if err := ok.WithDefaults().Validate(); err != nil {
@@ -41,7 +41,7 @@ func TestLibrarianValidate(t *testing.T) {
 		"Write(/tmp/*)", "Edit(src/*)", "MultiEdit(src/*)", "NotebookEdit(a.ipynb)",
 		"Bash()", "Bash( gh:*)", "Bash(*:*)", "Bash(gh api:*)", "Bash(gh:*)",
 		"Bash(curl:*)", "Bash(git:*)", "Bash(git push:*)", "Bash(gh pr review:*)",
-		"Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git grep:*)",
+		"Bash(git blame:*)", "Read(~/notes/../../../**)", "Grep(//srv/../etc/**)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git grep:*)",
 		"Read", "Grep", "Glob", "LS", "Read(/**)", "Read(~/**)", "Glob(**)", "Read(/)", "Read(//**)", "Read(~)", "Read(~/)", "Grep(*)", "Read()",
 		"Bash(gh pr close:*)", "Bash(gh issue edit:*)", "Bash(git checkout:*)", " Bash", "Bash(sh:*)", "Bash(env:*)",
 	} {
