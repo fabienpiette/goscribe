@@ -24,13 +24,54 @@ type Source struct {
 	Link  string `json:"link"`
 }
 
+// Lookups and SourceList skip entries that aren't objects, and treat anything
+// but a list as none, so one odd field doesn't lose the whole reply.
+type (
+	Lookups    []Lookup
+	SourceList []Source
+)
+
+func (l *Lookups) UnmarshalJSON(data []byte) error {
+	*l = lenientList[Lookup](data)
+	return nil
+}
+
+func (s *SourceList) UnmarshalJSON(data []byte) error {
+	*s = lenientList[Source](data)
+	return nil
+}
+
+// String is "title <link>", or whichever of the two is set. Links come from
+// the librarian, so they are shown as text, never as clickable Markdown.
+func (s Source) String() string {
+	switch {
+	case s.Title == "":
+		return s.Link
+	case s.Link == "":
+		return s.Title
+	}
+	return s.Title + " <" + s.Link + ">"
+}
+
+// joinSources is " (a, b)" for the sources of a finding, "" when it has none.
+func joinSources(sources []Source) string {
+	if len(sources) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, s := range sources {
+		parts = append(parts, s.String())
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
 // Finding is the librarian's answer to a lookup. Query and At come from the
 // lookup, never from the librarian's reply.
 type Finding struct {
 	Query   string        `json:"-"`
 	Found   bool          `json:"found"`
 	Answer  string        `json:"answer"`
-	Sources []Source      `json:"sources"`
+	Sources SourceList    `json:"sources"`
 	At      time.Duration `json:"-"`
 }
 
@@ -153,22 +194,7 @@ func writeResearch(b *strings.Builder, research []Finding) {
 			b.WriteString("nothing found\n")
 			continue
 		}
-		b.WriteString(f.Answer)
-		var titles []string
-		for _, s := range f.Sources {
-			switch {
-			case s.Title == "":
-				titles = append(titles, s.Link)
-			case s.Link == "":
-				titles = append(titles, s.Title)
-			default:
-				titles = append(titles, s.Title+" <"+s.Link+">")
-			}
-		}
-		if len(titles) > 0 {
-			b.WriteString(" (" + strings.Join(titles, ", ") + ")")
-		}
-		b.WriteString("\n")
+		b.WriteString(f.Answer + joinSources(f.Sources) + "\n")
 	}
 	b.WriteString("\n")
 }

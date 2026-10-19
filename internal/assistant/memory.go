@@ -65,7 +65,7 @@ type Reply struct {
 	NotCovered    []string    `json:"not_covered"`
 	Suggestions   Suggestions `json:"suggestions"`
 	ActionItems   []string    `json:"action_items"`
-	Lookups       []Lookup    `json:"lookups"`
+	Lookups       Lookups     `json:"lookups"`
 }
 
 // Suggestions skips entries that aren't suggestion objects (models sometimes
@@ -73,18 +73,25 @@ type Reply struct {
 type Suggestions []Suggestion
 
 func (s *Suggestions) UnmarshalJSON(data []byte) error {
+	*s = lenientList[Suggestion](data)
+	return nil
+}
+
+// lenientList decodes a JSON list, skipping entries that don't decode as T;
+// anything but a list gives none.
+func lenientList[T any](data []byte) []T {
 	var raw []json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil // not a list: no suggestions
+		return nil
 	}
-	*s = Suggestions{}
+	out := []T{}
 	for _, r := range raw {
-		var sg Suggestion
-		if json.Unmarshal(r, &sg) == nil {
-			*s = append(*s, sg)
+		var v T
+		if json.Unmarshal(r, &v) == nil {
+			out = append(out, v)
 		}
 	}
-	return nil
+	return out
 }
 
 // Caps keep the memory, and so every prompt, bounded over a long meeting.
@@ -107,7 +114,10 @@ const (
 // code fence around it.
 func Parse(answer string) (Reply, error) {
 	var r Reply
-	return r, parseJSON(answer, &r)
+	if err := parseJSON(answer, &r); err != nil {
+		return Reply{}, err
+	}
+	return r, nil
 }
 
 // parseJSON decodes the outermost JSON object of a model answer into v.
@@ -193,7 +203,8 @@ func (m *Memory) ApplyFinal(r Reply) {
 
 // matchSource returns the context file a model's "source" names, matched on
 // the path or the base name, ignoring case; or ResearchSource when it names
-// the librarian's research and there is some; "" when it names none.
+// the librarian's research and some lookup found something; "" when it names
+// none.
 func (m *Memory) matchSource(source string, files []string) string {
 	src := strings.ToLower(strings.TrimSpace(source))
 	if src == "" {
@@ -205,10 +216,20 @@ func (m *Memory) matchSource(source string, files []string) string {
 			return f
 		}
 	}
-	if src == ResearchSource && len(m.Research) > 0 {
+	if src == ResearchSource && m.foundAny() {
 		return ResearchSource
 	}
 	return ""
+}
+
+// foundAny reports whether the librarian found anything yet.
+func (m *Memory) foundAny() bool {
+	for _, f := range m.Research {
+		if f.Found {
+			return true
+		}
+	}
+	return false
 }
 
 func validType(t string) bool {

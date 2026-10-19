@@ -61,6 +61,23 @@ func TestParseLookups(t *testing.T) {
 	if err != nil || len(r.Lookups) != 1 || r.Lookups[0].Query != "q" || r.Lookups[0].Why != "w" {
 		t.Errorf("r = %+v, err = %v", r, err)
 	}
+	// An odd lookups field must not lose the rest of the cycle reply.
+	for _, answer := range []string{
+		`{"summary":"s","decisions":["d"],"lookups":["When did PROJ-123 ship?"]}`,
+		`{"summary":"s","decisions":["d"],"lookups":{"query":"x"}}`,
+	} {
+		r, err := Parse(answer)
+		if err != nil || r.Summary != "s" || len(r.Decisions) != 1 || len(r.Lookups) != 0 {
+			t.Errorf("%s: r = %+v, err = %v", answer, r, err)
+		}
+	}
+	r, err = Parse(`{"lookups":["x", {"query":"q"}, 3]}`)
+	if err != nil || len(r.Lookups) != 1 || r.Lookups[0].Query != "q" {
+		t.Errorf("mixed lookups: r = %+v, err = %v", r, err)
+	}
+	if _, err := Parse(`{"summary": 3}`); err == nil {
+		t.Error("a wrong summary type must still fail")
+	}
 }
 
 func TestParseFinding(t *testing.T) {
@@ -87,6 +104,14 @@ func TestParseFinding(t *testing.T) {
 	}
 	if f, err := ParseFinding(`{"found":false}`); err != nil || f.Found {
 		t.Errorf("not found: %+v, %v", f, err)
+	}
+	f, err = ParseFinding(`{"found":true,"answer":"a","sources":["a", {"title":"T"}]}`)
+	if err != nil || len(f.Sources) != 1 || f.Sources[0].Title != "T" {
+		t.Errorf("non-object sources must be skipped: %+v, %v", f, err)
+	}
+	f, err = ParseFinding(`{"found":true,"answer":"a","sources":"T"}`)
+	if err != nil || len(f.Sources) != 0 || f.Answer != "a" {
+		t.Errorf("non-list sources: %+v, %v", f, err)
 	}
 	if _, err := ParseFinding("not json"); err == nil {
 		t.Error("prose must fail")
@@ -177,6 +202,10 @@ func TestMatchSourceResearch(t *testing.T) {
 	if got := (&Memory{}).matchSource("research", nil); got != "" {
 		t.Errorf("without findings: %q", got)
 	}
+	notFound := Memory{Research: []Finding{{Query: "q"}}}
+	if got := notFound.matchSource("research", nil); got != "" {
+		t.Errorf("only not-found findings: %q", got)
+	}
 
 	sugs, _ := m.Apply(Reply{Suggestions: []Suggestion{{Type: "answer", Text: "PROJ-123 shipped on Monday.", Source: "research"}}}, 0, nil)
 	if len(sugs) != 1 || sugs[0].Source != "research" {
@@ -197,7 +226,7 @@ func TestRenderResearch(t *testing.T) {
 	got := Render(m, "h", false, 0)
 	want := "## Open questions\n\n- Who owns rollback?\n\n" +
 		"## Research\n\n- [00:13:41] q → a (T1, T2)\n" +
-		"- [00:14:00] q2 → a2 ([PROJ-123](https://example.com/PROJ-123), notes/sync.md)\n" +
+		"- [00:14:00] q2 → a2 (PROJ-123 <https://example.com/PROJ-123>, notes/sync.md)\n" +
 		"- [00:15:00] q3 → nothing found\n\n## Suggestions"
 	if !strings.Contains(got, want) {
 		t.Errorf("notes =\n%s\nwant to contain\n%s", got, want)

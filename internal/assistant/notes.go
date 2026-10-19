@@ -80,29 +80,13 @@ func suggestionNote(s Suggestion) string {
 	return s.Why + " · " + s.Source
 }
 
-// researchLine is "- [hh:mm:ss] query → answer (sources)", a source with a
-// link as a Markdown link.
+// researchLine is "- [hh:mm:ss] query → answer (sources)".
 func researchLine(f Finding) string {
 	line := fmt.Sprintf("- [%s] %s → ", clock(f.At), f.Query)
 	if !f.Found {
 		return line + "nothing found"
 	}
-	line += f.Answer
-	var sources []string
-	for _, s := range f.Sources {
-		switch {
-		case s.Link == "":
-			sources = append(sources, s.Title)
-		case s.Title == "":
-			sources = append(sources, s.Link)
-		default:
-			sources = append(sources, "["+s.Title+"]("+s.Link+")")
-		}
-	}
-	if len(sources) > 0 {
-		line += " (" + strings.Join(sources, ", ") + ")"
-	}
-	return line
+	return line + f.Answer + joinSources(f.Sources)
 }
 
 func section(b *strings.Builder, title, body string) {
