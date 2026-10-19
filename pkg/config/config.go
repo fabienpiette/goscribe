@@ -43,6 +43,9 @@ type Config struct {
 	ElevenLabsVerbatim bool   `yaml:"elevenlabs_verbatim,omitempty"`
 	WhisperModel       string `yaml:"whisper_model,omitempty"`
 	Language           string `yaml:"language,omitempty"`
+
+	// Read-only lookups ("goscribe assist" asking a Claude Code session).
+	Librarian Librarian `yaml:"librarian,omitempty"`
 }
 
 // ValidProviders lists the engines that can run post-processing actions.
