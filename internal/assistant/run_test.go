@@ -306,3 +306,272 @@ func TestRunInteractiveStatusAndCleaning(t *testing.T) {
 		t.Errorf("notices are shown:\n%q", feed)
 	}
 }
+
+// fakeResearch records librarian prompts and answers with reply.
+type fakeResearch struct {
+	mu      sync.Mutex
+	prompts []string
+	reply   func() (string, error)
+}
+
+func (f *fakeResearch) research(prompt string) (string, error) {
+	f.mu.Lock()
+	f.prompts = append(f.prompts, prompt)
+	reply := f.reply
+	f.mu.Unlock()
+	return reply()
+}
+
+func (f *fakeResearch) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.prompts)
+}
+
+func (f *fakeResearch) prompt(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prompts[i]
+}
+
+func lookupReply(query string) func() (string, error) {
+	return answer(`{"summary":"s","lookups":[{"query":"` + query + `","why":"asked now"}]}`)
+}
+
+const foundT1 = `{"found":true,"answer":"Acme chose the flag rollout.","sources":[{"title":"T1","link":"https://example.com/1"}]}`
+
+func TestRunLibrarianLookup(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("What did Acme decide on PROJ-123 last week?"),
+		answer(`{"summary":"s2"}`),
+	}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	out := &syncBuffer{}
+	notes := filepath.Join(t.TempDir(), "notes.md")
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Notes: notes, Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out,
+			Research: r.research, LibrarianInstructions: "Search the tickets.", MaxLookups: 3}, events)
+	}()
+	events <- line("others", twelveWords)
+	waitUntil(t, "the finding in the feed", func() bool { return strings.Contains(out.String(), "Librarian:") })
+	if p := r.prompt(0); !strings.Contains(p, "Question: What did Acme decide on PROJ-123 last week?") || !strings.Contains(p, "Search the tickets.") {
+		t.Errorf("librarian prompt:\n%s", p)
+	}
+	events <- line("me", twelveWords)
+	waitUntil(t, "second cycle", func() bool { return f.count() == 2 })
+	instr, _ := f.call(1)
+	if !strings.Contains(instr, "What did Acme decide on PROJ-123 last week? → Acme chose the flag rollout. (T1 <https://example.com/1>)") {
+		t.Errorf("the next cycle must carry the finding:\n%s", instr)
+	}
+	if !strings.Contains(instr, `"lookups"`) {
+		t.Errorf("with the librarian, the cycle asks for lookups:\n%s", instr)
+	}
+	close(events)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	feed := out.String()
+	look := strings.Index(feed, "🔎 00:00:00 Looking up: What did Acme decide on PROJ-123 last week?")
+	found := strings.Index(feed, "📚 00:00:00 Librarian: Acme chose the flag rollout. — T1\n")
+	if look < 0 || found < 0 || look > found {
+		t.Errorf("feed must show 🔎 then 📚:\n%s", feed)
+	}
+	if r.count() != 1 {
+		t.Errorf("research calls = %d", r.count())
+	}
+	b, _ := os.ReadFile(notes)
+	if !strings.Contains(string(b), "## Research") || !strings.Contains(string(b), "Acme chose the flag rollout.") {
+		t.Errorf("notes must have the research:\n%s", b)
+	}
+}
+
+func runThreeLookups(t *testing.T) (*fakeResearch, chan struct{}, func()) {
+	t.Helper()
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		lookupReply("Who owns the billing migration ticket?"),
+		lookupReply("What latency did the March load test show?"),
+		answer(`{"summary":"final"}`),
+	}}
+	r := &fakeResearch{reply: func() (string, error) { <-release; return foundT1, nil }}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: &syncBuffer{},
+			Research: r.research}, events)
+	}()
+	for i := 1; i <= 3; i++ {
+		events <- line("me", twelveWords)
+		waitUntil(t, "cycle", func() bool { return f.count() == i })
+		if i == 1 {
+			waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+		}
+	}
+	time.Sleep(40 * time.Millisecond) // the third reply is applied, ticks run
+	return r, release, func() { close(events); <-done }
+}
+
+func TestRunLibrarianOneAtATime(t *testing.T) {
+	fastTimers(t)
+	r, release, stop := runThreeLookups(t)
+	if n := r.count(); n != 1 {
+		t.Fatalf("research calls while one runs = %d", n)
+	}
+	close(release)
+	waitUntil(t, "the newest pending lookup", func() bool { return r.count() == 2 })
+	if p := r.prompt(1); !strings.Contains(p, "What latency did the March load test show?") {
+		t.Errorf("the newest pending lookup replaces older ones:\n%s", p)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if n := r.count(); n != 2 {
+		t.Errorf("research calls = %d, want 2", n)
+	}
+	stop()
+}
+
+func TestRunLibrarianDropsStalePending(t *testing.T) {
+	fastTimers(t)
+	orig := LookupMaxWait
+	LookupMaxWait = time.Millisecond
+	t.Cleanup(func() { LookupMaxWait = orig })
+	r, release, stop := runThreeLookups(t)
+	close(release)
+	time.Sleep(40 * time.Millisecond)
+	if n := r.count(); n != 1 {
+		t.Errorf("a stale pending lookup must be dropped; research calls = %d", n)
+	}
+	stop()
+}
+
+func TestRunLibrarianFailure(t *testing.T) {
+	for name, reply := range map[string]func() (string, error){
+		"error": func() (string, error) { return "", errors.New("exit status 1\x1b[2J") },
+		"prose": answer("I could not find anything, sorry."),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fastTimers(t)
+			f := &fakeThink{replies: []func() (string, error){
+				lookupReply("When was the Globex contract signed?"),
+				answer(`{"summary":"s2"}`),
+			}}
+			r := &fakeResearch{reply: reply}
+			out := &syncBuffer{}
+			notes := filepath.Join(t.TempDir(), "notes.md")
+			events := make(chan Event)
+			done := make(chan error, 1)
+			go func() {
+				done <- Run(Config{Notes: notes, Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out,
+					Research: r.research}, events)
+			}()
+			events <- line("me", twelveWords)
+			waitUntil(t, "failure line", func() bool { return strings.Contains(out.String(), "⚠ librarian failed: ") })
+			events <- line("me", twelveWords)
+			waitUntil(t, "second cycle", func() bool { return f.count() == 2 })
+			close(events)
+			<-done
+			if instr, _ := f.call(1); strings.Contains(instr, "Research from") {
+				t.Errorf("a failed lookup must not reach the memory:\n%s", instr)
+			}
+			if strings.Contains(out.String(), "\x1b") {
+				t.Errorf("control characters reached the feed:\n%q", out.String())
+			}
+			b, _ := os.ReadFile(notes)
+			if strings.Contains(string(b), "## Research") {
+				t.Errorf("notes:\n%s", b)
+			}
+		})
+	}
+}
+
+func TestRunLibrarianLimit(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		lookupReply("Who owns the billing migration ticket?"),
+		lookupReply("What latency did the March load test show?"),
+	}}
+	r := &fakeResearch{reply: answer(`{"found":false,"answer":"","sources":[]}`)}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out,
+			Research: r.research, MaxLookups: 1}, events)
+	}()
+	events <- line("me", twelveWords)
+	waitUntil(t, "nothing found", func() bool {
+		return strings.Contains(out.String(), "📚 nothing found for When was the Globex contract signed?")
+	})
+	events <- line("me", twelveWords)
+	waitUntil(t, "limit line", func() bool { return strings.Contains(out.String(), "📚 lookup limit reached (1)") })
+	events <- line("me", "short")
+	waitUntil(t, "third cycle", func() bool { return f.count() == 3 })
+	time.Sleep(30 * time.Millisecond)
+	close(events)
+	<-done
+	if n := strings.Count(out.String(), "lookup limit reached"); n != 1 {
+		t.Errorf("limit lines = %d:\n%s", n, out.String())
+	}
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d", n)
+	}
+}
+
+func TestRunLibrarianEndDoesNotWait(t *testing.T) {
+	fastTimers(t)
+	hang := make(chan struct{})
+	defer close(hang)
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		answer(`{"summary":"Final."}`),
+	}}
+	r := &fakeResearch{reply: func() (string, error) { <-hang; return foundT1, nil }}
+	notes := filepath.Join(t.TempDir(), "notes.md")
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Notes: notes, Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: &syncBuffer{},
+			Research: r.research}, events)
+	}()
+	events <- line("me", twelveWords+" "+twelveWords+" "+twelveWords)
+	waitUntil(t, "lookup running", func() bool { return r.count() == 1 })
+	close(events)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the end must not wait for a lookup")
+	}
+	b, _ := os.ReadFile(notes)
+	if !strings.Contains(string(b), "## Final summary\n\nFinal.") {
+		t.Errorf("final notes:\n%s", b)
+	}
+}
+
+func TestRunWithoutLibrarian(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){lookupReply("When was the Globex contract signed?")}}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out}, events)
+	}()
+	events <- line("me", twelveWords)
+	waitUntil(t, "cycle", func() bool { return f.count() == 1 })
+	time.Sleep(20 * time.Millisecond)
+	close(events)
+	<-done
+	if strings.Contains(out.String(), "🔎") || strings.Contains(out.String(), "📚") {
+		t.Errorf("no lookups without the librarian:\n%s", out.String())
+	}
+	if instr, _ := f.call(0); strings.Contains(instr, `"lookups"`) {
+		t.Errorf("without the librarian, the cycle must not ask for lookups:\n%s", instr)
+	}
+}
