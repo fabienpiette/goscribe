@@ -2,9 +2,9 @@ package config
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Librarian configures the read-only Claude Code session that "goscribe assist"
@@ -47,18 +47,30 @@ func (l Librarian) WithDefaults() Librarian {
 	return l
 }
 
-// Verbs that make an MCP tool or a gh/git subcommand a write operation.
-const writeVerbs = "send|save|create|update|delete|remove|post|write|add|edit|merge|close|reopen|comment|review|assign|archive|upload|push|set|move|transfer|label|unlabel|reply|publish|approve"
+// writeVerbs are substrings that mark a tool rule as a possible write. They are
+// matched against the lowercased rule, so createIssue and slack_sendMessage count.
+var writeVerbs = []string{
+	"send", "post", "create", "update", "delete", "save", "write", "edit",
+	"comment", "merge", "share", "trash", "upload", "react", "schedule",
+}
 
-var (
-	mcpWriteRe = regexp.MustCompile(`(^|_)(` + writeVerbs + `)(_|$)`)
-	// A Bash rule whose command is a gh or git write subcommand.
-	bashWriteRe = regexp.MustCompile(`(^|[\s;&|(])(gh|git)\s+(\S+\s+)*(` + writeVerbs + `)(\s|:|\)|$)`)
-)
+// readVerbs: an MCP tool name must contain at least one as a word.
+var readVerbs = map[string]bool{
+	"get": true, "list": true, "search": true, "read": true, "view": true,
+	"fetch": true, "query": true, "find": true, "retrieve": true, "lookup": true,
+}
 
-// Validate checks the provider, the limits and that every allowed tool is
-// read-only. The guard is deliberately strict: unrestricted Bash, web tools and
-// anything that looks like a write (mcp__*__send_*, gh pr comment, ...) is refused.
+// Bash prefixes that can run arbitrary or networked commands.
+var bannedBashCommands = map[string]bool{
+	"sh": true, "bash": true, "env": true, "xargs": true, "curl": true, "wget": true,
+}
+
+// Validate checks the provider, the limits and the allowed tools.
+//
+// The tool guard is a heuristic, not a proof of read-only: it refuses entries
+// whose lowercased text CONTAINS a write verb (substring match, so it can also
+// refuse harmless names), requires MCP tools to carry a read verb, and refuses
+// broad Bash prefixes and web tools. Review allowed_tools yourself too.
 func (l Librarian) Validate() error {
 	if l.Provider != "" && l.Provider != defaultLibrarianProvider {
 		return fmt.Errorf("librarian.provider '%s' is not supported (only claude)", l.Provider)
@@ -80,31 +92,82 @@ func (l Librarian) Validate() error {
 	return nil
 }
 
-// unsafeTool returns why a tool rule is not read-only, or "" if it passes.
+// unsafeTool returns why a tool rule is not accepted, or "" if it passes.
 func unsafeTool(rule string) string {
-	t := strings.TrimSpace(rule)
-	lower := strings.ToLower(t)
+	lower := strings.ToLower(rule)
+	for _, v := range writeVerbs {
+		if strings.Contains(lower, v) {
+			return fmt.Sprintf("contains write verb '%s'", v)
+		}
+	}
 
+	name, args, hasArgs := strings.Cut(rule, "(")
 	switch {
-	case t == "Bash" || t == "Bash()" || strings.HasPrefix(t, "Bash(*"):
-		return "unrestricted Bash; scope it, e.g. Bash(gh search:*)"
-	case t == "WebFetch" || t == "WebSearch" || strings.HasPrefix(t, "WebFetch(") || strings.HasPrefix(t, "WebSearch("):
+	case name == "WebFetch" || name == "WebSearch":
 		return "web tools can exfiltrate data"
-	case strings.HasPrefix(t, "Bash("):
-		if bashWriteRe.MatchString(lower) {
-			return "looks like a write command"
+	case name == "Bash":
+		if !hasArgs {
+			return "unrestricted Bash; scope it, e.g. Bash(gh search:*)"
 		}
-	case strings.HasPrefix(t, "mcp__"):
-		parts := strings.SplitN(lower, "__", 3)
-		tool := parts[len(parts)-1]
-		if len(parts) < 3 || tool == "" || strings.Contains(tool, "*") {
-			return "name the exact MCP tools, no wildcards"
+		return unsafeBashPrefix(strings.TrimSuffix(args, ")"))
+	case strings.HasPrefix(rule, "mcp__"):
+		parts := strings.Split(rule, "__")
+		last := parts[len(parts)-1]
+		if len(parts) < 3 || last == "" || strings.Contains(rule, "*") {
+			return "name the exact MCP tools, no server-wide or wildcard entries"
 		}
-		if mcpWriteRe.MatchString(tool) {
-			return "looks like a write tool"
+		for _, w := range splitWords(last) {
+			if readVerbs[w] {
+				return ""
+			}
 		}
-	case t == "Write" || t == "Edit" || t == "MultiEdit" || t == "NotebookEdit":
-		return "file edits are not read-only"
+		return "not a known read-only tool name"
 	}
 	return ""
+}
+
+func unsafeBashPrefix(prefix string) string {
+	prefix = strings.TrimSuffix(prefix, "*")
+	prefix = strings.TrimSuffix(prefix, ":")
+	if prefix == "" || strings.HasPrefix(prefix, "*") {
+		return "empty or wildcard Bash prefix"
+	}
+	if strings.TrimLeftFunc(prefix, unicode.IsSpace) != prefix {
+		return "Bash prefix must not start with whitespace"
+	}
+	f := strings.Fields(prefix)
+	switch {
+	case bannedBashCommands[f[0]]:
+		return "Bash prefix '" + f[0] + "' can run arbitrary commands"
+	case (f[0] == "gh" || f[0] == "git") && len(f) == 1:
+		return "name the " + f[0] + " subcommand, e.g. Bash(gh search:*)"
+	case f[0] == "gh" && f[1] == "api":
+		return "gh api can write"
+	}
+	return ""
+}
+
+// splitWords lowercases s and splits it on '_', '-' and camelCase boundaries.
+func splitWords(s string) []string {
+	var words []string
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			words = append(words, strings.ToLower(string(cur)))
+			cur = nil
+		}
+	}
+	for _, r := range s {
+		switch {
+		case r == '_' || r == '-':
+			flush()
+		case unicode.IsUpper(r):
+			flush()
+			cur = append(cur, r)
+		default:
+			cur = append(cur, r)
+		}
+	}
+	flush()
+	return words
 }

@@ -22,7 +22,10 @@ func TestLibrarianDefaults(t *testing.T) {
 }
 
 func TestLibrarianValidate(t *testing.T) {
-	ok := Librarian{AllowedTools: []string{"Bash(gh search:*)", "mcp__linear__list_issues", "Read"}}
+	ok := Librarian{AllowedTools: []string{
+		"Bash(gh search:*)", "Bash(gh pr view:*)", "Read", "Grep",
+		"mcp__linear__list_issues", "mcp__notion__notion-search", "mcp__x__getIssue",
+	}}
 	if err := ok.WithDefaults().Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -31,6 +34,12 @@ func TestLibrarianValidate(t *testing.T) {
 		"Bash", "Bash(*)", "WebFetch", "WebSearch",
 		"mcp__slack__slack_send_message", "mcp__linear__save_issue",
 		"Bash(gh pr comment:*)",
+		"mcp__slack__slack_schedule_message", "mcp__linear__share_issue",
+		"mcp__x__trash_thread", "mcp__x__add_reaction", "mcp__x__createIssue",
+		"mcp__x__issue-sendMessage", "mcp__x__do_thing", "mcp__x", "mcp__x__*",
+		"Write(/tmp/*)", "Edit(src/*)", "MultiEdit(src/*)", "NotebookEdit(a.ipynb)",
+		"Bash()", "Bash( gh:*)", "Bash(*:*)", "Bash(gh api:*)", "Bash(gh:*)",
+		"Bash(curl:*)", "Bash(git:*)", "Bash(sh:*)", "Bash(env:*)",
 	} {
 		l := Librarian{AllowedTools: []string{"Read", bad}}.WithDefaults()
 		err := l.Validate()
