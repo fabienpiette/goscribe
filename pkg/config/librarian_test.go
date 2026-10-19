@@ -25,7 +25,8 @@ func TestLibrarianValidate(t *testing.T) {
 	ok := Librarian{AllowedTools: []string{
 		"Bash(gh search:*)", "Bash(gh pr view:*)", "Bash(gh issue list:*)", "Bash(gh pr checks:*)",
 		"Bash(git status:*)", "Bash(git ls-files:*)", "Read(~/notes/**)", "Grep(//srv/docs/**)",
-		"mcp__linear__list_issues", "mcp__notion__notion-search", "mcp__x__getIssue",
+		"mcp__tracker__list_issues", "mcp__wiki__wiki-search", "mcp__x__getIssue",
+		"Bash(ls:*)", "Bash(gh pr list --limit 5:*)", "Bash(/usr/bin/gh search:*)",
 	}}
 	if err := ok.WithDefaults().Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -33,9 +34,9 @@ func TestLibrarianValidate(t *testing.T) {
 
 	for _, bad := range []string{
 		"Bash", "Bash(*)", "WebFetch", "WebSearch",
-		"mcp__slack__slack_send_message", "mcp__linear__save_issue",
+		"mcp__chat__chat_send_message", "mcp__tracker__save_issue",
 		"Bash(gh pr comment:*)",
-		"mcp__slack__slack_schedule_message", "mcp__linear__share_issue",
+		"mcp__chat__chat_schedule_message", "mcp__tracker__share_issue",
 		"mcp__x__trash_thread", "mcp__x__add_reaction", "mcp__x__createIssue",
 		"mcp__x__issue-sendMessage", "mcp__x__do_thing", "mcp__x", "mcp__x__*",
 		"Write(/tmp/*)", "Edit(src/*)", "MultiEdit(src/*)", "NotebookEdit(a.ipynb)",
@@ -44,6 +45,22 @@ func TestLibrarianValidate(t *testing.T) {
 		"Bash(git blame:*)", "Read(~/notes/../../../**)", "Grep(//srv/../etc/**)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git grep:*)",
 		"Read", "Grep", "Glob", "LS", "Read(/**)", "Read(~/**)", "Glob(**)", "Read(/)", "Read(//**)", "Read(~)", "Read(~/)", "Grep(*)", "Read()",
 		"Bash(gh pr close:*)", "Bash(gh issue edit:*)", "Bash(git checkout:*)", " Bash", "Bash(sh:*)", "Bash(env:*)",
+		// several rules smuggled into one entry (claude splits on ',' and spaces)
+		"Bash(ls),Bash", "Bash(ls) Bash", "Read(~/notes/**),Read", "mcp__srv__get_x,mcp__srv",
+		"Bash(ls:*),WebFetch", "Read(~/notes/**) Bash", "Bash(ls))", "Bash((ls)", "Bash(ls)x",
+		" Bash(ls:*)", "Bash(ls:*) ", "Read (~/notes/**)", "mcp__srv__get_x mcp__srv__get_y",
+		"mcp__srv__get_x(arg)", "mcp__srv__get.x", "mcp__srv____get_x2,Bash",
+		// unlisted built-ins
+		"PowerShell", "PowerShell(Get-Item:*)", "Task", "Agent", "bash", "bash(ls:*)", "read(~/notes/**)",
+		"TodoRead", "KillShell", "BashOutput",
+		// shells, interpreters, wrappers and coreutils that change files
+		"Bash(zsh:*)", "Bash(dash:*)", "Bash(fish:*)", "Bash(ksh:*)", "Bash(python:*)", "Bash(python3 -c:*)",
+		"Bash(node:*)", "Bash(perl:*)", "Bash(ruby:*)", "Bash(php:*)", "Bash(awk:*)", "Bash(sed:*)",
+		"Bash(find:*)", "Bash(rm:*)", "Bash(mv:*)", "Bash(cp:*)", "Bash(tee:*)", "Bash(dd:*)",
+		"Bash(sudo:*)", "Bash(doas:*)", "Bash(timeout:*)", "Bash(nohup:*)", "Bash(nice:*)",
+		"Bash(command:*)", "Bash(exec:*)", "Bash(eval:*)", "Bash(ssh:*)", "Bash(scp:*)",
+		"Bash(docker:*)", "Bash(kubectl:*)", "Bash(/bin/sh:*)", "Bash(xargs:*)", "Bash(wget:*)",
+		"Bash(gh auth status:*)", "Bash(gh auth token:*)", "Bash(gh config list:*)", "Bash(gh config get:*)",
 	} {
 		l := Librarian{AllowedTools: []string{"Read(~/notes/**)", bad}}.WithDefaults()
 		err := l.Validate()

@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"path"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -51,7 +53,7 @@ func (l Librarian) WithDefaults() Librarian {
 }
 
 // writeVerbs are substrings that mark a tool rule as a possible write. They are
-// matched against the lowercased rule, so createIssue and slack_sendMessage count.
+// matched against the lowercased rule, so createIssue and chat_sendMessage count.
 var writeVerbs = []string{
 	"send", "post", "create", "update", "delete", "save", "write", "edit",
 	"comment", "merge", "share", "trash", "upload", "react", "schedule",
@@ -74,17 +76,33 @@ var readOnlyGit = map[string]bool{
 // Built-in file tools: only accepted with a folder scope.
 var scopedBuiltins = map[string]bool{"Read": true, "Grep": true, "Glob": true, "LS": true}
 
-// Bash prefixes that can run arbitrary or networked commands.
+// mcpTool is one exact MCP tool name: mcp__<server>__<tool>.
+var mcpTool = regexp.MustCompile(`^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$`)
+
+// Bash prefixes (first word) that run arbitrary commands (shells, interpreters,
+// wrappers), reach the network, or change files.
 var bannedBashCommands = map[string]bool{
-	"sh": true, "bash": true, "env": true, "xargs": true, "curl": true, "wget": true,
+	"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true, "ksh": true,
+	"env": true, "xargs": true, "curl": true, "wget": true,
+	"python": true, "python3": true, "node": true, "perl": true, "ruby": true, "php": true,
+	"awk": true, "sed": true, "find": true,
+	"rm": true, "mv": true, "cp": true, "tee": true, "dd": true,
+	"sudo": true, "doas": true, "timeout": true, "nohup": true, "nice": true,
+	"command": true, "exec": true, "eval": true,
+	"ssh": true, "scp": true, "docker": true, "kubectl": true,
 }
+
+// gh commands refused whatever follows: they print or change credentials and
+// settings.
+var bannedGh = map[string]bool{"auth": true, "config": true}
 
 // Validate checks the provider, the limits and the allowed tools.
 //
-// The tool guard is a heuristic, not a proof of read-only: it refuses entries
-// whose lowercased text CONTAINS a write verb (substring match, so it can also
-// refuse harmless names), requires MCP tools to carry a read verb, and refuses
-// broad Bash prefixes and web tools. Review allowed_tools yourself too.
+// The tool guard is a heuristic, not a proof of read-only: it accepts one rule
+// per entry, only for Bash, Read, Grep, Glob, LS and exact MCP tools; it
+// refuses entries whose lowercased text CONTAINS a write verb (substring match,
+// so it can also refuse harmless names), requires MCP tools to carry a read
+// verb, and refuses broad Bash prefixes. Review allowed_tools yourself too.
 func (l Librarian) Validate() error {
 	if l.Provider != "" && l.Provider != defaultLibrarianProvider {
 		return fmt.Errorf("librarian.provider '%s' is not supported (only claude)", l.Provider)
@@ -107,8 +125,10 @@ func (l Librarian) Validate() error {
 }
 
 // unsafeTool returns why a tool rule is not accepted, or "" if it passes.
+// Claude Code reads --allowedTools as a comma- or space-separated list, so an
+// entry must hold exactly one rule: no ',' or whitespace outside its
+// parentheses, and its arguments in a single (...) at the end.
 func unsafeTool(rule string) string {
-	rule = strings.TrimSpace(rule)
 	lower := strings.ToLower(rule)
 	for _, v := range writeVerbs {
 		if strings.Contains(lower, v) {
@@ -117,14 +137,35 @@ func unsafeTool(rule string) string {
 	}
 
 	name, args, hasArgs := strings.Cut(rule, "(")
+	if name == "" || strings.ContainsFunc(name, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+		return "one tool rule per entry, with no ',' or spaces outside the parentheses"
+	}
+	if hasArgs {
+		if strings.Count(rule, "(") != 1 || strings.Count(rule, ")") != 1 || !strings.HasSuffix(rule, ")") {
+			return "a rule's arguments go in one (...) at the end of the entry"
+		}
+		args = strings.TrimSuffix(args, ")")
+	}
+
 	switch {
+	case strings.HasPrefix(name, "mcp__"):
+		if hasArgs || !mcpTool.MatchString(rule) {
+			return "name the exact MCP tools (mcp__server__tool), no server-wide or wildcard entries"
+		}
+		parts := strings.Split(rule, "__")
+		for _, w := range splitWords(parts[len(parts)-1]) {
+			if readVerbs[w] {
+				return ""
+			}
+		}
+		return "not a known read-only tool name"
 	case name == "WebFetch" || name == "WebSearch":
 		return "web tools can exfiltrate data"
 	case name == "Bash":
 		if !hasArgs {
 			return "unrestricted Bash; scope it, e.g. Bash(gh search:*)"
 		}
-		return unsafeBashPrefix(strings.TrimSuffix(args, ")"))
+		return unsafeBashPrefix(args)
 	case scopedBuiltins[name]:
 		if !hasArgs {
 			return "name a folder, e.g. " + name + "(~/notes/**); a bare " + name + " can read any file"
@@ -132,24 +173,12 @@ func unsafeTool(rule string) string {
 		if strings.Contains(args, "..") {
 			return "scope must not contain '..'"
 		}
-		if strings.Trim(strings.TrimSuffix(args, ")"), "/*~. ") == "" {
+		if strings.Trim(args, "/*~. ") == "" {
 			return "scope is empty or too broad; name a folder, e.g. " + name + "(~/notes/**)"
 		}
 		return ""
-	case strings.HasPrefix(rule, "mcp__"):
-		parts := strings.Split(rule, "__")
-		last := parts[len(parts)-1]
-		if len(parts) < 3 || last == "" || strings.Contains(rule, "*") {
-			return "name the exact MCP tools, no server-wide or wildcard entries"
-		}
-		for _, w := range splitWords(last) {
-			if readVerbs[w] {
-				return ""
-			}
-		}
-		return "not a known read-only tool name"
 	}
-	return ""
+	return "not an allowed tool (only Bash, Read, Grep, Glob, LS and mcp__server__tool)"
 }
 
 func unsafeBashPrefix(prefix string) string {
@@ -162,17 +191,20 @@ func unsafeBashPrefix(prefix string) string {
 		return "Bash prefix must not start with whitespace"
 	}
 	f := strings.Fields(prefix)
-	switch {
-	case bannedBashCommands[f[0]]:
-		return "Bash prefix '" + f[0] + "' can run arbitrary commands"
-	case f[0] == "gh":
+	switch cmd := path.Base(f[0]); {
+	case bannedBashCommands[cmd]:
+		return "Bash prefix '" + f[0] + "' can run arbitrary commands or change files"
+	case cmd == "gh":
+		if len(f) > 1 && bannedGh[f[1]] {
+			return "gh " + f[1] + " handles credentials and settings"
+		}
 		for _, w := range f[1:min(len(f), 3)] {
 			if readOnlyGh[w] {
 				return ""
 			}
 		}
 		return "gh rules must use a read-only subcommand (search, view, list, status, diff, checks)"
-	case f[0] == "git":
+	case cmd == "git":
 		if len(f) > 1 && readOnlyGit[f[1]] {
 			return ""
 		}
