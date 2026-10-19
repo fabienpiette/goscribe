@@ -25,6 +25,9 @@ type Librarian struct {
 	Model string `yaml:"model,omitempty"`
 	// Path to an MCP config file for the librarian session.
 	MCPConfig string `yaml:"mcp_config,omitempty"`
+	// Load the user's Claude settings (connectors, plugins, hooks) in the
+	// librarian session. Off by default: the session is isolated.
+	UseClaudeSettings bool `yaml:"use_claude_settings,omitempty"`
 }
 
 const (
@@ -65,8 +68,11 @@ var readOnlyGh = map[string]bool{
 	"search": true, "view": true, "list": true, "status": true, "diff": true, "checks": true,
 }
 var readOnlyGit = map[string]bool{
-	"log": true, "show": true, "diff": true, "status": true, "blame": true, "grep": true, "ls-files": true,
+	"status": true, "blame": true, "ls-files": true,
 }
+
+// Built-in file tools: only accepted with a folder scope.
+var scopedBuiltins = map[string]bool{"Read": true, "Grep": true, "Glob": true, "LS": true}
 
 // Bash prefixes that can run arbitrary or networked commands.
 var bannedBashCommands = map[string]bool{
@@ -119,6 +125,14 @@ func unsafeTool(rule string) string {
 			return "unrestricted Bash; scope it, e.g. Bash(gh search:*)"
 		}
 		return unsafeBashPrefix(strings.TrimSuffix(args, ")"))
+	case scopedBuiltins[name]:
+		if !hasArgs {
+			return "name a folder, e.g. " + name + "(~/notes/**); a bare " + name + " can read any file"
+		}
+		if strings.Trim(strings.TrimSuffix(args, ")"), "/*~. ") == "" {
+			return "scope is empty or too broad; name a folder, e.g. " + name + "(~/notes/**)"
+		}
+		return ""
 	case strings.HasPrefix(rule, "mcp__"):
 		parts := strings.Split(rule, "__")
 		last := parts[len(parts)-1]
@@ -159,7 +173,7 @@ func unsafeBashPrefix(prefix string) string {
 		if len(f) > 1 && readOnlyGit[f[1]] {
 			return ""
 		}
-		return "git rules must use a read-only subcommand (log, show, diff, status, blame, grep, ls-files)"
+		return "git rules must use a read-only subcommand (status, blame, ls-files; log, show, diff and grep take options that run commands or write files)"
 	}
 	return ""
 }

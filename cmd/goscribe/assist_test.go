@@ -236,6 +236,76 @@ func TestAssistLibrarianUsageErrors(t *testing.T) {
 // The librarian runs as a second claude call with its own tool list; the
 // answer shows in the feed and the notes.
 func TestAssistLibrarianEndToEnd(t *testing.T) {
+	args := librarianRun(t, "")
+	for _, want := range []string{"[--disallowedTools][WebFetch,WebSearch]", "[--setting-sources][]"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("librarian args missing %q: %s", want, args)
+		}
+	}
+	if strings.Contains(args, "--mcp-config") {
+		t.Errorf("unexpected --mcp-config: %s", args)
+	}
+}
+
+func TestAssistLibrarianMCPConfigArgs(t *testing.T) {
+	args := librarianRun(t, "  mcp_config: /srv/mcp.json\n")
+	for _, want := range []string{"[--mcp-config][/srv/mcp.json]", "[--strict-mcp-config]", "[--setting-sources][]"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("librarian args missing %q: %s", want, args)
+		}
+	}
+}
+
+func TestAssistLibrarianUserSettingsArgs(t *testing.T) {
+	claudeSettingsPath = func() string { return filepath.Join(t.TempDir(), "missing.json") }
+	t.Cleanup(func() { claudeSettingsPath = origSettingsPath })
+	args := librarianRun(t, "  use_claude_settings: true\n")
+	if !strings.Contains(args, "[--setting-sources][user]") {
+		t.Errorf("librarian args = %s", args)
+	}
+}
+
+func TestAssistLibrarianSettingsAndPathErrors(t *testing.T) {
+	fakeAudio(t)
+	fakeClaude(t, `{"summary":"s"}`)
+	dir := t.TempDir()
+	cfg := configWith(t, dir, "c.yml", "librarian:\n  allowed_tools: [mcp__linear__get_issue]\n  use_claude_settings: true\n")
+	t.Cleanup(func() { claudeSettingsPath = origSettingsPath })
+	for name, tc := range map[string]struct{ settings, want string }{
+		"allow rules": {`{"permissions":{"allow":["Bash(rm:*)"]}}`, "permissions.allow"},
+		"invalid":     {`{nope`, "not valid JSON"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sp := filepath.Join(dir, name+".json")
+			mustWrite(t, sp, []byte(tc.settings), 0644)
+			claudeSettingsPath = func() string { return sp }
+			_, errOut, code := assist(t, "-provider", "claude", "-librarian", "-elevenlabs-key", "k", "-config", cfg, "-o", filepath.Join(dir, name+".md"))
+			if code != 2 || !strings.Contains(errOut, tc.want) {
+				t.Errorf("code = %d, stderr = %q; want 2 and %q", code, errOut, tc.want)
+			}
+		})
+	}
+	// Settings without allow rules are fine: it gets as far as the claude check.
+	sp := filepath.Join(dir, "ok.json")
+	mustWrite(t, sp, []byte(`{"permissions":{"allow":[]},"model":"x"}`), 0644)
+	claudeSettingsPath = func() string { return sp }
+	harness.ClaudeBinary = "no-such-claude-binary"
+	cfg = configWith(t, dir, "ok.yml", "librarian:\n  allowed_tools: [mcp__linear__get_issue]\n  use_claude_settings: true\n")
+	b, _ := os.ReadFile(cfg)
+	mustWrite(t, cfg, []byte(strings.Replace(string(b), `openai_api_key: ""`, `openai_api_key: "k"`, 1)), 0644)
+	_, errOut, code := assist(t, "-provider", "openai", "-librarian", "-elevenlabs-key", "k", "-config", cfg, "-o", filepath.Join(dir, "ok.md"))
+	if code != 2 || strings.Contains(errOut, "permissions.allow") || !strings.Contains(errOut, "librarian: needs") {
+		t.Errorf("code = %d, stderr = %q", code, errOut)
+	}
+}
+
+var origSettingsPath = claudeSettingsPath
+
+// librarianRun runs assist with -librarian against fake claude and ElevenLabs
+// until the librarian answers, checks the feed and notes, and returns the
+// librarian's arguments, one [arg] each.
+func librarianRun(t *testing.T, extraCfg string) string {
+	t.Helper()
 	fakeAudio(t)
 	guardSignals(t)
 	t.Setenv("HOME", t.TempDir())
@@ -276,7 +346,7 @@ func TestAssistLibrarianEndToEnd(t *testing.T) {
 cat > /dev/null
 case "$*" in
 *--allowedTools*)
-  echo "$*" > "$FAKE_ARGS"
+  for a in "$@"; do printf '[%s]' "$a"; done > "$FAKE_ARGS"
   echo '{"found":true,"answer":"PROJ-123 shipped on Monday","sources":[{"title":"PROJ-123","link":"https://example.com/PROJ-123"}]}'
   ;;
 *)
@@ -288,7 +358,7 @@ esac
 	harness.ClaudeBinary = bin
 	defer func() { harness.ClaudeBinary = orig }()
 
-	cfgFile := configWith(t, dir, "config.yml", "librarian:\n  allowed_tools: [\"Bash(gh pr view:*)\", mcp__linear__get_issue]\n  timeout: 20s\n")
+	cfgFile := configWith(t, dir, "config.yml", "librarian:\n  allowed_tools: [\"Bash(gh pr view:*)\", mcp__linear__get_issue]\n  timeout: 20s\n"+extraCfg)
 	notes := filepath.Join(dir, "notes.md")
 
 	out := &syncBuf{}
@@ -323,9 +393,7 @@ esac
 		t.Errorf("notes missing ## Research:\n%s", b)
 	}
 	args, _ := os.ReadFile(argsFile)
-	if !strings.Contains(string(args), "--disallowedTools WebFetch,WebSearch") {
-		t.Errorf("librarian args = %q", args)
-	}
+	return string(args)
 }
 
 // configWith writes the default config plus extra YAML and returns its path.

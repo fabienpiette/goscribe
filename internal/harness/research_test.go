@@ -10,12 +10,12 @@ import (
 
 func TestResearchArgs(t *testing.T) {
 	o := ResearchOptions{
-		AllowedTools: []string{"Bash(gh search:*)", "Read", "mcp__linear__get_issue"},
+		AllowedTools: []string{"Bash(gh search:*)", "Read(~/notes/**)", "mcp__linear__get_issue"},
 		Model:        "sonnet",
 	}
 	want := []string{"-p", "--output-format", "text",
 		"--tools", "Bash,Read",
-		"--allowedTools", "Bash(gh search:*),Read,mcp__linear__get_issue",
+		"--allowedTools", "Bash(gh search:*),Read(~/notes/**),mcp__linear__get_issue",
 		"--disallowedTools", "WebFetch,WebSearch",
 		"--permission-mode", "dontAsk",
 		"--no-session-persistence", "--disable-slash-commands",
@@ -39,6 +39,14 @@ func TestResearchArgs(t *testing.T) {
 		if a == "--mcp-config" || a == "--strict-mcp-config" {
 			t.Errorf("mcp flag %q present without MCPConfig", a)
 		}
+	}
+}
+
+func TestResearchArgsUserSettings(t *testing.T) {
+	got := researchArgs(ResearchOptions{AllowedTools: []string{"mcp__linear__get_issue"}, UserSettings: true})
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--setting-sources user") || strings.Contains(joined, "--mcp-config") {
+		t.Errorf("args = %q", joined)
 	}
 }
 

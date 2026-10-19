@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -126,6 +127,11 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		if err := lib.Validate(); err != nil {
 			return usageErr("librarian: %v", err)
 		}
+		if lib.UseClaudeSettings {
+			if err := checkClaudeSettings(claudeSettingsPath()); err != nil {
+				return usageErr("librarian: %v", err)
+			}
+		}
 		if _, err := exec.LookPath(harness.ClaudeBinary); err != nil {
 			return usageErr("librarian: needs the %s CLI on PATH", harness.ClaudeBinary)
 		}
@@ -224,7 +230,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Force:       force,
 	}
 	if *librarian {
-		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig}
+		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}
 		acfg.Research = func(prompt string) (string, error) { return harness.Research(prompt, ro) }
 		acfg.LibrarianInstructions = lib.Instructions
 		acfg.MaxLookups = lib.MaxLookups
@@ -236,6 +242,43 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// claudeSettingsPath is the user's Claude settings file (a var for tests).
+var claudeSettingsPath = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "settings.json")
+}
+
+// checkClaudeSettings refuses user settings with permissions.allow rules: with
+// use_claude_settings they would widen the librarian's tool list. A missing
+// file is fine; an unreadable or invalid one is an error.
+func checkClaudeSettings(path string) error {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("use_claude_settings: cannot read %s: %v", path, err)
+	}
+	var st struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return fmt.Errorf("use_claude_settings: %s is not valid JSON: %v", path, err)
+	}
+	if len(st.Permissions.Allow) > 0 {
+		return fmt.Errorf("use_claude_settings: %s has %d permissions.allow rule(s), which would widen the librarian's tool list; remove them or turn use_claude_settings off", path, len(st.Permissions.Allow))
+	}
+	return nil
 }
 
 // loadAssistConfig reads the config file if there is one; assist works

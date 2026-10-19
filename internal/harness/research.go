@@ -11,20 +11,23 @@ import (
 // ResearchOptions configures a read-only Claude Code session that may look
 // things up with a strict tool allowlist.
 type ResearchOptions struct {
-	AllowedTools []string // e.g. "Bash(gh search:*)", "Read", "mcp__srv__tool"
+	AllowedTools []string // e.g. "Bash(gh search:*)", "Read(~/notes/**)", "mcp__srv__tool"
 	Timeout      time.Duration
 	Model        string
 	MCPConfig    string // path to an MCP config file; empty means no MCP servers
+	// UserSettings loads the user's Claude settings (--setting-sources user):
+	// connectors, plugins, hooks. Off by default.
+	UserSettings bool
 }
 
 const defaultResearchTimeout = 3 * time.Minute
 
 // researchArgs builds the claude flags: only the allowed tools exist, anything
 // else is denied without prompting, and no session or slash commands are loaded.
-// User settings are never loaded (--setting-sources ""): their permissions.allow
-// rules would widen the allowlist, and their hooks and plugins would run. As a
-// consequence plugin MCP servers are unavailable too, so MCP tools need an
-// MCPConfig file (used with --strict-mcp-config).
+// User settings are not loaded by default (--setting-sources ""): their
+// permissions.allow rules would widen the allowlist, and their hooks and plugins
+// would run. Then plugin and connector MCP servers are unavailable, so MCP tools
+// need an MCPConfig file. With UserSettings they are loaded (--setting-sources user).
 func researchArgs(o ResearchOptions) []string {
 	seen := map[string]bool{}
 	var builtins []string
@@ -40,6 +43,10 @@ func researchArgs(o ResearchOptions) []string {
 	}
 	sort.Strings(builtins)
 
+	sources := ""
+	if o.UserSettings {
+		sources = "user"
+	}
 	args := []string{"-p", "--output-format", "text",
 		"--tools", strings.Join(builtins, ","),
 		"--allowedTools", strings.Join(o.AllowedTools, ","),
@@ -47,7 +54,7 @@ func researchArgs(o ResearchOptions) []string {
 		"--permission-mode", "dontAsk",
 		"--no-session-persistence",
 		"--disable-slash-commands",
-		"--setting-sources", "",
+		"--setting-sources", sources,
 	}
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)

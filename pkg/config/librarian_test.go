@@ -24,7 +24,7 @@ func TestLibrarianDefaults(t *testing.T) {
 func TestLibrarianValidate(t *testing.T) {
 	ok := Librarian{AllowedTools: []string{
 		"Bash(gh search:*)", "Bash(gh pr view:*)", "Bash(gh issue list:*)", "Bash(gh pr checks:*)",
-		"Bash(git log:*)", "Bash(git show:*)", "Read", "Grep",
+		"Bash(git status:*)", "Bash(git blame:*)", "Read(~/notes/**)", "Grep(/srv/docs/**)",
 		"mcp__linear__list_issues", "mcp__notion__notion-search", "mcp__x__getIssue",
 	}}
 	if err := ok.WithDefaults().Validate(); err != nil {
@@ -41,9 +41,11 @@ func TestLibrarianValidate(t *testing.T) {
 		"Write(/tmp/*)", "Edit(src/*)", "MultiEdit(src/*)", "NotebookEdit(a.ipynb)",
 		"Bash()", "Bash( gh:*)", "Bash(*:*)", "Bash(gh api:*)", "Bash(gh:*)",
 		"Bash(curl:*)", "Bash(git:*)", "Bash(git push:*)", "Bash(gh pr review:*)",
+		"Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git grep:*)",
+		"Read", "Grep", "Glob", "LS", "Read(/**)", "Read(~/**)", "Glob(**)", "Read(/)", "Read(//**)", "Read(~)", "Read(~/)", "Grep(*)", "Read()",
 		"Bash(gh pr close:*)", "Bash(gh issue edit:*)", "Bash(git checkout:*)", " Bash", "Bash(sh:*)", "Bash(env:*)",
 	} {
-		l := Librarian{AllowedTools: []string{"Read", bad}}.WithDefaults()
+		l := Librarian{AllowedTools: []string{"Read(~/notes/**)", bad}}.WithDefaults()
 		err := l.Validate()
 		if err == nil || !strings.Contains(err.Error(), bad) {
 			t.Errorf("entry %q: error = %v, want one naming it", bad, err)
@@ -55,12 +57,12 @@ func TestLibrarianValidate(t *testing.T) {
 		t.Errorf("empty list: error = %v", err)
 	}
 
-	err = Librarian{Provider: "codex", AllowedTools: []string{"Read"}}.WithDefaults().Validate()
+	err = Librarian{Provider: "codex", AllowedTools: []string{"Read(~/notes/**)"}}.WithDefaults().Validate()
 	if err == nil || !strings.Contains(err.Error(), "only claude") {
 		t.Errorf("codex: error = %v", err)
 	}
 
-	err = Librarian{AllowedTools: []string{"Read"}, MaxLookups: -1}.WithDefaults().Validate()
+	err = Librarian{AllowedTools: []string{"Read(~/notes/**)"}, MaxLookups: -1}.WithDefaults().Validate()
 	if err == nil {
 		t.Error("negative max_lookups: want error")
 	}
@@ -68,12 +70,15 @@ func TestLibrarianValidate(t *testing.T) {
 
 func TestLibrarianYAML(t *testing.T) {
 	var cfg Config
-	src := "librarian:\n  allowed_tools: [Read]\n  timeout: 90s\n  max_lookups: 3\n"
+	src := "librarian:\n  allowed_tools: [Read(~/notes/**)]\n  use_claude_settings: true\n  timeout: 90s\n  max_lookups: 3\n"
 	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Librarian.Timeout != 90*time.Second {
 		t.Errorf("Timeout = %v, want 90s", cfg.Librarian.Timeout)
+	}
+	if !cfg.Librarian.UseClaudeSettings {
+		t.Error("UseClaudeSettings = false, want true")
 	}
 	if cfg.Librarian.MaxLookups != 3 {
 		t.Errorf("MaxLookups = %d, want 3", cfg.Librarian.MaxLookups)
