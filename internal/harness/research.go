@@ -20,8 +20,11 @@ type ResearchOptions struct {
 const defaultResearchTimeout = 3 * time.Minute
 
 // researchArgs builds the claude flags: only the allowed tools exist, anything
-// else is denied without prompting, and no session, slash commands or (unless
-// an MCP config is given) MCP servers and settings are loaded.
+// else is denied without prompting, and no session or slash commands are loaded.
+// User settings are never loaded (--setting-sources ""): their permissions.allow
+// rules would widen the allowlist, and their hooks and plugins would run. As a
+// consequence plugin MCP servers are unavailable too, so MCP tools need an
+// MCPConfig file (used with --strict-mcp-config).
 func researchArgs(o ResearchOptions) []string {
 	seen := map[string]bool{}
 	var builtins []string
@@ -44,12 +47,13 @@ func researchArgs(o ResearchOptions) []string {
 		"--permission-mode", "dontAsk",
 		"--no-session-persistence",
 		"--disable-slash-commands",
+		"--setting-sources", "",
 	}
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
 	}
 	if o.MCPConfig != "" {
-		args = append(args, "--mcp-config", o.MCPConfig, "--strict-mcp-config", "--setting-sources", "")
+		args = append(args, "--mcp-config", o.MCPConfig, "--strict-mcp-config")
 	}
 	return args
 }

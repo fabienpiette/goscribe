@@ -19,6 +19,7 @@ func TestResearchArgs(t *testing.T) {
 		"--disallowedTools", "WebFetch,WebSearch",
 		"--permission-mode", "dontAsk",
 		"--no-session-persistence", "--disable-slash-commands",
+		"--setting-sources", "",
 		"--model", "sonnet",
 	}
 	if got := researchArgs(o); !reflect.DeepEqual(got, want) {
@@ -27,9 +28,17 @@ func TestResearchArgs(t *testing.T) {
 
 	o.MCPConfig = "/x.json"
 	got := researchArgs(o)
-	tail := []string{"--mcp-config", "/x.json", "--strict-mcp-config", "--setting-sources", ""}
-	if !reflect.DeepEqual(got[len(got)-5:], tail) {
-		t.Errorf("mcp flags = %q, want %q", got[len(got)-5:], tail)
+	tail := []string{"--mcp-config", "/x.json", "--strict-mcp-config"}
+	if !reflect.DeepEqual(got[len(got)-3:], tail) {
+		t.Errorf("mcp flags = %q, want %q", got[len(got)-3:], tail)
+	}
+	if !reflect.DeepEqual(got[:len(want)], want) {
+		t.Errorf("base args changed with MCPConfig: %q", got)
+	}
+	for _, a := range want {
+		if a == "--mcp-config" || a == "--strict-mcp-config" {
+			t.Errorf("mcp flag %q present without MCPConfig", a)
+		}
 	}
 }
 
