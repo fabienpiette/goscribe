@@ -70,7 +70,11 @@ echo '{"found":false}'`, "")
 
 func TestResearchTimeout(t *testing.T) {
 	fakeHarness(t, `sleep 5`, "")
+	start := time.Now()
 	_, err := Research("x", ResearchOptions{Timeout: 100 * time.Millisecond})
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("returned after %s, want well under the fake's 5s sleep", d)
+	}
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("err = %v, want timed out", err)
 	}

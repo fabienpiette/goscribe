@@ -1,16 +1,11 @@
 package harness
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"sort"
 	"strings"
 	"time"
-
-	"goscribe/internal/util"
 )
 
 // ResearchOptions configures a read-only Claude Code session that may look
@@ -66,40 +61,10 @@ func Research(prompt string, o ResearchOptions) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s not found on PATH (install Claude Code)", ClaudeBinary)
 	}
-	workDir, err := os.MkdirTemp("", "goscribe-research-")
-	if err != nil {
-		return "", fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
 	timeout := o.Timeout
 	if timeout <= 0 {
 		timeout = defaultResearchTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, bin, researchArgs(o)...)
-	cmd.Dir = workDir
-	cmd.WaitDelay = time.Second // do not wait on grandchildren holding the pipes
-	cmd.Stdin = strings.NewReader(prompt)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("research timed out after %s", timeout)
-		}
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = strings.TrimSpace(stdout.String())
-		}
-		return "", fmt.Errorf("research failed: %v: %s", err, util.TruncateString(detail, 500))
-	}
-	answer := strings.TrimSpace(stdout.String())
-	if answer == "" {
-		return "", fmt.Errorf("research returned an empty answer")
-	}
-	return answer, nil
+	args := researchArgs(o)
+	return runCLI("research", bin, prompt, timeout, "", func(string) []string { return args })
 }
