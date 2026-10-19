@@ -86,7 +86,8 @@ func Run(name, prompt string) (string, error) {
 
 // runCLI runs bin with prompt on stdin from a fresh empty temp dir (removed
 // afterwards) and returns the trimmed answer: stdout, or the file outName in
-// the temp dir when outName is set. label names the caller in errors.
+// the temp dir when outName is set. label names the caller in errors; with an
+// empty label the errors give only the cause, for a caller that adds its own.
 func runCLI(label, bin, prompt string, timeout time.Duration, outName string, args func(workDir string) []string) (string, error) {
 	workDir, err := os.MkdirTemp("", "goscribe-harness-")
 	if err != nil {
@@ -107,11 +108,14 @@ func runCLI(label, bin, prompt string, timeout time.Duration, outName string, ar
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("%s timed out after %s", label, timeout)
+			return "", fmt.Errorf("%stimed out after %s", subject(label), timeout)
 		}
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
 			detail = strings.TrimSpace(stdout.String())
+		}
+		if label == "" {
+			return "", fmt.Errorf("%v: %s", err, util.TruncateString(detail, 500))
 		}
 		return "", fmt.Errorf("%s failed: %v: %s", label, err, util.TruncateString(detail, 500))
 	}
@@ -120,16 +124,24 @@ func runCLI(label, bin, prompt string, timeout time.Duration, outName string, ar
 	if outName != "" {
 		data, err := os.ReadFile(filepath.Join(workDir, outName))
 		if err != nil {
-			return "", fmt.Errorf("reading %s answer: %w", label, err)
+			return "", fmt.Errorf("reading the %sanswer: %w", subject(label), err)
 		}
 		answer = string(data)
 	}
 
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
-		return "", fmt.Errorf("%s returned an empty answer", label)
+		return "", fmt.Errorf("%sreturned an empty answer", subject(label))
 	}
 	return answer, nil
+}
+
+// subject is label followed by a space, or "" for no label.
+func subject(label string) string {
+	if label == "" {
+		return ""
+	}
+	return label + " "
 }
 
 // Process applies a post-processing action to the whole transcript. Harness

@@ -81,16 +81,16 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
-	writeMemory(&b, m)
+	var asked []string
+	if librarian {
+		asked = m.Asked
+	}
+	writeMemory(&b, m, asked)
 	if n := len(m.Suggestions); n > 0 {
 		b.WriteString("Already suggested (do not repeat or rephrase):\n")
 		for _, s := range m.Suggestions[max(0, n-recentSuggest):] {
 			fmt.Fprintf(&b, "- [%s] %s\n", s.Type, s.Text)
 		}
-		b.WriteString("\n")
-	}
-	if librarian && len(m.Asked) > 0 {
-		writeList(&b, "Lookups already asked", m.Asked)
 		b.WriteString("\n")
 	}
 	if len(fresh) > 0 {
@@ -118,7 +118,7 @@ func FinalPrompt(context string, m Memory, all []Line) (instructions, transcript
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
-	writeMemory(&b, m)
+	writeMemory(&b, m, nil)
 	b.WriteString(finalTask)
 	window := max(finalWindow-len(context), minFinalWindow)
 	return b.String(), "<transcript>\n" + lastBytes(all, window) + "</transcript>"
@@ -133,8 +133,9 @@ func writeContext(b *strings.Builder, context string) {
 	b.WriteString("\n</context>\n\n")
 }
 
-// writeMemory adds the memory and, after it, the research findings.
-func writeMemory(b *strings.Builder, m Memory) {
+// writeMemory adds the memory and, after it, the research findings and the
+// lookups already asked.
+func writeMemory(b *strings.Builder, m Memory, asked []string) {
 	if m.Summary != "" || len(m.Decisions) > 0 || len(m.OpenQuestions) > 0 || len(m.NotCovered) > 0 {
 		b.WriteString("Memory of the meeting so far:\n")
 		if m.Summary != "" {
@@ -145,7 +146,7 @@ func writeMemory(b *strings.Builder, m Memory) {
 		writeList(b, "Not covered yet", m.NotCovered)
 		b.WriteString("\n")
 	}
-	writeResearch(b, m.Research)
+	writeResearch(b, m.Research, asked)
 }
 
 func writeList(b *strings.Builder, title string, items []string) {

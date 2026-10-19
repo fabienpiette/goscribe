@@ -27,7 +27,8 @@ const defaultResearchTimeout = 3 * time.Minute
 // User settings are not loaded by default (--setting-sources ""): their
 // permissions.allow rules would widen the allowlist, and their hooks and plugins
 // would run. Then plugin and connector MCP servers are unavailable, so MCP tools
-// need an MCPConfig file. With UserSettings they are loaded (--setting-sources user).
+// need an MCPConfig file. With UserSettings they are loaded (--setting-sources user),
+// and an MCPConfig adds its servers to them (no --strict-mcp-config).
 func researchArgs(o ResearchOptions) []string {
 	seen := map[string]bool{}
 	var builtins []string
@@ -60,7 +61,10 @@ func researchArgs(o ResearchOptions) []string {
 		args = append(args, "--model", o.Model)
 	}
 	if o.MCPConfig != "" {
-		args = append(args, "--mcp-config", o.MCPConfig, "--strict-mcp-config")
+		args = append(args, "--mcp-config", o.MCPConfig)
+		if !o.UserSettings {
+			args = append(args, "--strict-mcp-config")
+		}
 	}
 	return args
 }
@@ -77,5 +81,6 @@ func Research(prompt string, o ResearchOptions) (string, error) {
 		timeout = defaultResearchTimeout
 	}
 	args := researchArgs(o)
-	return runCLI("research", bin, prompt, timeout, "", func(string) []string { return args })
+	// No label: the caller says "librarian failed: <cause>".
+	return runCLI("", bin, prompt, timeout, "", func(string) []string { return args })
 }

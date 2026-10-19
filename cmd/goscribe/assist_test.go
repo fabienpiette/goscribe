@@ -248,8 +248,10 @@ func TestAssistLibrarianEndToEnd(t *testing.T) {
 }
 
 func TestAssistLibrarianMCPConfigArgs(t *testing.T) {
-	args := librarianRun(t, "  mcp_config: /srv/mcp.json\n")
-	for _, want := range []string{"[--mcp-config][/srv/mcp.json]", "[--strict-mcp-config]", "[--setting-sources][]"} {
+	mcp := filepath.Join(t.TempDir(), "mcp.json")
+	mustWrite(t, mcp, []byte(`{"mcpServers":{}}`), 0644)
+	args := librarianRun(t, "  mcp_config: "+mcp+"\n")
+	for _, want := range []string{"[--mcp-config][" + mcp + "]", "[--strict-mcp-config]", "[--setting-sources][]"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("librarian args missing %q: %s", want, args)
 		}
@@ -269,7 +271,7 @@ func TestAssistLibrarianSettingsAndPathErrors(t *testing.T) {
 	fakeAudio(t)
 	fakeClaude(t, `{"summary":"s"}`)
 	dir := t.TempDir()
-	cfg := configWith(t, dir, "c.yml", "librarian:\n  allowed_tools: [mcp__linear__get_issue]\n  use_claude_settings: true\n")
+	cfg := configWith(t, dir, "c.yml", "librarian:\n  allowed_tools: [mcp__tracker__get_issue]\n  use_claude_settings: true\n")
 	t.Cleanup(func() { claudeSettingsPath = origSettingsPath })
 	for name, tc := range map[string]struct{ settings, want string }{
 		"allow rules": {`{"permissions":{"allow":["Bash(rm:*)"]}}`, "permissions.allow"},
@@ -290,7 +292,7 @@ func TestAssistLibrarianSettingsAndPathErrors(t *testing.T) {
 	mustWrite(t, sp, []byte(`{"permissions":{"allow":[]},"model":"x"}`), 0644)
 	claudeSettingsPath = func() (string, error) { return sp, nil }
 	harness.ClaudeBinary = "no-such-claude-binary"
-	cfg = configWith(t, dir, "ok.yml", "librarian:\n  allowed_tools: [mcp__linear__get_issue]\n  use_claude_settings: true\n")
+	cfg = configWith(t, dir, "ok.yml", "librarian:\n  allowed_tools: [mcp__tracker__get_issue]\n  use_claude_settings: true\n")
 	b, _ := os.ReadFile(cfg)
 	mustWrite(t, cfg, []byte(strings.Replace(string(b), `openai_api_key: ""`, `openai_api_key: "k"`, 1)), 0644)
 	_, errOut, code := assist(t, "-provider", "openai", "-librarian", "-elevenlabs-key", "k", "-config", cfg, "-o", filepath.Join(dir, "ok.md"))
@@ -300,6 +302,33 @@ func TestAssistLibrarianSettingsAndPathErrors(t *testing.T) {
 }
 
 var origSettingsPath = claudeSettingsPath
+
+func TestResolveMCPConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	mustWrite(t, filepath.Join(home, "mcp.json"), []byte(`{}`), 0644)
+	if p, err := resolveMCPConfig("~/mcp.json"); err != nil || p != filepath.Join(home, "mcp.json") {
+		t.Errorf("~/mcp.json = %q, %v", p, err)
+	}
+	t.Chdir(home)
+	if p, err := resolveMCPConfig("mcp.json"); err != nil || p != filepath.Join(home, "mcp.json") {
+		t.Errorf("mcp.json = %q, %v", p, err)
+	}
+	if _, err := resolveMCPConfig("~/missing.json"); err == nil || !strings.Contains(err.Error(), "mcp_config") {
+		t.Errorf("missing file: err = %v", err)
+	}
+}
+
+func TestAssistLibrarianMissingMCPConfig(t *testing.T) {
+	fakeAudio(t)
+	fakeClaude(t, `{"summary":"s"}`)
+	dir := t.TempDir()
+	cfg := configWith(t, dir, "c.yml", "librarian:\n  allowed_tools: [mcp__tracker__get_issue]\n  mcp_config: ~/no-such-mcp.json\n")
+	_, errOut, code := assist(t, "-provider", "claude", "-librarian", "-elevenlabs-key", "k", "-config", cfg, "-o", filepath.Join(dir, "n.md"))
+	if code != 2 || !strings.Contains(errOut, "mcp_config") || !strings.Contains(errOut, "no-such-mcp.json") {
+		t.Errorf("code = %d, stderr = %q", code, errOut)
+	}
+}
 
 func TestClaudeSettingsPath(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "/srv/claude")
@@ -317,7 +346,7 @@ func TestAssistLibrarianConfigDirSettingsRefused(t *testing.T) {
 	fakeAudio(t)
 	fakeClaude(t, `{"summary":"s"}`)
 	dir := t.TempDir()
-	cfg := configWith(t, dir, "c.yml", "librarian:\n  allowed_tools: [mcp__linear__get_issue]\n  use_claude_settings: true\n")
+	cfg := configWith(t, dir, "c.yml", "librarian:\n  allowed_tools: [mcp__tracker__get_issue]\n  use_claude_settings: true\n")
 	cd := t.TempDir()
 	mustWrite(t, filepath.Join(cd, "settings.json"), []byte(`{"permissions":{"allow":["Read"]}}`), 0644)
 	t.Setenv("CLAUDE_CONFIG_DIR", cd)
@@ -384,7 +413,7 @@ esac
 	harness.ClaudeBinary = bin
 	defer func() { harness.ClaudeBinary = orig }()
 
-	cfgFile := configWith(t, dir, "config.yml", "librarian:\n  allowed_tools: [\"Bash(gh pr view:*)\", mcp__linear__get_issue]\n  timeout: 20s\n"+extraCfg)
+	cfgFile := configWith(t, dir, "config.yml", "librarian:\n  allowed_tools: [\"Bash(gh pr view:*)\", mcp__tracker__get_issue]\n  timeout: 20s\n"+extraCfg)
 	notes := filepath.Join(dir, "notes.md")
 
 	out := &syncBuf{}

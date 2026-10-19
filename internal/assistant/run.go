@@ -233,7 +233,9 @@ func (s *state) finish(r result) {
 }
 
 // queueLookup takes the lookup a reply asks, if any: it starts at once when
-// the librarian is idle, else it waits, replacing an older waiting one.
+// the librarian is idle, else it waits, replacing an older waiting one. A
+// replaced lookup never ran: it leaves Asked, so it frees its slot under the
+// limit and may be asked again.
 func (s *state) queueLookup(r Reply, at time.Duration) {
 	if s.c.Research == nil || s.ending || len(r.Lookups) == 0 {
 		return
@@ -242,7 +244,17 @@ func (s *state) queueLookup(r Reply, at time.Duration) {
 	if limit <= 0 {
 		limit = defaultMaxLookups
 	}
+	waiting := s.pending
+	if waiting != nil {
+		s.mem.forgetAsked(waiting.Query)
+	}
+	keepWaiting := func() {
+		if waiting != nil {
+			s.mem.Asked = append(s.mem.Asked, waiting.Query)
+		}
+	}
 	if len(s.mem.Asked) >= limit {
+		keepWaiting()
 		if !s.limitShown {
 			s.limitShown = true
 			s.print(s.dim(fmt.Sprintf("📚 lookup limit reached (%d)", limit)))
@@ -251,14 +263,15 @@ func (s *state) queueLookup(r Reply, at time.Duration) {
 	}
 	l, ok := s.mem.TakeLookup(r, at, limit)
 	if !ok {
+		keepWaiting()
 		return
 	}
 	s.pending, s.pendingSince = &l, time.Now()
 	s.maybeLookup(time.Now())
 }
 
-// maybeLookup drops a waiting lookup once it is too old, and starts it when
-// the librarian is idle.
+// maybeLookup drops a waiting lookup once it is too old (silently, and out of
+// Asked: it never ran), and starts it when the librarian is idle.
 func (s *state) maybeLookup(now time.Time) {
 	if s.pending == nil || s.looking {
 		return
@@ -266,6 +279,7 @@ func (s *state) maybeLookup(now time.Time) {
 	l := *s.pending
 	s.pending = nil
 	if now.Sub(s.pendingSince) > LookupMaxWait {
+		s.mem.forgetAsked(l.Query)
 		return
 	}
 	s.looking = true

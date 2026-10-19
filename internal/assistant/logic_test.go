@@ -362,6 +362,11 @@ func TestClean(t *testing.T) {
 	if got := Clean("ok\x1b[2J\x07 done\nnext\tcol é"); got != "ok[2J done next col é" {
 		t.Errorf("Clean = %q", got)
 	}
+	// Format characters: a bidi override (U+202E) could make a line read
+	// backwards, zero-width ones (U+200B, U+2066) hide text.
+	if got := Clean("📚 \u202edeliaf\u200b ok\u2066x\u2069\ufeff"); got != "📚 deliaf okx" {
+		t.Errorf("Clean = %q", got)
+	}
 }
 
 func mustWrite(t *testing.T, path string, data []byte, perm os.FileMode) {

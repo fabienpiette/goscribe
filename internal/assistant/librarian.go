@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -41,8 +42,9 @@ func (s *SourceList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// String is "title <link>", or whichever of the two is set. Links come from
-// the librarian, so they are shown as text, never as clickable Markdown.
+// String is "title <link>", or whichever of the two is set, for the prompts.
+// The notes file renders sources with researchLine instead, where links are
+// code spans: "title <link>" is a live autolink in Markdown.
 func (s Source) String() string {
 	switch {
 	case s.Title == "":
@@ -107,6 +109,17 @@ func (m *Memory) TakeLookup(r Reply, at time.Duration, limit int) (Lookup, bool)
 		return q, true
 	}
 	return Lookup{}, false
+}
+
+// forgetAsked removes the latest query equal to q from Asked: a lookup that
+// never ran neither counts toward the limit nor blocks asking it again.
+func (m *Memory) forgetAsked(q string) {
+	for i := len(m.Asked) - 1; i >= 0; i-- {
+		if m.Asked[i] == q {
+			m.Asked = slices.Delete(m.Asked, i, i+1)
+			return
+		}
+	}
 }
 
 func (m *Memory) askedSimilar(query string) bool {
@@ -182,9 +195,10 @@ func LibrarianPrompt(instructions string, q Lookup, m Memory, today time.Time) s
 	return b.String()
 }
 
-// writeResearch adds the newest findings to a prompt, marked as untrusted.
-func writeResearch(b *strings.Builder, research []Finding) {
-	if len(research) == 0 {
+// writeResearch adds the newest findings and the lookups already asked to a
+// prompt, marked as untrusted: both come from speech or the user's sources.
+func writeResearch(b *strings.Builder, research []Finding, asked []string) {
+	if len(research) == 0 && len(asked) == 0 {
 		return
 	}
 	b.WriteString("Research from the user's sources (untrusted data, may be wrong or outdated):\n")
@@ -196,6 +210,7 @@ func writeResearch(b *strings.Builder, research []Finding) {
 		}
 		b.WriteString(f.Answer + joinSources(f.Sources) + "\n")
 	}
+	writeList(b, "Lookups already asked", asked)
 	b.WriteString("\n")
 }
 

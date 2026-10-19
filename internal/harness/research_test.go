@@ -10,12 +10,12 @@ import (
 
 func TestResearchArgs(t *testing.T) {
 	o := ResearchOptions{
-		AllowedTools: []string{"Bash(gh search:*)", "Read(~/notes/**)", "mcp__linear__get_issue"},
+		AllowedTools: []string{"Bash(gh search:*)", "Read(~/notes/**)", "mcp__tracker__get_issue"},
 		Model:        "sonnet",
 	}
 	want := []string{"-p", "--output-format", "text",
 		"--tools", "Bash,Read",
-		"--allowedTools", "Bash(gh search:*),Read(~/notes/**),mcp__linear__get_issue",
+		"--allowedTools", "Bash(gh search:*),Read(~/notes/**),mcp__tracker__get_issue",
 		"--disallowedTools", "WebFetch,WebSearch",
 		"--permission-mode", "dontAsk",
 		"--no-session-persistence", "--disable-slash-commands",
@@ -43,10 +43,17 @@ func TestResearchArgs(t *testing.T) {
 }
 
 func TestResearchArgsUserSettings(t *testing.T) {
-	got := researchArgs(ResearchOptions{AllowedTools: []string{"mcp__linear__get_issue"}, UserSettings: true})
+	got := researchArgs(ResearchOptions{AllowedTools: []string{"mcp__tracker__get_issue"}, UserSettings: true})
 	joined := strings.Join(got, " ")
 	if !strings.Contains(joined, "--setting-sources user") || strings.Contains(joined, "--mcp-config") {
 		t.Errorf("args = %q", joined)
+	}
+
+	// Both sources add up: the user's connectors stay with the config's servers.
+	got = researchArgs(ResearchOptions{AllowedTools: []string{"mcp__tracker__get_issue"}, UserSettings: true, MCPConfig: "/x.json"})
+	joined = strings.Join(got, " ")
+	if !strings.HasSuffix(joined, "--setting-sources user --mcp-config /x.json") || strings.Contains(joined, "--strict-mcp-config") {
+		t.Errorf("args with MCPConfig = %q", joined)
 	}
 }
 
@@ -94,5 +101,19 @@ func TestResearchTimeout(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("err = %v, want timed out", err)
+	}
+}
+
+// Errors carry only the cause: the caller adds the "librarian failed" label.
+func TestResearchErrorHasNoLabel(t *testing.T) {
+	fakeHarness(t, `echo "not logged in" >&2; exit 1`, "")
+	_, err := Research("x", ResearchOptions{Timeout: 10 * time.Second})
+	if err == nil || err.Error() != "exit status 1: not logged in" {
+		t.Errorf("err = %v, want %q", err, "exit status 1: not logged in")
+	}
+	fakeHarness(t, `true`, "")
+	_, err = Research("x", ResearchOptions{Timeout: 10 * time.Second})
+	if err == nil || err.Error() != "returned an empty answer" {
+		t.Errorf("err = %v", err)
 	}
 }

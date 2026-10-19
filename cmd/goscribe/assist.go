@@ -127,6 +127,13 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		if err := lib.Validate(); err != nil {
 			return usageErr("librarian: %v", err)
 		}
+		if lib.MCPConfig != "" {
+			p, err := resolveMCPConfig(lib.MCPConfig)
+			if err != nil {
+				return usageErr("librarian: %v", err)
+			}
+			lib.MCPConfig = p
+		}
 		if lib.UseClaudeSettings {
 			sp, err := claudeSettingsPath()
 			if err == nil {
@@ -246,6 +253,27 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveMCPConfig expands a leading ~ and makes path absolute: the librarian
+// runs from a temp dir, where a relative path would point nowhere. The file
+// must exist.
+func resolveMCPConfig(path string) (string, error) {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("mcp_config: cannot expand ~: %v", err)
+		}
+		path = filepath.Join(home, path[1:])
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("mcp_config: %v", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return "", fmt.Errorf("mcp_config: %v", err)
+	}
+	return abs, nil
 }
 
 // claudeSettingsPath is the user's Claude settings file (a var for tests).

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -388,20 +389,24 @@ func TestRunLibrarianLookup(t *testing.T) {
 	}
 }
 
-func runThreeLookups(t *testing.T) (*fakeResearch, chan struct{}, func()) {
+// runThreeLookups asks three lookups in three cycles while the first one
+// hangs until release is closed: the second waits, the third replaces it. It
+// returns once the third reply is applied.
+func runThreeLookups(t *testing.T) (*fakeResearch, *syncBuffer, chan struct{}, chan<- Event, func()) {
 	t.Helper()
 	release := make(chan struct{})
 	f := &fakeThink{replies: []func() (string, error){
 		lookupReply("When was the Globex contract signed?"),
 		lookupReply("Who owns the billing migration ticket?"),
-		lookupReply("What latency did the March load test show?"),
+		answer(`{"summary":"s","decisions":["third applied"],"lookups":[{"query":"What latency did the March load test show?","why":"asked now"}]}`),
 		answer(`{"summary":"final"}`),
 	}}
 	r := &fakeResearch{reply: func() (string, error) { <-release; return foundT1, nil }}
+	out := &syncBuffer{}
 	events := make(chan Event)
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: &syncBuffer{},
+		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out,
 			Research: r.research}, events)
 	}()
 	for i := 1; i <= 3; i++ {
@@ -411,13 +416,15 @@ func runThreeLookups(t *testing.T) (*fakeResearch, chan struct{}, func()) {
 			waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
 		}
 	}
-	time.Sleep(40 * time.Millisecond) // the third reply is applied, ticks run
-	return r, release, func() { close(events); <-done }
+	// The decision is printed while the third reply is applied; its lookup is
+	// queued in the same step, before Run handles anything else.
+	waitUntil(t, "third reply applied", func() bool { return strings.Contains(out.String(), "Decision: third applied") })
+	return r, out, release, events, func() { close(events); <-done }
 }
 
 func TestRunLibrarianOneAtATime(t *testing.T) {
 	fastTimers(t)
-	r, release, stop := runThreeLookups(t)
+	r, out, release, _, stop := runThreeLookups(t)
 	if n := r.count(); n != 1 {
 		t.Fatalf("research calls while one runs = %d", n)
 	}
@@ -426,11 +433,12 @@ func TestRunLibrarianOneAtATime(t *testing.T) {
 	if p := r.prompt(1); !strings.Contains(p, "What latency did the March load test show?") {
 		t.Errorf("the newest pending lookup replaces older ones:\n%s", p)
 	}
-	time.Sleep(40 * time.Millisecond)
-	if n := r.count(); n != 2 {
-		t.Errorf("research calls = %d, want 2", n)
-	}
+	waitUntil(t, "second finding", func() bool { return strings.Count(out.String(), "Librarian:") == 2 })
 	stop()
+	// Lookups start (and print 🔎) inside Run: once it returns, the feed is final.
+	if n := strings.Count(out.String(), "🔎"); n != 2 {
+		t.Errorf("lookups started = %d, want 2:\n%s", n, out.String())
+	}
 }
 
 func TestRunLibrarianDropsStalePending(t *testing.T) {
@@ -438,13 +446,90 @@ func TestRunLibrarianDropsStalePending(t *testing.T) {
 	orig := LookupMaxWait
 	LookupMaxWait = time.Millisecond
 	t.Cleanup(func() { LookupMaxWait = orig })
-	r, release, stop := runThreeLookups(t)
+	r, out, release, events, stop := runThreeLookups(t)
+	// Run takes this event only after the third reply is fully applied, so the
+	// third lookup is pending from before the sleep, which makes it stale.
+	events <- line("me", "ok")
+	time.Sleep(10 * LookupMaxWait)
 	close(release)
-	time.Sleep(40 * time.Millisecond)
+	waitUntil(t, "first finding", func() bool { return strings.Contains(out.String(), "Librarian:") })
+	stop()
 	if n := r.count(); n != 1 {
 		t.Errorf("a stale pending lookup must be dropped; research calls = %d", n)
 	}
-	stop()
+	// Dropped silently: one 🔎 line, and no other librarian line.
+	feed := out.String()
+	if strings.Count(feed, "🔎") != 1 || strings.Count(feed, "📚") != 1 || strings.Contains(feed, "⚠") {
+		t.Errorf("a stale drop must be silent:\n%s", feed)
+	}
+}
+
+// A replaced lookup never ran: it frees its slot and can be asked again.
+func TestRunLibrarianReplacedCanBeAskedAgain(t *testing.T) {
+	fastTimers(t)
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		lookupReply("Who owns the billing migration ticket?"),
+		answer(`{"summary":"s","decisions":["third applied"],"lookups":[{"query":"What latency did the March load test show?","why":"asked now"}]}`),
+		lookupReply("Who owns the billing migration ticket?"),
+		answer(`{"summary":"final"}`),
+	}}
+	r := &fakeResearch{reply: func() (string, error) { <-release; return foundT1, nil }}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out,
+			Research: r.research, MaxLookups: 3}, events)
+	}()
+	for i := 1; i <= 3; i++ {
+		events <- line("me", twelveWords)
+		waitUntil(t, "cycle", func() bool { return f.count() == i })
+	}
+	waitUntil(t, "third reply applied", func() bool { return strings.Contains(out.String(), "Decision: third applied") })
+	close(release)
+	waitUntil(t, "the third lookup", func() bool { return r.count() == 2 })
+	waitUntil(t, "second finding", func() bool { return strings.Count(out.String(), "Librarian:") == 2 })
+	events <- line("me", twelveWords)
+	waitUntil(t, "the replaced query, asked again", func() bool { return r.count() == 3 })
+	if p := r.prompt(2); !strings.Contains(p, "Question: Who owns the billing migration ticket?") {
+		t.Errorf("third research prompt:\n%s", p)
+	}
+	close(events)
+	<-done
+	if strings.Contains(out.String(), "lookup limit reached") {
+		t.Errorf("three lookups ran with MaxLookups 3; the replaced one must not count:\n%s", out.String())
+	}
+}
+
+// A failed lookup ran: it still counts toward the limit.
+func TestRunLibrarianFailedLookupCounts(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		lookupReply("Who owns the billing migration ticket?"),
+		answer(`{"summary":"final"}`),
+	}}
+	r := &fakeResearch{reply: func() (string, error) { return "", errors.New("exit status 1: not logged in") }}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out,
+			Research: r.research, MaxLookups: 1}, events)
+	}()
+	events <- line("me", twelveWords)
+	waitUntil(t, "failure line", func() bool {
+		return strings.Contains(out.String(), "⚠ librarian failed: exit status 1: not logged in\n")
+	})
+	events <- line("me", twelveWords)
+	waitUntil(t, "limit line", func() bool { return strings.Contains(out.String(), "📚 lookup limit reached (1)") })
+	close(events)
+	<-done
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1", n)
+	}
 }
 
 func TestRunLibrarianFailure(t *testing.T) {
@@ -473,7 +558,7 @@ func TestRunLibrarianFailure(t *testing.T) {
 			waitUntil(t, "second cycle", func() bool { return f.count() == 2 })
 			close(events)
 			<-done
-			if instr, _ := f.call(1); strings.Contains(instr, "Research from") {
+			if instr, _ := f.call(1); strings.Contains(instr, "signed? →") {
 				t.Errorf("a failed lookup must not reach the memory:\n%s", instr)
 			}
 			if strings.Contains(out.String(), "\x1b") {
@@ -573,5 +658,26 @@ func TestRunWithoutLibrarian(t *testing.T) {
 	}
 	if instr, _ := f.call(0); strings.Contains(instr, `"lookups"`) {
 		t.Errorf("without the librarian, the cycle must not ask for lookups:\n%s", instr)
+	}
+}
+
+// A new lookup that is refused (here: a question that already ran) leaves the
+// waiting one in place and in Asked; one like the waiting question replaces it.
+func TestQueueLookupKeepsOrReplacesWaiting(t *testing.T) {
+	s := &state{c: Config{Research: func(string) (string, error) { return "", nil }, Out: &syncBuffer{}}, looking: true}
+	s.mem.Asked = []string{"When was the Globex contract signed?"} // ran already
+	s.queueLookup(Reply{Lookups: Lookups{{Query: "Who owns the billing migration ticket?"}}}, 0)
+	s.queueLookup(Reply{Lookups: Lookups{{Query: "when was the Globex contract signed"}}}, 0)
+	if s.pending == nil || s.pending.Query != "Who owns the billing migration ticket?" {
+		t.Errorf("pending = %+v", s.pending)
+	}
+	want := []string{"When was the Globex contract signed?", "Who owns the billing migration ticket?"}
+	if !slices.Equal(s.mem.Asked, want) {
+		t.Errorf("asked = %q, want %q", s.mem.Asked, want)
+	}
+	s.queueLookup(Reply{Lookups: Lookups{{Query: "who owns the billing migration ticket now"}}}, 0)
+	want = []string{"When was the Globex contract signed?", "who owns the billing migration ticket now"}
+	if s.pending == nil || s.pending.Query != want[1] || !slices.Equal(s.mem.Asked, want) {
+		t.Errorf("pending = %+v, asked = %q", s.pending, s.mem.Asked)
 	}
 }
