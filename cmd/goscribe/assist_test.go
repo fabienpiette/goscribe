@@ -640,3 +640,14 @@ func TestAssistRecapFlag(t *testing.T) {
 		t.Errorf("exit = %d, stderr = %q", code, stderr.String())
 	}
 }
+
+func TestAssistHermesNeedsCLI(t *testing.T) {
+	orig := harness.HermesBinary
+	harness.HermesBinary = "goscribe-no-such-hermes"
+	t.Cleanup(func() { harness.HermesBinary = orig })
+	t.Setenv("HOME", t.TempDir())
+	stderr := &syncBuf{}
+	if code := runAssist([]string{"-provider", "hermes", "-elevenlabs-key", "k"}, &syncBuf{}, stderr); code != 2 || !strings.Contains(stderr.String(), "-provider hermes needs the goscribe-no-such-hermes CLI on PATH") {
+		t.Errorf("exit = %d, stderr = %q", code, stderr.String())
+	}
+}

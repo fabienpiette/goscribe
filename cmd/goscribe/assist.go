@@ -85,15 +85,15 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	contextPath := fs.String("context", "", "Meeting background: a .md file or a folder of .md files (sent to the model)")
 	output := fs.String("o", "", "Notes file (default: assist-YYYY-MM-DD_HH-MM-SS.md in the current folder)")
-	providerFlag := fs.String("provider", "", "Model that thinks: openai, gemini, claude or codex (default: config provider, else openai)")
-	modelFlag := fs.String("model", "", "Model for -provider (default: config codex_model / claude_model / gemini_model, else the provider's default)")
+	providerFlag := fs.String("provider", "", "Model that thinks: openai, gemini, claude, codex or hermes (default: config provider, else openai)")
+	modelFlag := fs.String("model", "", "Model for -provider (default: config codex_model / claude_model / hermes_model / gemini_model, else the provider's default)")
 	source := fs.String("source", "", "mic, system or both (default: config record_source, else both)")
 	mic := fs.String("mic", "", "Input device (default: config record_mic, else the system default; see -list-sources)")
 	system := fs.String("system", "", "Computer sound monitor (default: config record_system, else the default output's monitor)")
 	language := fs.String("language", "", "Meeting language code, e.g. fr (default: config language, else auto-detect)")
 	keyterms := fs.String("keyterms", "", "Comma-separated names/jargon to favor (default: config elevenlabs_keyterms)")
 	elevenLabsKey := fs.String("elevenlabs-key", "", "ElevenLabs API key (default: config, then $ELEVENLABS_API_KEY)")
-	interval := fs.Duration("interval", 0, "Shortest time between two updates (default: 20s, 30s with claude/codex)")
+	interval := fs.Duration("interval", 0, "Shortest time between two updates (default: 20s, 30s with claude/codex/hermes)")
 	recap := fs.Duration("recap", 0, "How far back the recap key (w) goes (default: config assist_recap, else 5m)")
 	librarian := fs.Bool("librarian", false, "Let the model look things up in your sources (librarian in the config; Claude Code)")
 	configFile := fs.String("config", "", "Config file (default: ~/.goscribe/config.yml)")
@@ -133,6 +133,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		return usageErr("%v", err)
 	}
 	harness.Models = cfg.HarnessModels()
+	harness.HermesProvider = cfg.HermesProvider
 	if *modelFlag != "" && harness.IsHarness(prov) {
 		harness.Models[prov] = *modelFlag
 	}
@@ -393,6 +394,10 @@ func checkThinker(prov string, cfg *config.Config) error {
 	case "codex":
 		if _, err := exec.LookPath(harness.CodexBinary); err != nil {
 			return fmt.Errorf("-provider codex needs the %s CLI on PATH", harness.CodexBinary)
+		}
+	case "hermes":
+		if _, err := exec.LookPath(harness.HermesBinary); err != nil {
+			return fmt.Errorf("-provider hermes needs the %s CLI on PATH", harness.HermesBinary)
 		}
 	}
 	return nil

@@ -1,6 +1,6 @@
 # goscribe
 
-AI-powered audio recording, transcription and post-processing — transcribe with OpenAI Whisper, Gemini, ElevenLabs Scribe or local faster-whisper, then summarize with OpenAI, Gemini, or your Claude Code / Codex login.
+AI-powered audio recording, transcription and post-processing — transcribe with OpenAI Whisper, Gemini, ElevenLabs Scribe or local faster-whisper, then summarize with OpenAI, Gemini, or your Claude Code / Codex / Hermes Agent login.
 
 ---
 
@@ -28,7 +28,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 ## Features
 
 - **Dual providers** — OpenAI (Whisper + GPT) and Google Gemini, with automatic fallback between them
-- **Local agent harnesses** — run post-processing actions through your Claude Code or Codex CLI login instead of an API key
+- **Local agent harnesses** — run post-processing actions through your Claude Code, Codex or Hermes Agent CLI login instead of an API key
 - **Search** — `goscribe search tokens person:alex -since 2026-09-01` finds meetings by their tags
 - **Live assistant** — `goscribe assist` follows a meeting live (ElevenLabs realtime) and, in your terminal only, suggests questions, answers from your notes, missed points and risks, while keeping a running summary
 - **Recording** — `goscribe record` captures the mic and/or computer sound to mp3 (Ctrl+C to stop), lets you mute either side mid-recording, warns about silent sources, and can transcribe right after
@@ -47,7 +47,7 @@ goscribe -action openai-meeting-summary meeting.mp3
 - **ffmpeg** — for `goscribe record` and `goscribe assist`, and to split files over the provider size limits
 - **pactl** (PipeWire or PulseAudio) — for `goscribe record` and `goscribe assist`
 - **whisper-ctranslate2** — for `-transcriber local` (`uv tool install whisper-ctranslate2`)
-- **claude** or **codex** CLI, logged in — for `-provider claude` / `-provider codex`
+- **claude**, **codex** or **hermes** CLI, logged in — for `-provider claude` / `-provider codex` / `-provider hermes`
 
 ### CLI — from source
 
@@ -117,7 +117,7 @@ Output files are written alongside the input:
 |------|-------------|
 | `-k` | OpenAI API key |
 | `-gemini-key` | Gemini API key |
-| `-provider` | Actions engine: `openai` (default), `gemini`, `claude` or `codex` |
+| `-provider` | Actions engine: `openai` (default), `gemini`, `claude`, `codex` or `hermes` |
 | `-transcriber` | Transcription engine: `local`, `elevenlabs`, `openai` or `gemini` (default: config, else same as `-provider`) |
 | `-elevenlabs-key` | ElevenLabs API key (default: config, then `$ELEVENLABS_API_KEY`) |
 | `-keyterms` | Comma-separated names/jargon for ElevenLabs to favor (20% surcharge) |
@@ -258,7 +258,9 @@ When both keys are configured, goscribe automatically falls back to the other pr
 
 ### Local harnesses
 
-**claude** and **codex** run post-processing actions and `--auto` through the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex) CLI, with that CLI's own login and its default model, or the one set with `claude_model` / `codex_model` in the config (the action's `model` field is ignored). They run headless from an empty temp dir, with no tools, no MCP servers, no hooks or plugins and no saved session (Codex also gets a read-only sandbox and no web search). The transcript is untrusted input, so the agents get no way to read files or run commands that a spoken prompt injection could abuse. The whole transcript goes in one prompt, without chunking. They can't transcribe audio, so with no `-transcriber` set they pair with `local`. No fallback to an API provider.
+**claude**, **codex** and **hermes** run post-processing actions and `--auto` through the [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) or [Hermes Agent](https://github.com/NousResearch/hermes-agent) CLI, with that CLI's own login and its default model, or the one set with `claude_model` / `codex_model` / `hermes_model` in the config (the action's `model` field is ignored). They run headless from an empty temp dir, with no tools, no MCP servers, no hooks or plugins and no saved session (Codex also gets a read-only sandbox and no web search). The transcript is untrusted input, so the agents get no way to read files or run commands that a spoken prompt injection could abuse. The whole transcript goes in one prompt, without chunking. They can't transcribe audio, so with no `-transcriber` set they pair with `local`. No fallback to an API provider.
+
+Hermes runs with `--safe-mode`, which drops its user config, plugins, MCP servers, AGENTS.md, SOUL.md and memory, and `-t none`, which enables no toolset (Hermes has no explicit empty toolset, and an empty `-t` would enable them all). Safe mode also drops the default model, so goscribe passes it: `hermes_model` and `hermes_provider` from its config (or `-model` in `assist`), else the `model.default` and `model.provider` of your Hermes config (`$HERMES_HOME/config.yaml`, `~/.hermes` by default). goscribe then reads Hermes's event stream and fails closed: any event other than plain text and the result (a tool call, say) discards the answer with an error. Hermes has no way to skip saving the session, so it keeps it in its history; `--source tool` keeps it out of your session lists.
 
 ### Transcribers
 
@@ -348,10 +350,10 @@ goscribe assist -provider codex -model gpt-6-luna             # pick the model (
 - Names: `others` can be several people. When the talk makes clear who speaks (people address each other, or a name fits the attendees in your context), the summary, decisions and action items use the name.
 - Keyterms: add a `keyterms: Acme, Globex, Marie Curie` line to a context file (in the text or the front matter) and those names are favored by the live speech-to-text, on top of `-keyterms` and `elevenlabs_keyterms`. The model also spells sound-alikes as the context does.
 - The notes file (`assist-<date>_<time>.md` by default) is rewritten after every update: summary so far, agenda items not covered yet, decisions, open questions and every suggestion. Its header gives the wall-clock start, to match suggestion times with a recording started at another moment. Ctrl+C writes the final summary and action items into it; a second Ctrl+C quits at once. These notes are a live draft: a summary made from the full recording (`goscribe` with a summary action) is more reliable.
-- Updates run at most every 20 s with `openai`/`gemini`, 30 s with `claude`/`codex` (`-interval` to change). One update at a time; a failed one is retried later with what it missed.
+- Updates run at most every 20 s with `openai`/`gemini`, 30 s with `claude`/`codex`/`hermes` (`-interval` to change). One update at a time; a failed one is retried later with what it missed.
 - It captures the audio itself, so run it in a second terminal next to `goscribe record`, or alone. Same device flags and `record_*` config defaults as `record` (`-source`, `-mic`, `-system`, `-list-sources`).
 - Needs an ElevenLabs API key (`elevenlabs_api_key` or `$ELEVENLABS_API_KEY`). Live transcription is billed per stream, so two with `-source both`. The context is resent with every update: keep it small (a warning shows above 50 KB, 200 KB is the limit).
-- The transcript is treated as untrusted data: the model is told never to follow instructions spoken in the meeting, and `claude`/`codex` run with no tools.
+- The transcript is treated as untrusted data: the model is told never to follow instructions spoken in the meeting, and `claude`/`codex`/`hermes` run with no tools.
 - Use headphones: with speakers, the mic also hears the others and their words are labelled `me`.
 - Press `m` to mute or unmute your mic (`me`) and `s` for the computer sound (`others`), in a terminal, as in `record`. A muted side is not transcribed: its live session gets silence and stays open, so nothing said on that side reaches the model, the suggestions or the notes until you unmute. Live transcription lags a second or two behind, so the words said just before you press are dropped too. The status line shows `me (muted)`, and each change is logged, e.g. `🔇 me muted at 00:12:41`. The keys only affect `assist`: when `goscribe record` runs in another terminal, mute it there too.
 - Press `w` ("what did I miss?") for a short recap of the last minutes, e.g. after a distraction: `📝 00:42:10 Recap of the last 5 min:` and 2 to 6 points, in the language of the meeting. It goes back 5 minutes by default (`-recap 10m`, or `assist_recap: 10m` in the config). It is one `-provider` call: when an update is running, the recap follows it, without waiting for the update interval.
@@ -404,7 +406,7 @@ goscribe assist -librarian -context agenda.md -provider claude
 
 ## Known Issues
 
-- **`goscribe assist` reacts with a delay** — about 2 s for the transcript, then up to the update interval plus the model's answer time (30–70 s with `claude`/`codex`), so it is better at "missed" and "risk" than at answering live.
+- **`goscribe assist` reacts with a delay** — about 2 s for the transcript, then up to the update interval plus the model's answer time (30–70 s with `claude`/`codex`/`hermes`), so it is better at "missed" and "risk" than at answering live.
 - **`-transcriber` is CLI only** — server mode still transcribes with the request's provider (OpenAI or Gemini).
 - **ffmpeg required for large files** — files over 25 MB (OpenAI) or 20 MB (Gemini) are split using `ffmpeg`. Install it with `brew install ffmpeg` or `apt install ffmpeg`.
 - **`--auto` and `actions=auto` call the AI API** for action selection, which incurs additional API costs.
@@ -427,7 +429,7 @@ internal/openai/    OpenAI API client
 internal/gemini/    Gemini API client
 internal/elevenlabs/ ElevenLabs Scribe speech-to-text client
 internal/whisperlocal/ Local faster-whisper transcription (whisper-ctranslate2)
-internal/harness/   Claude Code / Codex CLI runner for actions
+internal/harness/   Claude Code / Codex / Hermes CLI runner for actions
 internal/tags/      Tags files (-tags) and goscribe search
 internal/recorder/  ffmpeg recording for goscribe record, live PCM capture for assist
 internal/realtime/  ElevenLabs realtime speech-to-text client (WebSocket)

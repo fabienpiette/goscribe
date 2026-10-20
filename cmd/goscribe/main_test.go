@@ -862,3 +862,36 @@ func TestRunUsesConfiguredHarnessModel(t *testing.T) {
 		t.Errorf("claude args = %q, want --model sonnet", args)
 	}
 }
+
+// -provider hermes runs actions through the Hermes Agent CLI.
+func TestRunHermesProvider(t *testing.T) {
+	transcript := recordsWithTranscript(t)
+	bin := filepath.Join(t.TempDir(), "hermes")
+	script := `#!/bin/sh
+echo "$@" > "$0.args"
+cat > /dev/null
+echo '{"type": "result", "exit_code": 0, "text": "hermes summary"}'
+`
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("model:\n  default: m1\n  provider: p1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", home)
+	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	orig := harness.HermesBinary
+	harness.HermesBinary = bin
+	t.Cleanup(func() { harness.HermesBinary = orig })
+
+	if err := run(runOptions{apiKey: "XXXX", provider: "hermes", postAction: "openai-meeting-summary", transcriptFiles: []string{transcript}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := strings.TrimSuffix(transcript, ".txt") + "-openai-meeting-summary.txt"
+	if got, _ := os.ReadFile(out); string(got) != "hermes summary" {
+		t.Errorf("summary = %q", got)
+	}
+	if args, _ := os.ReadFile(bin + ".args"); !strings.Contains(string(args), "-t none --safe-mode") || !strings.Contains(string(args), "--provider p1 -m m1") {
+		t.Errorf("hermes args = %q", args)
+	}
+}

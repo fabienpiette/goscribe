@@ -46,6 +46,9 @@ type Config struct {
 	// Models for the claude and codex CLIs (empty: the CLI's default model).
 	ClaudeModel string `yaml:"claude_model,omitempty"`
 	CodexModel  string `yaml:"codex_model,omitempty"`
+	HermesModel string `yaml:"hermes_model,omitempty"`
+	// Provider for hermes (e.g. openrouter); empty: the Hermes config's.
+	HermesProvider string `yaml:"hermes_provider,omitempty"`
 	// How far back the recap key (w) of goscribe assist goes (default 5m).
 	AssistRecap time.Duration `yaml:"assist_recap,omitempty"`
 	Language    string        `yaml:"language,omitempty"`
@@ -63,12 +66,15 @@ func (c *Config) HarnessModels() map[string]string {
 	if c.CodexModel != "" {
 		models["codex"] = c.CodexModel
 	}
+	if c.HermesModel != "" {
+		models["hermes"] = c.HermesModel
+	}
 	return models
 }
 
 // ValidProviders lists the engines that can run post-processing actions.
 // claude and codex run through the local Claude Code / Codex CLIs.
-var ValidProviders = []string{"openai", "gemini", "claude", "codex"}
+var ValidProviders = []string{"openai", "gemini", "claude", "codex", "hermes"}
 
 func IsValidProvider(name string) bool {
 	for _, p := range ValidProviders {
