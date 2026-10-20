@@ -13,6 +13,7 @@ const (
 	PartialEvent EventKind = iota // words still being recognized
 	LineEvent                     // a committed transcript line
 	NoticeEvent                   // a status message to show as is
+	MuteEvent                     // a side was muted or unmuted (Muted)
 )
 
 // Event is what the transcription side sends to Run.
@@ -20,6 +21,7 @@ type Event struct {
 	Kind    EventKind
 	Speaker string // "me" or "others"
 	Text    string
+	Muted   bool // MuteEvent: the side is now muted
 }
 
 type Config struct {
@@ -33,6 +35,7 @@ type Config struct {
 	Out         io.Writer
 	Interactive bool            // Out is a terminal: status line and dim lines
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
+	MuteHint    string          // mute keys for the status line, e.g. "m/s"; "" when there are none
 	// Research sends one prompt to the librarian and returns its answer and
 	// the tool calls its allowlist refused; nil turns the librarian off.
 	Research              func(prompt string) (ResearchReply, error)
@@ -74,7 +77,7 @@ const (
 // written at the end.
 func Run(c Config, events <-chan Event) error {
 	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16),
-		lookupResults: make(chan lookupResult, 1), partials: map[string]string{}}
+		lookupResults: make(chan lookupResult, 1), partials: map[string]string{}, muted: map[string]bool{}}
 	// Suggestion times are offsets from this start; with the wall clock, they
 	// can be matched against a recording started at another moment.
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
@@ -128,6 +131,7 @@ type state struct {
 	mem      Memory
 
 	partials    map[string]string
+	muted       map[string]bool // sides muted with the mute keys
 	lastSpeaker string
 
 	thinking   bool
@@ -150,6 +154,12 @@ type state struct {
 func (s *state) elapsed(now time.Time) time.Duration { return now.Sub(s.start) }
 
 func (s *state) handle(ev Event) {
+	// The live session lags the audio by a second or two: what it delivers for
+	// a muted side was said just before the key press. Muted means none of it
+	// is used.
+	if (ev.Kind == PartialEvent || ev.Kind == LineEvent) && s.muted[ev.Speaker] {
+		return
+	}
 	switch ev.Kind {
 	case PartialEvent:
 		s.partials[ev.Speaker] = Clean(ev.Text)
@@ -168,6 +178,14 @@ func (s *state) handle(ev Event) {
 		}
 	case NoticeEvent:
 		s.print(Clean(ev.Text))
+	case MuteEvent:
+		s.muted[ev.Speaker] = ev.Muted
+		icon, word := "🔊", "unmuted"
+		if ev.Muted {
+			icon, word = "🔇", "muted"
+			delete(s.partials, ev.Speaker) // its words in progress won't be finished
+		}
+		s.print(fmt.Sprintf("%s %s %s at %s", icon, ev.Speaker, word, clock(s.elapsed(time.Now()))))
 	}
 }
 
@@ -462,6 +480,11 @@ func (s *state) status(now time.Time) {
 		return
 	}
 	line := "● ASSIST " + clock(s.elapsed(now))
+	for _, side := range []string{"me", "others"} {
+		if s.muted[side] {
+			line += "  " + side + " (muted)"
+		}
+	}
 	if p := s.partials[s.lastSpeaker]; p != "" {
 		line += fmt.Sprintf("  %s ▸ %q", s.lastSpeaker, lastRunes(p, 60))
 	}
@@ -470,7 +493,11 @@ func (s *state) status(now time.Time) {
 	} else {
 		line += "  · listening"
 	}
-	fmt.Fprint(s.c.Out, "\r\033[K"+line+"   (Ctrl+C to stop)")
+	hint := "   (Ctrl+C to stop)"
+	if s.c.MuteHint != "" {
+		hint = "   (" + s.c.MuteHint + ": mute · Ctrl+C: stop)"
+	}
+	fmt.Fprint(s.c.Out, "\r\033[K"+line+hint)
 }
 
 func (s *state) dim(text string) string {

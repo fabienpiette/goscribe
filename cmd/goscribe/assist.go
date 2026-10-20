@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"goscribe/internal/assistant"
@@ -36,6 +37,11 @@ after every update.
 
 It captures the audio on its own: run it in a second terminal next to
 'goscribe record', or alone.
+
+While it runs, press m to mute or unmute your mic and s for the computer
+sound: a muted side is not transcribed (its live session gets silence), so
+nothing from it reaches the model or the notes. Each press affects only
+assist; mute record separately in its own terminal.
 
 EXAMPLES:
   goscribe assist -context ~/notes/standup/
@@ -223,12 +229,21 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	ctx, force, stopSignals := watchSignals()
 	defer stopSignals()
 
-	fmt.Fprintf(stdout, "Assist %s → %s (Ctrl+C to stop)\n", header, notes)
+	// Mute keys, as in record: only on a terminal (and on Linux).
+	toggle, restoreKeys := startMuteKeys(os.Stdin)
+	defer restoreKeys()
+	muteHint := ""
+	if toggle != nil {
+		muteHint = assistMuteHint(sides)
+		fmt.Fprintf(stdout, "Assist %s → %s (%s to mute or unmute, Ctrl+C to stop)\n", header, notes, muteHint)
+	} else {
+		fmt.Fprintf(stdout, "Assist %s → %s (Ctrl+C to stop)\n", header, notes)
+	}
 	if len(background) > assistant.WarnContextBytes {
 		fmt.Fprintf(stdout, "⚠ the context is %d KB: every update resends it, which is slower and costlier\n", len(background)>>10)
 	}
 
-	events := streamSides(ctx, force, sides, opts)
+	events := streamSides(ctx, force, sides, opts, toggle)
 	acfg := assistant.Config{
 		Context:     background,
 		Notes:       notes,
@@ -238,6 +253,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Think:       thinker(prov, cfg),
 		Out:         stdout,
 		Interactive: isTerminal(stdout),
+		MuteHint:    muteHint,
 		Force:       force,
 	}
 	if *librarian {
@@ -251,6 +267,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		acfg.MaxLookups = lib.MaxLookups
 	}
 	err = assistant.Run(acfg, events)
+	restoreKeys()
 	stopSignals()
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
@@ -388,20 +405,78 @@ func assistSides(in recorder.Inputs) []assistSide {
 	return sides
 }
 
+// sideForKey maps a mute key's label (recorder.MuteKeys) to the assist speaker.
+func sideForKey(label string) string {
+	switch label {
+	case "mic":
+		return "me"
+	case "system":
+		return "others"
+	}
+	return ""
+}
+
+// assistMuteHint lists the mute keys of the captured sides, e.g. "m/s".
+func assistMuteHint(sides []assistSide) string {
+	var keys []string
+	for _, side := range sides {
+		for k, label := range recorder.MuteKeys {
+			if sideForKey(label) == side.speaker {
+				keys = append(keys, string(k))
+			}
+		}
+	}
+	return strings.Join(keys, "/")
+}
+
+// muteGate copies captured chunks to the live transcription, replacing them
+// with silence of the same length while muted: the session stays open, so
+// unmuting needs no reconnect. Like recorder.Stream, it never blocks: when
+// out is full (the session is redialing, or stopped), the oldest chunk goes.
+// out is closed when in is.
+func muteGate(in <-chan []byte, out chan []byte, muted *atomic.Bool) {
+	defer close(out)
+	for chunk := range in {
+		if muted.Load() {
+			chunk = make([]byte, len(chunk))
+		}
+		for sent := false; !sent; {
+			select {
+			case out <- chunk:
+				sent = true
+			default:
+				select {
+				case <-out:
+				default:
+				}
+			}
+		}
+	}
+}
+
 // streamSides captures each side and transcribes it live, one realtime
 // session per side. When ctx is cancelled, captures stop and each session
 // flushes its last words; the returned channel closes once every side is
 // done. force (second Ctrl+C) cuts the sessions without waiting.
-func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide, opts realtime.Options) <-chan assistant.Event {
+// Each label received on toggle mutes or unmutes that side; nil means no mute keys.
+func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide, opts realtime.Options, toggle <-chan string) <-chan assistant.Event {
 	events := make(chan assistant.Event, 256)
 	rtCtx, cancelRT := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
+	muted := map[string]*atomic.Bool{}
 	for _, side := range sides {
+		captured := make(chan []byte, 150)
 		audio := make(chan []byte, 150) // 30 s of audio while a session redials
-		wg.Add(2)
+		flag := &atomic.Bool{}          // the gate gets its own flag: the map is only read after this loop
+		muted[side.speaker] = flag
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			if err := recorder.Stream(ctx, side.device, audio); err != nil {
+			muteGate(captured, audio, flag)
+		}()
+		go func() {
+			defer wg.Done()
+			if err := recorder.Stream(ctx, side.device, captured); err != nil {
 				events <- assistant.Event{Kind: assistant.NoticeEvent, Text: fmt.Sprintf("✖ %s: %v", side.speaker, firstLine(err.Error()))}
 			}
 		}()
@@ -412,6 +487,26 @@ func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide,
 			})
 			if err != nil && !errors.Is(err, context.Canceled) {
 				events <- assistant.Event{Kind: assistant.NoticeEvent, Text: fmt.Sprintf("✖ %s: live transcription stopped: %v", side.speaker, err)}
+			}
+		}()
+	}
+	if toggle != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case label := <-toggle:
+					flag := muted[sideForKey(label)]
+					if flag == nil {
+						continue // a key for a side that isn't captured
+					}
+					now := !flag.Load()
+					flag.Store(now)
+					events <- assistant.Event{Kind: assistant.MuteEvent, Speaker: sideForKey(label), Muted: now}
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}

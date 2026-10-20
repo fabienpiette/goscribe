@@ -352,6 +352,7 @@ goscribe assist -source system -language fr                   # only the others,
 - Needs an ElevenLabs API key (`elevenlabs_api_key` or `$ELEVENLABS_API_KEY`). Live transcription is billed per stream, so two with `-source both`. The context is resent with every update: keep it small (a warning shows above 50 KB, 200 KB is the limit).
 - The transcript is treated as untrusted data: the model is told never to follow instructions spoken in the meeting, and `claude`/`codex` run with no tools.
 - Use headphones: with speakers, the mic also hears the others and their words are labelled `me`.
+- Press `m` to mute or unmute your mic (`me`) and `s` for the computer sound (`others`), in a terminal, as in `record`. A muted side is not transcribed: its live session gets silence and stays open, so nothing said on that side reaches the model, the suggestions or the notes until you unmute. Live transcription lags a second or two behind, so the words said just before you press are dropped too. The status line shows `me (muted)`, and each change is logged, e.g. `🔇 me muted at 00:12:41`. The keys only affect `assist`: when `goscribe record` runs in another terminal, mute it there too.
 
 #### Librarian
 
