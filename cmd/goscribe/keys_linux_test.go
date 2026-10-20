@@ -96,3 +96,26 @@ func TestMuteKeysOffWithoutTerminal(t *testing.T) {
 		t.Error("stdin that is not a terminal must not enable mute keys")
 	}
 }
+
+// Assist reads its own key set: the mute keys plus w for a recap.
+func TestStartKeysWithOwnKeys(t *testing.T) {
+	master, slave := openPty(t)
+	keys, restore := startKeys(slave, assistKeys())
+	defer restore()
+	if keys == nil {
+		t.Fatal("expected keys on a terminal")
+	}
+	if _, err := master.Write([]byte("Wrm")); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"recap", "mic"} { // r is not a key
+		select {
+		case got := <-keys:
+			if got != want {
+				t.Errorf("key = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no key for %q", want)
+		}
+	}
+}

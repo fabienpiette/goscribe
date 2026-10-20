@@ -800,3 +800,101 @@ func TestRunStatusWithoutMuteKeys(t *testing.T) {
 		t.Errorf("no mute hint without keys:\n%q", out.String())
 	}
 }
+
+// r asks for a recap of the last minutes: one model call, shown in the feed.
+func TestRunRecap(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"recap":["Sam owns the rollback.","Ship on Monday\u001b[2J."]}`),
+	}}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, Out: out, RecapWindow: 5 * time.Minute}, events)
+	}()
+	events <- line("others", "Sam owns the rollback")
+	events <- Event{Kind: RecapEvent}
+	waitUntil(t, "recap", func() bool { return strings.Contains(out.String(), "Ship on Monday") })
+	close(events)
+	<-done
+	instr, tr := f.call(0)
+	if !strings.Contains(instr, `"recap"`) || !strings.Contains(tr, "others: Sam owns the rollback") {
+		t.Errorf("recap prompt:\n%s\n%s", instr, tr)
+	}
+	feed := out.String()
+	for _, want := range []string{"📝 00:00:00 Recap of the last 5 min:", "  • Sam owns the rollback.", "  • Ship on Monday[2J."} {
+		if !strings.Contains(feed, want) {
+			t.Errorf("feed missing %q:\n%q", want, feed)
+		}
+	}
+}
+
+// A recap asked during an update runs right after it, whatever the interval;
+// a second press meanwhile is not queued twice.
+func TestRunRecapWaitsForTheUpdate(t *testing.T) {
+	fastTimers(t)
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		func() (string, error) { <-release; return `{"summary":"s"}`, nil },
+		answer(`{"recap":["The rollback is owned."]}`),
+	}}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, Out: out, RecapWindow: time.Minute}, events)
+	}()
+	events <- line("others", twelveWords)
+	waitUntil(t, "update in flight", func() bool { return f.count() == 1 })
+	events <- Event{Kind: RecapEvent}
+	events <- Event{Kind: RecapEvent}
+	waitUntil(t, "second press noted", func() bool { return strings.Contains(out.String(), "a recap is already on its way") })
+	close(release)
+	waitUntil(t, "recap", func() bool { return strings.Contains(out.String(), "The rollback is owned.") })
+	close(events)
+	<-done
+	if n := f.count(); n != 2 {
+		t.Errorf("model calls = %d, want the update then one recap", n)
+	}
+	if !strings.Contains(out.String(), "Recap of the last 1 min:") {
+		t.Errorf("feed:\n%s", out.String())
+	}
+}
+
+func TestRunRecapNothingSaidOrFailed(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){func() (string, error) { return "", errors.New("fake failed: boom") }}}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, Out: out, RecapWindow: 90 * time.Second}, events)
+	}()
+	events <- Event{Kind: RecapEvent}
+	waitUntil(t, "nothing said", func() bool { return strings.Contains(out.String(), "📝 nothing was said in the last 1m30s") })
+	if f.count() != 0 {
+		t.Error("no model call without lines")
+	}
+	events <- line("me", "hello")
+	events <- Event{Kind: RecapEvent}
+	waitUntil(t, "failure", func() bool { return strings.Contains(out.String(), "⚠ recap failed: boom") })
+	close(events)
+	<-done
+}
+
+func TestRecapPrompt(t *testing.T) {
+	lines := []Line{
+		{Speaker: "others", At: time.Minute, Text: "old talk"},
+		{Speaker: "me", At: 9 * time.Minute, Text: "recent talk"},
+	}
+	instr, tr := RecapPrompt(Memory{Summary: "We plan the release."}, lines, 10*time.Minute, 5*time.Minute)
+	if strings.Contains(tr, "old talk") || !strings.Contains(tr, "me: recent talk") {
+		t.Errorf("transcript must hold only the window:\n%s", tr)
+	}
+	for _, want := range []string{"untrusted", "Summary: We plan the release.", `{"recap": [`, "last 5 min", "language of the meeting"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("instructions missing %q:\n%s", want, instr)
+		}
+	}
+}
