@@ -490,8 +490,8 @@ func main() {
 
 	apiKey := flag.String("k", "", "OpenAI API key (default: from config)")
 	geminiKey := flag.String("gemini-key", "", "Gemini API key")
-	providerFlag := flag.String("provider", "", "AI provider for actions: openai, gemini, claude or codex (default: from config or openai)")
-	transcriberFlag := flag.String("transcriber", "", "Transcription engine: local, elevenlabs, openai or gemini (default: from config, else same as -provider, or local with claude/codex)")
+	providerFlag := flag.String("provider", "", "AI provider for actions: openai, gemini, claude, codex or hermes (default: from config or openai)")
+	transcriberFlag := flag.String("transcriber", "", "Transcription engine: local, elevenlabs, openai or gemini (default: from config, else same as -provider, or local with claude/codex/hermes)")
 	elevenLabsKey := flag.String("elevenlabs-key", "", "ElevenLabs API key (default: from config or $ELEVENLABS_API_KEY)")
 	keytermsFlag := flag.String("keyterms", "", "Comma-separated names/jargon ElevenLabs should favor, e.g. \"Acme,Globex\" (default: from config; 20% surcharge)")
 	numSpeakers := flag.Int("num-speakers", 0, "Max number of speakers for ElevenLabs diarization (default: from config, else auto)")
@@ -508,7 +508,7 @@ func main() {
 	initConfig := flag.Bool("init", false, "Reset config file to defaults (overwrites ~/.goscribe/config.yml)")
 	setKey := flag.String("set-key", "", "Store OpenAI API key in config file")
 	setGeminiKey := flag.String("set-gemini-key", "", "Store Gemini API key in config file")
-	setProviderFlag := flag.String("set-provider", "", "Set default AI provider in config file (openai, gemini, claude or codex)")
+	setProviderFlag := flag.String("set-provider", "", "Set default AI provider in config file (openai, gemini, claude, codex or hermes)")
 	setTranscriberFlag := flag.String("set-transcriber", "", "Set default transcription engine in config file (local, elevenlabs, openai or gemini)")
 	var transcriptFiles multiStringFlag
 	flag.Var(&transcriptFiles, "transcript", "Process existing transcript file(s) (skips transcription)")
@@ -568,7 +568,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  - transcriber: default transcription engine\n")
 		fmt.Fprintf(os.Stderr, "  - elevenlabs_api_key / elevenlabs_model: ElevenLabs settings (model default: scribe_v2)\n")
 		fmt.Fprintf(os.Stderr, "  - elevenlabs_keyterms / elevenlabs_num_speakers / elevenlabs_verbatim: ElevenLabs tuning\n")
-		fmt.Fprintf(os.Stderr, "  - claude_model / codex_model: model for the claude and codex CLIs (default: the CLI's own)\n")
+		fmt.Fprintf(os.Stderr, "  - claude_model / codex_model / hermes_model: model for the claude, codex and hermes CLIs (default: the CLI's own)\n")
 		fmt.Fprintf(os.Stderr, "  - whisper_model: local Whisper model (default: small)\n")
 		fmt.Fprintf(os.Stderr, "  - language: audio language code for local and elevenlabs\n\n")
 		fmt.Fprintf(os.Stderr, "PROVIDERS:\n")

@@ -103,7 +103,7 @@ func TranscribeAudio(audioPath, provider, openaiKey, geminiKey, geminiModel stri
 }
 
 func ProcessChunked(transcript string, action *config.PostAction, provider, openaiKey, geminiKey, geminiModel string, enableFallback bool) (string, error) {
-	// Local harnesses (claude, codex) use their own login and never fall back to an API.
+	// Local harnesses (claude, codex, hermes) use their own login and never fall back to an API.
 	if harness.IsHarness(provider) {
 		return harness.Process(transcript, action, provider)
 	}
@@ -165,7 +165,7 @@ func ProcessChunked(transcript string, action *config.PostAction, provider, open
 
 func SelectBestActions(transcript string, actions []config.PostAction, provider, openaiKey, geminiKey, geminiModel string) ([]string, error) {
 	switch provider {
-	case "claude", "codex":
+	case "claude", "codex", "hermes":
 		return harness.SelectBestActions(transcript, actions, provider)
 	case "gemini":
 		if geminiKey == "" {

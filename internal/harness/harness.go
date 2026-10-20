@@ -6,6 +6,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 var (
 	ClaudeBinary = "claude"
 	CodexBinary  = "codex"
+	HermesBinary = "hermes"
 )
 
 // codexDisabledFeatures turns off every Codex capability that lets the model act
@@ -35,12 +37,12 @@ var codexDisabledFeatures = []string{
 // Timeout bounds a single harness call.
 var Timeout = 20 * time.Minute
 
-// Models picks the model per harness ("claude", "codex"); a harness missing
+// Models picks the model per harness ("claude", "codex", "hermes"); a harness missing
 // from it uses its CLI's default model. Set from the config at startup.
 var Models = map[string]string{}
 
 func IsHarness(name string) bool {
-	return name == "claude" || name == "codex"
+	return name == "claude" || name == "codex" || name == "hermes"
 }
 
 // Run sends prompt on stdin to the named harness and returns its final answer.
@@ -89,9 +91,70 @@ func Run(name, prompt string) (string, error) {
 			}
 			return append(args, "-")
 		})
+	case "hermes":
+		bin, err := exec.LookPath(HermesBinary)
+		if err != nil {
+			return "", fmt.Errorf("%s not found on PATH (install Hermes Agent)", HermesBinary)
+		}
+		// No toolsets: Hermes has no "none" toolset, and an unknown name enables
+		// nothing (an empty -t would enable them all). No AGENTS.md, SOUL.md or
+		// memory; sessions are tagged as a tool's, out of the user's lists.
+		args := []string{"chat", "--query-file", "-", "--oneshot",
+			"-t", "none",
+			"--ignore-rules",
+			"--source", "tool",
+			"--format", "stream-json",
+		}
+		if m := Models[name]; m != "" {
+			args = append(args, "-m", m)
+		}
+		out, err := runCLI(name, bin, prompt, Timeout, "", func(string) []string { return args })
+		if err != nil {
+			return "", err
+		}
+		return hermesAnswer(out)
 	default:
-		return "", fmt.Errorf("unknown harness '%s' (valid: claude, codex)", name)
+		return "", fmt.Errorf("unknown harness '%s' (valid: claude, codex, hermes)", name)
 	}
+}
+
+// hermesEvent is one line of hermes --format stream-json.
+type hermesEvent struct {
+	Type     string `json:"type"`
+	Name     string `json:"name"`
+	Text     string `json:"text"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// hermesAnswer reads the final text from a Hermes event stream. It fails
+// closed: the transcript is untrusted, so an answer reached with any tool is
+// discarded, as -t none should have left none. Non-JSON lines (warnings) are
+// skipped.
+func hermesAnswer(stream string) (string, error) {
+	var result *hermesEvent
+	for _, line := range strings.Split(stream, "\n") {
+		var e hermesEvent
+		if json.Unmarshal([]byte(strings.TrimSpace(line)), &e) != nil {
+			continue
+		}
+		switch e.Type {
+		case "tool_use":
+			return "", fmt.Errorf("hermes used a tool (%s) although none is allowed; answer discarded", e.Name)
+		case "result":
+			result = &e
+		}
+	}
+	if result == nil {
+		return "", fmt.Errorf("hermes gave no result: %s", lastLines(stream, maxErrorDetail))
+	}
+	text := strings.TrimSpace(result.Text)
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("hermes failed (exit code %d): %s", result.ExitCode, lastLines(text, maxErrorDetail))
+	}
+	if text == "" {
+		return "", fmt.Errorf("hermes returned an empty answer")
+	}
+	return text, nil
 }
 
 // runCLI runs bin with prompt on stdin from a fresh empty temp dir (removed

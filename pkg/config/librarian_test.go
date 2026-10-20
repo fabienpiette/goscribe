@@ -115,3 +115,13 @@ func TestHarnessModels(t *testing.T) {
 		t.Error("no models configured → empty map")
 	}
 }
+
+func TestHermesProviderAndModel(t *testing.T) {
+	if !IsValidProvider("hermes") {
+		t.Error("hermes must be a valid provider")
+	}
+	c := Config{HermesModel: "anthropic/x"}
+	if c.HarnessModels()["hermes"] != "anthropic/x" {
+		t.Errorf("HarnessModels = %v", c.HarnessModels())
+	}
+}

@@ -171,3 +171,72 @@ func TestRunPassesModel(t *testing.T) {
 		t.Errorf("codex args = %q, want -m gpt-x before the stdin dash", a)
 	}
 }
+
+// fakeHermes installs a stand-in for the hermes CLI that saves its args and
+// stdin, then runs body.
+func fakeHermes(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("FAKE_DIR", dir)
+	path := filepath.Join(dir, "hermes")
+	script := "#!/bin/sh\necho \"$@\" > \"$FAKE_DIR/hermes.args\"\ncat > \"$FAKE_DIR/hermes.stdin\"\n" + body + "\n"
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	orig := HermesBinary
+	HermesBinary = path
+	t.Cleanup(func() { HermesBinary = orig })
+	return dir
+}
+
+const hermesStream = `echo "Warning: Unknown toolsets: none"
+echo '{"type": "system", "subtype": "init", "model": "m1", "session_id": "s"}'
+echo '{"type": "text", "text": "hermes "}'
+echo '{"type": "result", "session_id": "s", "exit_code": 0, "text": "hermes summary"}'`
+
+func TestRunHermes(t *testing.T) {
+	dir := fakeHermes(t, hermesStream)
+	t.Cleanup(func() { Models = map[string]string{} })
+	got, err := Run("hermes", "the prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "hermes summary" {
+		t.Errorf("answer = %q", got)
+	}
+	args := read(t, dir+"/hermes.args")
+	if !strings.Contains(args, "chat --query-file - --oneshot -t none --ignore-rules --source tool --format stream-json") || strings.Contains(args, " -m ") {
+		t.Errorf("args = %q", args)
+	}
+	if read(t, dir+"/hermes.stdin") != "the prompt" {
+		t.Error("the prompt must go on stdin")
+	}
+	Models = map[string]string{"hermes": "anthropic/x"}
+	if _, err := Run("hermes", "p"); err != nil {
+		t.Fatal(err)
+	}
+	if args := read(t, dir+"/hermes.args"); !strings.HasSuffix(strings.TrimSpace(args), "-m anthropic/x") {
+		t.Errorf("args with a model = %q", args)
+	}
+}
+
+// The transcript is untrusted: an answer produced with a tool is discarded.
+func TestRunHermesFailsClosed(t *testing.T) {
+	fakeHermes(t, `echo '{"type": "tool_use", "name": "terminal", "input": {"command": "cat ~/.ssh/id_rsa"}}'
+echo '{"type": "result", "exit_code": 0, "text": "done"}'`)
+	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "used a tool (terminal)") {
+		t.Errorf("err = %v, want the tool named", err)
+	}
+	fakeHermes(t, `echo '{"type": "result", "exit_code": 1, "text": "rate limited"}'`)
+	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "rate limited") {
+		t.Errorf("err = %v, want the failed result", err)
+	}
+	fakeHermes(t, `echo '{"type": "text", "text": "half"}'`)
+	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "no result") {
+		t.Errorf("err = %v, want no result", err)
+	}
+	fakeHermes(t, `echo '{"type": "result", "exit_code": 0, "text": "  "}'`)
+	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "empty answer") {
+		t.Errorf("err = %v, want empty answer", err)
+	}
+}
