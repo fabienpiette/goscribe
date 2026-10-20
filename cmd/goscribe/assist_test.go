@@ -632,6 +632,7 @@ func TestStreamSidesMute(t *testing.T) {
 }
 
 func TestAssistRecapFlag(t *testing.T) {
+	fakeClaude(t, "") // CI has no claude CLI; -provider claude must get past its check
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ELEVENLABS_API_KEY", "k")
 	stderr := &syncBuf{}
