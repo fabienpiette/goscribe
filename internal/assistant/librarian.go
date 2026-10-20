@@ -175,13 +175,22 @@ Rules:
 - Write in the language of the question.`
 
 // LibrarianPrompt builds the research request for one lookup: the role, the
-// user's instructions about their sources, today's date, the query and the
-// meeting summary. It never holds transcript lines.
-func LibrarianPrompt(instructions string, q Lookup, m Memory, today time.Time) string {
+// user's instructions about their sources, the tools allowed, today's date,
+// the query and the meeting summary. It never holds transcript lines.
+func LibrarianPrompt(instructions string, tools []string, q Lookup, m Memory, today time.Time) string {
 	var b strings.Builder
 	b.WriteString(librarianRole + "\n\n")
 	if s := strings.TrimSpace(instructions); s != "" {
 		b.WriteString("The user's sources and how to search them (trusted):\n<instructions>\n" + s + "\n</instructions>\n\n")
+	}
+	// Without the list, the model tries pipes, other paths or unlisted tools,
+	// and the allowlist refuses them all.
+	if len(tools) > 0 {
+		b.WriteString("These are the only tools that work in this session. Anything else is refused: other tools, other commands, pipes (|), redirections, ; or &&, and paths outside these scopes. Run one plain command per Bash call:\n")
+		for _, t := range tools {
+			b.WriteString("- " + t + "\n")
+		}
+		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "Today is %s.\n\n", today.Format("Monday 2006-01-02"))
 	if m.Summary != "" {

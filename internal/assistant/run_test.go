@@ -313,14 +313,16 @@ type fakeResearch struct {
 	mu      sync.Mutex
 	prompts []string
 	reply   func() (string, error)
+	refused []string // tool calls the fake librarian reports as refused
 }
 
-func (f *fakeResearch) research(prompt string) (string, error) {
+func (f *fakeResearch) research(prompt string) (ResearchReply, error) {
 	f.mu.Lock()
 	f.prompts = append(f.prompts, prompt)
-	reply := f.reply
+	reply, refused := f.reply, f.refused
 	f.mu.Unlock()
-	return reply()
+	a, err := reply()
+	return ResearchReply{Answer: a, Refused: refused}, err
 }
 
 func (f *fakeResearch) count() int {
@@ -664,7 +666,7 @@ func TestRunWithoutLibrarian(t *testing.T) {
 // A new lookup that is refused (here: a question that already ran) leaves the
 // waiting one in place and in Asked; one like the waiting question replaces it.
 func TestQueueLookupKeepsOrReplacesWaiting(t *testing.T) {
-	s := &state{c: Config{Research: func(string) (string, error) { return "", nil }, Out: &syncBuffer{}}, looking: true}
+	s := &state{c: Config{Research: func(string) (ResearchReply, error) { return ResearchReply{}, nil }, Out: &syncBuffer{}}, looking: true}
 	s.mem.Asked = []string{"When was the Globex contract signed?"} // ran already
 	s.queueLookup(Reply{Lookups: Lookups{{Query: "Who owns the billing migration ticket?"}}}, 0)
 	s.queueLookup(Reply{Lookups: Lookups{{Query: "when was the Globex contract signed"}}}, 0)
@@ -679,5 +681,56 @@ func TestQueueLookupKeepsOrReplacesWaiting(t *testing.T) {
 	want = []string{"When was the Globex contract signed?", "who owns the billing migration ticket now"}
 	if s.pending == nil || s.pending.Query != want[1] || !slices.Equal(s.mem.Asked, want) {
 		t.Errorf("pending = %+v, asked = %q", s.pending, s.mem.Asked)
+	}
+}
+
+// Calls the allowlist refused are shown once per lookup, so the user can fix
+// librarian.allowed_tools; the answer still counts.
+func TestRunLibrarianShowsRefusedCalls(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){lookupReply("Who owns PROJ-123?"), answer(`{"summary":"s2"}`)}}
+	r := &fakeResearch{reply: answer(foundT1), refused: []string{"Bash(tracker list | head -5)", "mcp__chat__search_users", "Read(/etc/hosts)", "Glob(**)"}}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, Out: out,
+			Research: r.research, LibrarianTools: []string{"Bash(tracker get:*)"}, MaxLookups: 3}, events)
+	}()
+	events <- line("others", twelveWords)
+	waitUntil(t, "the finding", func() bool { return strings.Contains(out.String(), "Librarian:") })
+	close(events)
+	<-done
+	feed := out.String()
+	want := "📚 refused 4 tool call(s) not in librarian.allowed_tools: Bash(tracker list | head -5), mcp__chat__search_users, Read(/etc/hosts), …"
+	if !strings.Contains(feed, want) {
+		t.Errorf("feed missing %q:\n%s", want, feed)
+	}
+	if p := r.prompt(0); !strings.Contains(p, "- Bash(tracker get:*)") {
+		t.Errorf("the librarian prompt must list its tools:\n%s", p)
+	}
+}
+
+// Harness errors already start with "<engine> failed:"; the feed must not say it twice.
+func TestRunFailureLabelOnce(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){
+		func() (string, error) {
+			return "", errors.New("fake failed: exit status 1: ERROR: stream disconnected")
+		},
+	}}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, Out: out}, events)
+	}()
+	events <- line("me", twelveWords)
+	waitUntil(t, "failure line", func() bool { return strings.Contains(out.String(), "⚠ ") })
+	close(events)
+	<-done
+	feed := out.String()
+	if !strings.Contains(feed, "⚠ fake failed: exit status 1: ERROR: stream disconnected; next try in") || strings.Contains(feed, "fake failed: fake failed") {
+		t.Errorf("feed:\n%s", feed)
 	}
 }

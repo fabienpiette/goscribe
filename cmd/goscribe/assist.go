@@ -242,8 +242,12 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	if *librarian {
 		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}
-		acfg.Research = func(prompt string) (string, error) { return harness.Research(prompt, ro) }
+		acfg.Research = func(prompt string) (assistant.ResearchReply, error) {
+			r, err := harness.Research(prompt, ro)
+			return assistant.ResearchReply{Answer: r.Answer, Refused: r.Refused}, err
+		}
 		acfg.LibrarianInstructions = lib.Instructions
+		acfg.LibrarianTools = lib.AllowedTools
 		acfg.MaxLookups = lib.MaxLookups
 	}
 	err = assistant.Run(acfg, events)

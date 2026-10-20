@@ -13,7 +13,7 @@ func TestResearchArgs(t *testing.T) {
 		AllowedTools: []string{"Bash(gh search:*)", "Read(~/notes/**)", "mcp__tracker__get_issue"},
 		Model:        "sonnet",
 	}
-	want := []string{"-p", "--output-format", "text",
+	want := []string{"-p", "--output-format", "json",
 		"--tools", "Bash,Read",
 		"--allowedTools", "Bash(gh search:*),Read(~/notes/**),mcp__tracker__get_issue",
 		"--disallowedTools", "WebFetch,WebSearch",
@@ -72,13 +72,13 @@ func TestResearchArgsOnlyMCPTools(t *testing.T) {
 
 func TestResearchRunsFromTempDirWithStdin(t *testing.T) {
 	dir := fakeHarness(t, `pwd > "$FAKE_DIR/pwd"
-echo '{"found":false}'`, "")
-	answer, err := Research("find the thing", ResearchOptions{Timeout: 10 * time.Second})
+echo '{"type":"result","is_error":false,"result":"{\\"found\\":false}"}'`, "")
+	reply, err := Research("find the thing", ResearchOptions{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if answer != `{"found":false}` {
-		t.Errorf("answer = %q", answer)
+	if reply.Answer != `{"found":false}` || len(reply.Refused) != 0 {
+		t.Errorf("reply = %+v", reply)
 	}
 	pwd := strings.TrimSpace(read(t, dir+"/pwd"))
 	if !strings.HasPrefix(pwd, os.TempDir()) {
@@ -115,5 +115,43 @@ func TestResearchErrorHasNoLabel(t *testing.T) {
 	_, err = Research("x", ResearchOptions{Timeout: 10 * time.Second})
 	if err == nil || err.Error() != "returned an empty answer" {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// Claude Code reports a failed session as JSON with is_error; in text mode
+// that was only "Execution error", hiding why.
+func TestResearchReportsSessionError(t *testing.T) {
+	fakeHarness(t, `echo '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"api_error","result":"Execution error"}'`, "")
+	_, err := Research("x", ResearchOptions{Timeout: 10 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "api_error") || !strings.Contains(err.Error(), "Execution error") {
+		t.Errorf("err = %v, want the terminal reason and the message", err)
+	}
+	fakeHarness(t, `echo 'Execution error'`, "")
+	_, err = Research("x", ResearchOptions{Timeout: 10 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "Execution error") {
+		t.Errorf("err = %v, want the unexpected output", err)
+	}
+	fakeHarness(t, `echo '{"type":"result","is_error":false,"result":"  "}'`, "")
+	_, err = Research("x", ResearchOptions{Timeout: 10 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "empty answer") {
+		t.Errorf("err = %v, want empty answer", err)
+	}
+}
+
+// Tool calls refused by the allowlist come back, so the user can fix the config.
+func TestResearchReturnsRefusedCalls(t *testing.T) {
+	fakeHarness(t, `cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","permission_denials":[
+ {"tool_name":"Bash","tool_input":{"command":"tracker list | head -5"}},
+ {"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}},
+ {"tool_name":"mcp__chat__search_users","tool_input":{"query":"Sam"}}]}
+JSON`, "")
+	reply, err := Research("x", ResearchOptions{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Bash(tracker list | head -5)", "Read(/etc/hosts)", "mcp__chat__search_users"}
+	if reply.Answer != "ok" || !reflect.DeepEqual(reply.Refused, want) {
+		t.Errorf("reply = %+v, want refused %q", reply, want)
 	}
 }

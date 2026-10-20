@@ -402,7 +402,7 @@ cat > /dev/null
 case "$*" in
 *--allowedTools*)
   for a in "$@"; do printf '[%s]' "$a"; done > "$FAKE_ARGS"
-  echo '{"found":true,"answer":"PROJ-123 shipped on Monday","sources":[{"title":"PROJ-123","link":"https://example.com/PROJ-123"}]}'
+  echo '{"type":"result","is_error":false,"result":"{\"found\":true,\"answer\":\"PROJ-123 shipped on Monday\",\"sources\":[{\"title\":\"PROJ-123\",\"link\":\"https://example.com/PROJ-123\"}]}","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"tracker list | head"}}]}'
   ;;
 *)
   echo '{"summary":"Checking PROJ-123.","decisions":[],"open_questions":[],"action_items":[],"suggestions":[],"lookups":[{"query":"Did PROJ-123 ship?","why":"status unknown"}]}'
@@ -439,7 +439,7 @@ esac
 	}
 
 	feed := out.String()
-	for _, want := range []string{"librarian: claude, 2 tool(s)", "📚 ", "Librarian: PROJ-123 shipped on Monday"} {
+	for _, want := range []string{"librarian: claude, 2 tool(s)", "📚 ", "Librarian: PROJ-123 shipped on Monday", "refused 1 tool call(s) not in librarian.allowed_tools: Bash(tracker list | head)"} {
 		if !strings.Contains(feed, want) {
 			t.Errorf("feed missing %q:\n%s", want, feed)
 		}
