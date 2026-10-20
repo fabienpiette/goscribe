@@ -47,6 +47,7 @@ EXAMPLES:
   goscribe assist -context ~/notes/standup/
   goscribe assist -context agenda.md -provider claude -o standup-assist.md
   goscribe assist -source system -language fr
+  goscribe assist -provider codex -model gpt-6-luna
 
 Good to know:
   - The -context files (.md) are sent to the -provider model with every update.
@@ -84,6 +85,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	contextPath := fs.String("context", "", "Meeting background: a .md file or a folder of .md files (sent to the model)")
 	output := fs.String("o", "", "Notes file (default: assist-YYYY-MM-DD_HH-MM-SS.md in the current folder)")
 	providerFlag := fs.String("provider", "", "Model that thinks: openai, gemini, claude or codex (default: config provider, else openai)")
+	modelFlag := fs.String("model", "", "Model for -provider (default: config codex_model / claude_model / gemini_model, else the provider's default)")
 	source := fs.String("source", "", "mic, system or both (default: config record_source, else both)")
 	mic := fs.String("mic", "", "Input device (default: config record_mic, else the system default; see -list-sources)")
 	system := fs.String("system", "", "Computer sound monitor (default: config record_system, else the default output's monitor)")
@@ -127,6 +129,10 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := checkThinker(prov, cfg); err != nil {
 		return usageErr("%v", err)
+	}
+	harness.Models = cfg.HarnessModels()
+	if *modelFlag != "" && harness.IsHarness(prov) {
+		harness.Models[prov] = *modelFlag
 	}
 	lib := cfg.Librarian.WithDefaults()
 	if *librarian {
@@ -214,7 +220,11 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	for _, s := range sides {
 		names = append(names, s.speaker)
 	}
-	header := fmt.Sprintf("%s · %s, updates every ≥%s", strings.Join(names, "+"), prov, every)
+	engine := prov
+	if m := pick(*modelFlag, harness.Models[prov], ""); m != "" {
+		engine += " (" + m + ")"
+	}
+	header := fmt.Sprintf("%s · %s, updates every ≥%s", strings.Join(names, "+"), engine, every)
 	if len(contextFiles) > 0 {
 		header += fmt.Sprintf(" · context: %d file(s), %d KB", len(contextFiles), (len(background)+1023)>>10)
 	}
@@ -250,7 +260,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Header:      header,
 		Engine:      prov,
 		Interval:    every,
-		Think:       thinker(prov, cfg),
+		Think:       thinker(prov, cfg, *modelFlag),
 		Out:         stdout,
 		Interactive: isTerminal(stdout),
 		MuteHint:    muteHint,
@@ -374,14 +384,20 @@ func checkThinker(prov string, cfg *config.Config) error {
 }
 
 // thinker sends one assistant prompt through the usual provider routing.
-func thinker(prov string, cfg *config.Config) func(instructions, transcript string) (string, error) {
+// model, when set, replaces the default model of an API provider; the
+// claude and codex models are in harness.Models.
+func thinker(prov string, cfg *config.Config, model string) func(instructions, transcript string) (string, error) {
 	geminiModel := pick(cfg.GeminiModel, "", "gemini-2.0-flash")
+	openaiModel := "gpt-4o"
+	if model != "" {
+		geminiModel, openaiModel = model, model
+	}
 	return func(instructions, transcript string) (string, error) {
 		action := &config.PostAction{
 			ID:          "assist",
 			Name:        "Assist",
 			Prompt:      instructions,
-			Model:       "gpt-4o",
+			Model:       openaiModel,
 			Temperature: 0.3,
 			MaxTokens:   3000,
 		}

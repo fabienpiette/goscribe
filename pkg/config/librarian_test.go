@@ -101,3 +101,17 @@ func TestLibrarianYAML(t *testing.T) {
 		t.Errorf("MaxLookups = %d, want 3", cfg.Librarian.MaxLookups)
 	}
 }
+
+func TestHarnessModels(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("codex_model: gpt-x\nclaude_model: sonnet\n"), &c); err != nil {
+		t.Fatal(err)
+	}
+	got := c.HarnessModels()
+	if got["codex"] != "gpt-x" || got["claude"] != "sonnet" || len(got) != 2 {
+		t.Errorf("HarnessModels = %v", got)
+	}
+	if len((&Config{}).HarnessModels()) != 0 {
+		t.Error("no models configured → empty map")
+	}
+}

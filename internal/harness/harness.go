@@ -35,6 +35,10 @@ var codexDisabledFeatures = []string{
 // Timeout bounds a single harness call.
 var Timeout = 20 * time.Minute
 
+// Models picks the model per harness ("claude", "codex"); a harness missing
+// from it uses its CLI's default model. Set from the config at startup.
+var Models = map[string]string{}
+
 func IsHarness(name string) bool {
 	return name == "claude" || name == "codex"
 }
@@ -57,6 +61,9 @@ func Run(name, prompt string) (string, error) {
 			"--setting-sources", "",
 			"--disable-slash-commands",
 		}
+		if m := Models[name]; m != "" {
+			args = append(args, "--model", m)
+		}
 		return runCLI(name, bin, prompt, Timeout, "", func(string) []string { return args })
 	case "codex":
 		bin, err := exec.LookPath(CodexBinary)
@@ -76,6 +83,9 @@ func Run(name, prompt string) (string, error) {
 			}
 			for _, f := range codexDisabledFeatures {
 				args = append(args, "--disable", f)
+			}
+			if m := Models[name]; m != "" {
+				args = append(args, "-m", m)
 			}
 			return append(args, "-")
 		})

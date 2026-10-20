@@ -42,10 +42,25 @@ type Config struct {
 	// Keep filler words and false starts (default: removed).
 	ElevenLabsVerbatim bool   `yaml:"elevenlabs_verbatim,omitempty"`
 	WhisperModel       string `yaml:"whisper_model,omitempty"`
-	Language           string `yaml:"language,omitempty"`
+	// Models for the claude and codex CLIs (empty: the CLI's default model).
+	ClaudeModel string `yaml:"claude_model,omitempty"`
+	CodexModel  string `yaml:"codex_model,omitempty"`
+	Language    string `yaml:"language,omitempty"`
 
 	// Read-only lookups ("goscribe assist" asking a Claude Code session).
 	Librarian Librarian `yaml:"librarian,omitempty"`
+}
+
+// HarnessModels maps the claude and codex harnesses to their configured model.
+func (c *Config) HarnessModels() map[string]string {
+	models := map[string]string{}
+	if c.ClaudeModel != "" {
+		models["claude"] = c.ClaudeModel
+	}
+	if c.CodexModel != "" {
+		models["codex"] = c.CodexModel
+	}
+	return models
 }
 
 // ValidProviders lists the engines that can run post-processing actions.
