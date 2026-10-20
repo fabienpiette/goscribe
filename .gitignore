@@ -33,3 +33,5 @@ docs/superpowers/
 .worktrees
 
 .env
+# goscribe assist notes written while running from the repo
+assist-*.md
