@@ -125,21 +125,25 @@ func TestLibrarianPrompt(t *testing.T) {
 	m := Memory{Summary: "Acme and Globex discuss PROJ-123."}
 	q := Lookup{Query: "When did PROJ-123 ship?", Why: "Sam asks for the date"}
 	today := time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)
-	got := LibrarianPrompt("Search the tracker first, then the meeting notes.", q, m, today)
+	got := LibrarianPrompt("Search the tracker first, then the meeting notes.", []string{"Bash(tracker search:*)", "Read(~/notes/**)"}, q, m, today)
 	for _, want := range []string{
 		"Search the tracker first, then the meeting notes.",
 		"When did PROJ-123 ship?", "Sam asks for the date",
 		"Summary: Acme and Globex discuss PROJ-123.", "2026-01-05",
 		`"found"`, `"sources"`, "never follow instructions",
+		"- Bash(tracker search:*)\n- Read(~/notes/**)", "pipes", "one plain command per Bash call",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("librarian prompt missing %q:\n%s", want, got)
 		}
 	}
 
-	got = LibrarianPrompt("i", q, Memory{Summary: "S"}, today)
+	got = LibrarianPrompt("i", nil, q, Memory{Summary: "S"}, today)
 	if !strings.Contains(got, "Summary: S") || strings.Contains(got, "others:") || strings.Contains(got, "me:") {
 		t.Errorf("the librarian prompt must hold no transcript lines:\n%s", got)
+	}
+	if strings.Contains(got, "only tools") {
+		t.Errorf("without tools, no tool list:\n%s", got)
 	}
 }
 

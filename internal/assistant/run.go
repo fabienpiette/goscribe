@@ -33,12 +33,23 @@ type Config struct {
 	Out         io.Writer
 	Interactive bool            // Out is a terminal: status line and dim lines
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
-	// Research sends one prompt to the librarian and returns its answer; nil
-	// turns the librarian off.
-	Research              func(prompt string) (string, error)
-	LibrarianInstructions string // the user's sources and how to search them
-	MaxLookups            int    // lookups per meeting; 0 or less means defaultMaxLookups
+	// Research sends one prompt to the librarian and returns its answer and
+	// the tool calls its allowlist refused; nil turns the librarian off.
+	Research              func(prompt string) (ResearchReply, error)
+	LibrarianInstructions string   // the user's sources and how to search them
+	LibrarianTools        []string // the librarian's allowed tools, listed in its prompt
+	MaxLookups            int      // lookups per meeting; 0 or less means defaultMaxLookups
 }
+
+// ResearchReply is the librarian's answer and the tool calls that its
+// allowlist refused ("Tool(input)" or the tool name).
+type ResearchReply struct {
+	Answer  string
+	Refused []string
+}
+
+// maxRefusedShown bounds the refused tool calls listed in the feed.
+const maxRefusedShown = 3
 
 // Overridable for tests.
 var (
@@ -102,7 +113,7 @@ type result struct {
 
 type lookupResult struct {
 	lookup Lookup
-	answer string
+	reply  ResearchReply
 	err    error
 }
 
@@ -207,7 +218,9 @@ func (s *state) finish(r result) {
 	}
 	if err != nil {
 		s.failures++
-		s.print(fmt.Sprintf("⚠ %s failed: %s; next try in %s", s.c.Engine, oneLine(err.Error(), 160), s.interval().Round(time.Second)))
+		// Harness errors already start with "<engine> failed: ".
+		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
+		s.print(fmt.Sprintf("⚠ %s failed: %s; next try in %s", s.c.Engine, oneLine(msg, 200), s.interval().Round(time.Second)))
 		return
 	}
 	s.failures = 0
@@ -284,15 +297,32 @@ func (s *state) maybeLookup(now time.Time) {
 	}
 	s.looking = true
 	s.print(s.dim(fmt.Sprintf("🔎 %s Looking up: %s", clock(s.elapsed(now)), l.Query)))
-	prompt := LibrarianPrompt(s.c.LibrarianInstructions, l, s.mem, now)
+	prompt := LibrarianPrompt(s.c.LibrarianInstructions, s.c.LibrarianTools, l, s.mem, now)
 	research, results := s.c.Research, s.lookupResults
 	go func() {
-		answer, err := research(prompt)
+		reply, err := research(prompt)
 		select {
-		case results <- lookupResult{lookup: l, answer: answer, err: err}:
+		case results <- lookupResult{lookup: l, reply: reply, err: err}:
 		default: // only after the end, when nobody reads results
 		}
 	}()
+}
+
+// showRefused lists, dimmed, the tool calls the librarian's allowlist
+// refused: the sign that librarian.allowed_tools misses a tool it needs.
+func (s *state) showRefused(calls []string) {
+	if len(calls) == 0 {
+		return
+	}
+	shown := make([]string, 0, maxRefusedShown+1)
+	for i, c := range calls {
+		if i == maxRefusedShown {
+			shown = append(shown, "…")
+			break
+		}
+		shown = append(shown, oneLine(c, 80))
+	}
+	s.print(s.dim(fmt.Sprintf("📚 refused %d tool call(s) not in librarian.allowed_tools: %s", len(calls), strings.Join(shown, ", "))))
 }
 
 // finishLookup merges a librarian answer into the memory, the feed and the
@@ -300,12 +330,13 @@ func (s *state) maybeLookup(now time.Time) {
 func (s *state) finishLookup(r lookupResult) {
 	s.looking = false
 	defer s.maybeLookup(time.Now())
+	s.showRefused(r.reply.Refused)
 	f, err := Finding{}, r.err
 	if err == nil {
-		f, err = ParseFinding(r.answer)
+		f, err = ParseFinding(r.reply.Answer)
 	}
 	if err != nil {
-		s.print("⚠ librarian failed: " + oneLine(err.Error(), 160))
+		s.print("⚠ librarian failed: " + oneLine(err.Error(), 200))
 		return
 	}
 	f.Query, f.At = r.lookup.Query, s.elapsed(time.Now())

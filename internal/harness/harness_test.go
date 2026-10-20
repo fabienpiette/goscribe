@@ -124,3 +124,17 @@ func TestSelectBestActions(t *testing.T) {
 		t.Errorf("selected = %v, want [sum items]", got)
 	}
 }
+
+// A CLI that prints a banner before its error (Codex does) must not lose the
+// error to truncation: errors keep the end of stderr.
+func TestRunErrorKeepsTheEndOfStderr(t *testing.T) {
+	banner := strings.Repeat("banner line with workdir, model and sandbox settings\n", 40)
+	fakeHarness(t, "", `printf '%s' "`+banner+`" >&2; echo "ERROR: stream disconnected before completion" >&2; exit 1`)
+	_, err := Run("codex", "x")
+	if err == nil || !strings.Contains(err.Error(), "stream disconnected before completion") {
+		t.Errorf("err = %v, want the last stderr line", err)
+	}
+	if err != nil && len(err.Error()) > 400 {
+		t.Errorf("err is %d bytes, want the end of stderr only", len(err.Error()))
+	}
+}

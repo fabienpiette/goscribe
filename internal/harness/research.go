@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"sort"
@@ -48,7 +49,7 @@ func researchArgs(o ResearchOptions) []string {
 	if o.UserSettings {
 		sources = "user"
 	}
-	args := []string{"-p", "--output-format", "text",
+	args := []string{"-p", "--output-format", "json",
 		"--tools", strings.Join(builtins, ","),
 		"--allowedTools", strings.Join(o.AllowedTools, ","),
 		"--disallowedTools", "WebFetch,WebSearch",
@@ -69,12 +70,34 @@ func researchArgs(o ResearchOptions) []string {
 	return args
 }
 
+// ResearchReply is a research session's answer and the tool calls the
+// allowlist refused, as "Tool(input)" or the tool name.
+type ResearchReply struct {
+	Answer  string
+	Refused []string
+}
+
+// sessionResult is the part of Claude Code's --output-format json result
+// that Research reads.
+type sessionResult struct {
+	IsError           bool   `json:"is_error"`
+	Subtype           string `json:"subtype"`
+	TerminalReason    string `json:"terminal_reason"`
+	Result            string `json:"result"`
+	PermissionDenials []struct {
+		ToolName  string         `json:"tool_name"`
+		ToolInput map[string]any `json:"tool_input"`
+	} `json:"permission_denials"`
+}
+
 // Research runs prompt (on stdin) through a restricted Claude Code session
-// from an empty temp dir and returns its trimmed answer.
-func Research(prompt string, o ResearchOptions) (string, error) {
+// from an empty temp dir and returns its trimmed answer, with the tool calls
+// that were refused. A session that ends in error (an API error, say) is an
+// error carrying Claude Code's reason.
+func Research(prompt string, o ResearchOptions) (ResearchReply, error) {
 	bin, err := exec.LookPath(ClaudeBinary)
 	if err != nil {
-		return "", fmt.Errorf("%s not found on PATH (install Claude Code)", ClaudeBinary)
+		return ResearchReply{}, fmt.Errorf("%s not found on PATH (install Claude Code)", ClaudeBinary)
 	}
 	timeout := o.Timeout
 	if timeout <= 0 {
@@ -82,5 +105,38 @@ func Research(prompt string, o ResearchOptions) (string, error) {
 	}
 	args := researchArgs(o)
 	// No label: the caller says "librarian failed: <cause>".
-	return runCLI("", bin, prompt, timeout, "", func(string) []string { return args })
+	out, err := runCLI("", bin, prompt, timeout, "", func(string) []string { return args })
+	if err != nil {
+		return ResearchReply{}, err
+	}
+	var r sessionResult
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		return ResearchReply{}, fmt.Errorf("unexpected Claude Code output: %s", lastLines(out, maxErrorDetail))
+	}
+	reply := ResearchReply{Answer: strings.TrimSpace(r.Result)}
+	for _, d := range r.PermissionDenials {
+		reply.Refused = append(reply.Refused, describeCall(d.ToolName, d.ToolInput))
+	}
+	if r.IsError {
+		reason := r.TerminalReason
+		if reason == "" {
+			reason = r.Subtype
+		}
+		return reply, fmt.Errorf("session ended with an error (%s): %s", reason, lastLines(reply.Answer, maxErrorDetail))
+	}
+	if reply.Answer == "" {
+		return reply, fmt.Errorf("returned an empty answer")
+	}
+	return reply, nil
+}
+
+// describeCall names a refused tool call by its main input: the command for
+// Bash, the path for file tools, else the tool name alone.
+func describeCall(tool string, input map[string]any) string {
+	for _, key := range []string{"command", "file_path", "path", "pattern"} {
+		if v, ok := input[key].(string); ok && v != "" {
+			return tool + "(" + v + ")"
+		}
+	}
+	return tool
 }

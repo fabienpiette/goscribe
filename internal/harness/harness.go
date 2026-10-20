@@ -115,9 +115,9 @@ func runCLI(label, bin, prompt string, timeout time.Duration, outName string, ar
 			detail = strings.TrimSpace(stdout.String())
 		}
 		if label == "" {
-			return "", fmt.Errorf("%v: %s", err, util.TruncateString(detail, 500))
+			return "", fmt.Errorf("%v: %s", err, lastLines(detail, maxErrorDetail))
 		}
-		return "", fmt.Errorf("%s failed: %v: %s", label, err, util.TruncateString(detail, 500))
+		return "", fmt.Errorf("%s failed: %v: %s", label, err, lastLines(detail, maxErrorDetail))
 	}
 
 	answer := stdout.String()
@@ -134,6 +134,34 @@ func runCLI(label, bin, prompt string, timeout time.Duration, outName string, ar
 		return "", fmt.Errorf("%sreturned an empty answer", subject(label))
 	}
 	return answer, nil
+}
+
+// maxErrorDetail bounds the CLI output kept in an error.
+const maxErrorDetail = 300
+
+// lastLines keeps the end of a CLI's output, where the error is: Codex, for
+// one, prints a long banner first. Whole lines are kept while they fit in max
+// bytes, joined with " | "; a single longer line keeps its end.
+func lastLines(s string, max int) string {
+	var kept []string
+	size := 0
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" {
+			continue
+		}
+		if size+len(l) > max {
+			if len(kept) == 0 {
+				r := []rune(l)
+				kept = append(kept, "…"+string(r[len(r)-min(len(r), max/2):]))
+			}
+			break
+		}
+		kept = append([]string{l}, kept...)
+		size += len(l) + 3
+	}
+	return strings.Join(kept, " | ")
 }
 
 // subject is label followed by a space, or "" for no label.
