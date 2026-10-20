@@ -149,7 +149,8 @@ func TestAssistEndToEnd(t *testing.T) {
 	assistant.Tick = 10 * time.Millisecond
 	defer func() { assistant.Tick = origTick }()
 
-	fakeClaude(t, `{"summary":"Shipping Monday; runbook by tonight.","decisions":["Ship on Monday"],"open_questions":[],"action_items":["me: write the rollback runbook"],"suggestions":[{"type":"question","text":"Who reviews the runbook?","why":"nobody named"}]}`)
+	t.Cleanup(func() { harness.Models = map[string]string{} })
+	claudePrompt := fakeClaude(t, `{"summary":"Shipping Monday; runbook by tonight.","decisions":["Ship on Monday"],"open_questions":[],"action_items":["me: write the rollback runbook"],"suggestions":[{"type":"question","text":"Who reviews the runbook?","why":"nobody named"}]}`)
 
 	notes := filepath.Join(t.TempDir(), "standup.md")
 	ctxFile := filepath.Join(t.TempDir(), "agenda.md")
@@ -158,7 +159,7 @@ func TestAssistEndToEnd(t *testing.T) {
 	out := &syncBuf{}
 	done := make(chan int, 1)
 	go func() {
-		done <- runAssist([]string{"-provider", "claude", "-context", ctxFile, "-o", notes, "-interval", "20ms"}, out, &syncBuf{})
+		done <- runAssist([]string{"-provider", "claude", "-model", "opus-x", "-context", ctxFile, "-o", notes, "-interval", "20ms"}, out, &syncBuf{})
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -180,7 +181,7 @@ func TestAssistEndToEnd(t *testing.T) {
 
 	feed := out.String()
 	for _, want := range []string{
-		"Assist me+others · claude, updates every ≥20ms · context: 1 file(s), 1 KB · 2 keyterm(s) from the context → " + notes,
+		"Assist me+others · claude (opus-x), updates every ≥20ms · context: 1 file(s), 1 KB · 2 keyterm(s) from the context → " + notes,
 		"we ship the migration on monday", "I will write the rollback runbook",
 		"✅ ", "Decision: Ship on Monday",
 		"✓ Final notes written to " + notes,
@@ -193,6 +194,9 @@ func TestAssistEndToEnd(t *testing.T) {
 	// each speaker must still get exactly one line.
 	if strings.Count(feed, ":00 me     ") != 1 || strings.Count(feed, ":00 others ") != 1 {
 		t.Errorf("one line per speaker expected:\n%s", feed)
+	}
+	if args, _ := os.ReadFile(claudePrompt + ".args"); !strings.Contains(string(args), "--model opus-x") {
+		t.Errorf("-model must reach claude: args = %q", args)
 	}
 	b, _ := os.ReadFile(notes)
 	for _, want := range []string{"## Final summary", "- me: write the rollback runbook", "❓ Ask: Who reviews the runbook?"} {

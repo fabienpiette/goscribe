@@ -138,3 +138,36 @@ func TestRunErrorKeepsTheEndOfStderr(t *testing.T) {
 		t.Errorf("err is %d bytes, want the end of stderr only", len(err.Error()))
 	}
 }
+
+// A model set in Models is passed to the CLI; none means the CLI's default.
+func TestRunPassesModel(t *testing.T) {
+	dir := fakeHarness(t, `echo claude answer`, codexAnswer)
+	t.Cleanup(func() { Models = map[string]string{} })
+
+	if _, err := Run("claude", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run("codex", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if a := read(t, dir+"/claude.args"); strings.Contains(a, "--model") {
+		t.Errorf("claude args without a model = %q", a)
+	}
+	if a := read(t, dir+"/codex.args"); strings.Contains(a, " -m ") {
+		t.Errorf("codex args without a model = %q", a)
+	}
+
+	Models = map[string]string{"claude": "sonnet", "codex": "gpt-x"}
+	if _, err := Run("claude", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run("codex", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if a := read(t, dir+"/claude.args"); !strings.Contains(a, "--model sonnet") {
+		t.Errorf("claude args = %q, want --model sonnet", a)
+	}
+	if a := read(t, dir+"/codex.args"); !strings.Contains(a, "-m gpt-x -") {
+		t.Errorf("codex args = %q, want -m gpt-x before the stdin dash", a)
+	}
+}

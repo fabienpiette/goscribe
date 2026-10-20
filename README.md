@@ -258,7 +258,7 @@ When both keys are configured, goscribe automatically falls back to the other pr
 
 ### Local harnesses
 
-**claude** and **codex** run post-processing actions and `--auto` through the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex) CLI, with that CLI's own login and default model (the action's `model` field is ignored). They run headless from an empty temp dir, with no tools, no MCP servers, no hooks or plugins and no saved session (Codex also gets a read-only sandbox and no web search). The transcript is untrusted input, so the agents get no way to read files or run commands that a spoken prompt injection could abuse. The whole transcript goes in one prompt, without chunking. They can't transcribe audio, so with no `-transcriber` set they pair with `local`. No fallback to an API provider.
+**claude** and **codex** run post-processing actions and `--auto` through the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex) CLI, with that CLI's own login and its default model, or the one set with `claude_model` / `codex_model` in the config (the action's `model` field is ignored). They run headless from an empty temp dir, with no tools, no MCP servers, no hooks or plugins and no saved session (Codex also gets a read-only sandbox and no web search). The transcript is untrusted input, so the agents get no way to read files or run commands that a spoken prompt injection could abuse. The whole transcript goes in one prompt, without chunking. They can't transcribe audio, so with no `-transcriber` set they pair with `local`. No fallback to an API provider.
 
 ### Transcribers
 
@@ -331,6 +331,7 @@ goscribe record -list-sources                     # pick devices for -mic / -sys
 goscribe assist -context ~/notes/standup/                    # background notes: a .md file or a folder
 goscribe assist -context agenda.md -provider claude -o standup-assist.md
 goscribe assist -source system -language fr                   # only the others, in French
+goscribe assist -provider codex -model gpt-6-luna             # pick the model (config: codex_model)
 ```
 
 ```

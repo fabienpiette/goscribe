@@ -694,7 +694,7 @@ func fakeClaude(t *testing.T, answer string) string {
 	promptFile := filepath.Join(dir, "prompt")
 	t.Setenv("FAKE_PROMPT", promptFile)
 	bin := filepath.Join(dir, "fake-claude")
-	script := "#!/bin/sh\ncat > \"$FAKE_PROMPT\"\ncat <<'EOF'\n" + answer + "\nEOF\n"
+	script := "#!/bin/sh\necho \"$@\" > \"$FAKE_PROMPT.args\"\ncat > \"$FAKE_PROMPT\"\ncat <<'EOF'\n" + answer + "\nEOF\n"
 	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
 		t.Fatalf("failed to write fake claude: %v", err)
 	}
@@ -832,5 +832,33 @@ func TestRunEmptyKeyFlagUsesConfigKey(t *testing.T) {
 	}
 	if gotAuth != "Bearer key-from-config" {
 		t.Errorf("Authorization = %q, want the key from the config file", gotAuth)
+	}
+}
+
+// claude_model and codex_model in the config reach the CLI.
+func TestRunUsesConfiguredHarnessModel(t *testing.T) {
+	transcript := recordsWithTranscript(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := config.CreateDefault(); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(home, ".goscribe", "config.yml")
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("claude_model: sonnet\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	t.Cleanup(func() { harness.Models = map[string]string{} })
+	promptFile := fakeClaude(t, `{"type":"standup","summary":"s","topics":["x"]}`)
+
+	if err := run(runOptions{apiKey: "XXXX", provider: "claude", tags: true, transcriptFiles: []string{transcript}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if args, _ := os.ReadFile(promptFile + ".args"); !strings.Contains(string(args), "--model sonnet") {
+		t.Errorf("claude args = %q, want --model sonnet", args)
 	}
 }
