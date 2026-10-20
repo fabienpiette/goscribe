@@ -14,6 +14,7 @@ const (
 	LineEvent                     // a committed transcript line
 	NoticeEvent                   // a status message to show as is
 	MuteEvent                     // a side was muted or unmuted (Muted)
+	RecapEvent                    // the user asked for a recap of the last minutes
 )
 
 // Event is what the transcription side sends to Run.
@@ -36,6 +37,8 @@ type Config struct {
 	Interactive bool            // Out is a terminal: status line and dim lines
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
 	MuteHint    string          // mute keys for the status line, e.g. "m/s"; "" when there are none
+	RecapKey    string          // the key that asks for a recap, for the status line; "" when there is none
+	RecapWindow time.Duration   // how far back a recap goes; 0 means defaultRecapWindow
 	// Research sends one prompt to the librarian and returns its answer and
 	// the tool calls its allowlist refused; nil turns the librarian off.
 	Research              func(prompt string) (ResearchReply, error)
@@ -109,10 +112,14 @@ func Run(c Config, events <-chan Event) error {
 
 type result struct {
 	gen    int
-	upto   int // lines covered by this update
+	upto   int  // lines covered by this update
+	recap  bool // the answer is a recap, not an update
 	answer string
 	err    error
 }
+
+// defaultRecapWindow is how far back a recap goes when RecapWindow is unset.
+const defaultRecapWindow = 5 * time.Minute
 
 type lookupResult struct {
 	lookup Lookup
@@ -135,6 +142,8 @@ type state struct {
 	lastSpeaker string
 
 	thinking   bool
+	recapping  bool // the call in flight is a recap
+	recapAsked bool // a recap waits for the call in flight
 	thinkStart time.Time
 	lastStart  time.Time
 	failures   int
@@ -178,6 +187,8 @@ func (s *state) handle(ev Event) {
 		}
 	case NoticeEvent:
 		s.print(Clean(ev.Text))
+	case RecapEvent:
+		s.askRecap(time.Now())
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -186,6 +197,63 @@ func (s *state) handle(ev Event) {
 			delete(s.partials, ev.Speaker) // its words in progress won't be finished
 		}
 		s.print(fmt.Sprintf("%s %s %s at %s", icon, ev.Speaker, word, clock(s.elapsed(time.Now()))))
+	}
+}
+
+// recapWindow is how far back a recap goes.
+func (s *state) recapWindow() time.Duration {
+	if s.c.RecapWindow > 0 {
+		return s.c.RecapWindow
+	}
+	return defaultRecapWindow
+}
+
+// askRecap notes a recap request; it starts as soon as no call is in flight.
+func (s *state) askRecap(now time.Time) {
+	if s.ending {
+		return
+	}
+	if s.recapAsked || (s.thinking && s.recapping) {
+		s.print(s.dim("📝 a recap is already on its way"))
+		return
+	}
+	if len(recentLines(s.lines, s.elapsed(now), s.recapWindow())) == 0 {
+		s.print(s.dim("📝 nothing was said in the last " + WindowLabel(s.recapWindow())))
+		return
+	}
+	s.recapAsked = true
+}
+
+func (s *state) startRecap(now time.Time) {
+	s.recapAsked = false
+	s.print(s.dim(fmt.Sprintf("📝 recapping the last %s (%s)…", WindowLabel(s.recapWindow()), s.c.Engine)))
+	instructions, transcript := RecapPrompt(s.mem, s.lines, s.elapsed(now), s.recapWindow())
+	s.call(now, s.analysed, true, instructions, transcript)
+}
+
+// finishRecap shows a recap answer in the feed.
+func (s *state) finishRecap(r result) {
+	var recap struct {
+		Recap []string `json:"recap"`
+	}
+	err := r.err
+	if err == nil {
+		err = parseJSON(r.answer, &recap)
+	}
+	if err != nil {
+		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
+		s.print("⚠ recap failed: " + oneLine(msg, 200))
+		return
+	}
+	at := s.elapsed(time.Now())
+	points := cleanList(recap.Recap, maxRecapPoints)
+	if len(points) == 0 {
+		s.print(s.dim(fmt.Sprintf("📝 %s nothing notable in the last %s", clock(at), WindowLabel(s.recapWindow()))))
+		return
+	}
+	s.print(fmt.Sprintf("📝 %s Recap of the last %s:", clock(at), WindowLabel(s.recapWindow())))
+	for _, p := range points {
+		s.print("  • " + Clean(p))
 	}
 }
 
@@ -199,6 +267,10 @@ func (s *state) interval() time.Duration {
 }
 
 func (s *state) maybeStart(now time.Time) {
+	if !s.thinking && s.recapAsked {
+		s.startRecap(now)
+		return
+	}
 	if s.thinking || s.analysed == len(s.lines) || now.Sub(s.lastStart) < s.interval() {
 		return
 	}
@@ -208,17 +280,20 @@ func (s *state) maybeStart(now time.Time) {
 	}
 	upto := len(s.lines)
 	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil)
-	s.call(now, upto, instructions, transcript)
+	s.call(now, upto, false, instructions, transcript)
 }
 
-func (s *state) call(now time.Time, upto int, instructions, transcript string) {
+func (s *state) call(now time.Time, upto int, recap bool, instructions, transcript string) {
 	s.gen++
 	gen, think, results := s.gen, s.c.Think, s.results
-	s.thinking, s.thinkStart, s.lastStart = true, now, now
+	s.thinking, s.recapping, s.thinkStart = true, recap, now
+	if !recap { // a recap does not delay the next update
+		s.lastStart = now
+	}
 	go func() {
 		answer, err := think(instructions, transcript)
 		select {
-		case results <- result{gen: gen, upto: upto, answer: answer, err: err}:
+		case results <- result{gen: gen, upto: upto, recap: recap, answer: answer, err: err}:
 		default: // only abandoned calls can find the buffer full
 		}
 	}()
@@ -229,6 +304,10 @@ func (s *state) finish(r result) {
 		return
 	}
 	s.thinking = false
+	if r.recap {
+		s.finishRecap(r)
+		return
+	}
 	reply, err := r.answer, r.err
 	var parsed Reply
 	if err == nil {
@@ -384,6 +463,10 @@ func (s *state) watchdog(now time.Time) {
 	}
 	s.gen++ // its answer, if it ever comes, is ignored
 	s.thinking = false
+	if s.recapping { // a lost recap does not slow the updates down
+		s.print(fmt.Sprintf("⚠ recap failed: %s did not answer in %s", s.c.Engine, limit.Round(time.Second)))
+		return
+	}
 	s.failures++
 	s.print(fmt.Sprintf("⚠ %s did not answer in %s; skipping this update", s.c.Engine, limit.Round(time.Second)))
 }
@@ -411,7 +494,7 @@ func (s *state) end() error {
 
 	s.print(fmt.Sprintf("⏳ writing the final notes (%s)…", s.c.Engine))
 	instructions, transcript := FinalPrompt(s.c.Context, s.mem, s.lines)
-	s.call(time.Now(), len(s.lines), instructions, transcript)
+	s.call(time.Now(), len(s.lines), false, instructions, transcript)
 	select {
 	case r := <-s.waitCurrent():
 		s.thinking = false
@@ -488,14 +571,23 @@ func (s *state) status(now time.Time) {
 	if p := s.partials[s.lastSpeaker]; p != "" {
 		line += fmt.Sprintf("  %s ▸ %q", s.lastSpeaker, lastRunes(p, 60))
 	}
-	if s.thinking {
+	if s.thinking && s.recapping {
+		line += fmt.Sprintf("  · recapping %ds (%s)", int(now.Sub(s.thinkStart).Seconds()), s.c.Engine)
+	} else if s.thinking {
 		line += fmt.Sprintf("  · thinking %ds (%s)", int(now.Sub(s.thinkStart).Seconds()), s.c.Engine)
 	} else {
 		line += "  · listening"
 	}
-	hint := "   (Ctrl+C to stop)"
+	var keys []string
 	if s.c.MuteHint != "" {
-		hint = "   (" + s.c.MuteHint + ": mute · Ctrl+C: stop)"
+		keys = append(keys, s.c.MuteHint+": mute")
+	}
+	if s.c.RecapKey != "" {
+		keys = append(keys, s.c.RecapKey+": recap")
+	}
+	hint := "   (Ctrl+C to stop)"
+	if len(keys) > 0 {
+		hint = "   (" + strings.Join(append(keys, "Ctrl+C: stop"), " · ") + ")"
 	}
 	fmt.Fprint(s.c.Out, "\r\033[K"+line+hint)
 }

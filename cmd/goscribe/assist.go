@@ -41,7 +41,8 @@ It captures the audio on its own: run it in a second terminal next to
 While it runs, press m to mute or unmute your mic and s for the computer
 sound: a muted side is not transcribed (its live session gets silence), so
 nothing from it reaches the model or the notes. Each press affects only
-assist; mute record separately in its own terminal.
+assist; mute record separately in its own terminal. Press w ("what did I
+miss?") for a short recap of the last minutes (-recap, default 5m).
 
 EXAMPLES:
   goscribe assist -context ~/notes/standup/
@@ -93,6 +94,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	keyterms := fs.String("keyterms", "", "Comma-separated names/jargon to favor (default: config elevenlabs_keyterms)")
 	elevenLabsKey := fs.String("elevenlabs-key", "", "ElevenLabs API key (default: config, then $ELEVENLABS_API_KEY)")
 	interval := fs.Duration("interval", 0, "Shortest time between two updates (default: 20s, 30s with claude/codex)")
+	recap := fs.Duration("recap", 0, "How far back the recap key (w) goes (default: config assist_recap, else 5m)")
 	librarian := fs.Bool("librarian", false, "Let the model look things up in your sources (librarian in the config; Claude Code)")
 	configFile := fs.String("config", "", "Config file (default: ~/.goscribe/config.yml)")
 	listSources := fs.Bool("list-sources", false, "List inputs and computer sound sources, then exit")
@@ -165,6 +167,16 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	if isSet(fs, "interval") && *interval <= 0 {
 		return usageErr("-interval must be positive (e.g. 20s)")
+	}
+	if isSet(fs, "recap") && *recap <= 0 {
+		return usageErr("-recap must be positive (e.g. 5m)")
+	}
+	recapWindow := *recap
+	if recapWindow == 0 {
+		recapWindow = cfg.AssistRecap
+	}
+	if recapWindow <= 0 {
+		recapWindow = 5 * time.Minute
 	}
 	every := *interval
 	if every == 0 {
@@ -239,13 +251,14 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	ctx, force, stopSignals := watchSignals()
 	defer stopSignals()
 
-	// Mute keys, as in record: only on a terminal (and on Linux).
-	toggle, restoreKeys := startMuteKeys(os.Stdin)
+	// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
+	toggle, restoreKeys := startKeys(os.Stdin, assistKeys())
 	defer restoreKeys()
-	muteHint := ""
+	muteHint, recapHint := "", ""
 	if toggle != nil {
-		muteHint = assistMuteHint(sides)
-		fmt.Fprintf(stdout, "Assist %s → %s (%s to mute or unmute, Ctrl+C to stop)\n", header, notes, muteHint)
+		muteHint, recapHint = assistMuteHint(sides), string(recapKey)
+		fmt.Fprintf(stdout, "Assist %s → %s (%s to mute or unmute, %s for a recap of the last %s, Ctrl+C to stop)\n",
+			header, notes, muteHint, recapHint, assistant.WindowLabel(recapWindow))
 	} else {
 		fmt.Fprintf(stdout, "Assist %s → %s (Ctrl+C to stop)\n", header, notes)
 	}
@@ -264,6 +277,8 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Out:         stdout,
 		Interactive: isTerminal(stdout),
 		MuteHint:    muteHint,
+		RecapKey:    recapHint,
+		RecapWindow: recapWindow,
 		Force:       force,
 	}
 	if *librarian {
@@ -513,6 +528,10 @@ func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide,
 			for {
 				select {
 				case label := <-toggle:
+					if label == "recap" {
+						events <- assistant.Event{Kind: assistant.RecapEvent}
+						continue
+					}
 					flag := muted[sideForKey(label)]
 					if flag == nil {
 						continue // a key for a side that isn't captured

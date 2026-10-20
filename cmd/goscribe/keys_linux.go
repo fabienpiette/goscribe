@@ -6,15 +6,22 @@ import (
 	"os"
 	"sync"
 
+	"goscribe/internal/recorder"
+
 	"golang.org/x/sys/unix"
 )
 
-// startMuteKeys reads single key presses from in while a recording runs and
-// sends the label of each mute key (recorder.MuteKeys) on toggle. The terminal
-// leaves line mode and stops echoing, but keeps signals, so Ctrl+C still stops
-// the recording. restore puts the terminal back and stops reading; it is safe
-// to call more than once. When in is not a terminal, toggle is nil.
+// startMuteKeys reads the mute keys of record (recorder.MuteKeys).
 func startMuteKeys(in *os.File) (toggle <-chan string, restore func()) {
+	return startKeys(in, recorder.MuteKeys)
+}
+
+// startKeys reads single key presses from in and sends the label of each key
+// in keys on toggle. The terminal leaves line mode and stops echoing, but
+// keeps signals, so Ctrl+C still stops the command. restore puts the
+// terminal back and stops reading; it is safe to call more than once. When in
+// is not a terminal, toggle is nil.
+func startKeys(in *os.File, keys map[rune]string) (toggle <-chan string, restore func()) {
 	fd := int(in.Fd())
 	orig, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
@@ -34,7 +41,7 @@ func startMuteKeys(in *os.File) (toggle <-chan string, restore func()) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		readKeys(fd, out, done)
+		readKeys(fd, keys, out, done)
 	}()
 
 	var once sync.Once
@@ -49,7 +56,7 @@ func startMuteKeys(in *os.File) (toggle <-chan string, restore func()) {
 
 // readKeys polls instead of blocking in read, so it notices done within
 // 100 ms and never keeps a read pending on stdin after the recording.
-func readKeys(fd int, out chan<- string, done <-chan struct{}) {
+func readKeys(fd int, keys map[rune]string, out chan<- string, done <-chan struct{}) {
 	buf := make([]byte, 16)
 	for {
 		select {
@@ -70,7 +77,7 @@ func readKeys(fd int, out chan<- string, done <-chan struct{}) {
 			return
 		}
 		for _, b := range buf[:n] {
-			label, ok := keyLabel(b)
+			label, ok := keyLabel(keys, b)
 			if !ok {
 				continue
 			}

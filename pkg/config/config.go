@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -45,7 +46,9 @@ type Config struct {
 	// Models for the claude and codex CLIs (empty: the CLI's default model).
 	ClaudeModel string `yaml:"claude_model,omitempty"`
 	CodexModel  string `yaml:"codex_model,omitempty"`
-	Language    string `yaml:"language,omitempty"`
+	// How far back the recap key (w) of goscribe assist goes (default 5m).
+	AssistRecap time.Duration `yaml:"assist_recap,omitempty"`
+	Language    string        `yaml:"language,omitempty"`
 
 	// Read-only lookups ("goscribe assist" asking a Claude Code session).
 	Librarian Librarian `yaml:"librarian,omitempty"`

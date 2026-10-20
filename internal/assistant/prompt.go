@@ -191,3 +191,43 @@ func clock(d time.Duration) string {
 	s := int(d.Seconds())
 	return fmt.Sprintf("%02d:%02d:%02d", s/3600, s%3600/60, s%60)
 }
+
+// maxRecapPoints bounds a recap's bullets.
+const maxRecapPoints = 6
+
+const recapTask = `The user pressed the recap key: they may have been distracted and want to know what was said in the last %[1]s.
+
+Reply with JSON only, no code fence, in this shape:
+{"recap": ["...", "..."]}
+
+Rules:
+- 2 to 6 short points, most important first: what was said, decided or asked, and by whom when it is known.
+- Cover only the transcript below (the last %[1]s); the memory is background, do not repeat it.
+- Write in the language of the meeting.`
+
+// RecapPrompt builds a recap of the lines said in the window before now: the
+// rules, the memory as background, and only the recent lines as transcript.
+func RecapPrompt(m Memory, lines []Line, now, window time.Duration) (instructions, transcript string) {
+	var b strings.Builder
+	b.WriteString(roleAndRules + "\n\n")
+	writeMemory(&b, m, nil)
+	fmt.Fprintf(&b, recapTask, WindowLabel(window))
+	return b.String(), "<transcript>\n" + lastBytes(recentLines(lines, now, window), freshWindow) + "</transcript>"
+}
+
+// recentLines returns the lines said in the window before now.
+func recentLines(lines []Line, now, window time.Duration) []Line {
+	from := len(lines)
+	for from > 0 && lines[from-1].At >= now-window {
+		from--
+	}
+	return lines[from:]
+}
+
+// WindowLabel writes a duration the way people say it: "5 min", or "1m30s".
+func WindowLabel(d time.Duration) string {
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%d min", int(d/time.Minute))
+	}
+	return d.String()
+}

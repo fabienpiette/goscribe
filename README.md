@@ -354,6 +354,7 @@ goscribe assist -provider codex -model gpt-6-luna             # pick the model (
 - The transcript is treated as untrusted data: the model is told never to follow instructions spoken in the meeting, and `claude`/`codex` run with no tools.
 - Use headphones: with speakers, the mic also hears the others and their words are labelled `me`.
 - Press `m` to mute or unmute your mic (`me`) and `s` for the computer sound (`others`), in a terminal, as in `record`. A muted side is not transcribed: its live session gets silence and stays open, so nothing said on that side reaches the model, the suggestions or the notes until you unmute. Live transcription lags a second or two behind, so the words said just before you press are dropped too. The status line shows `me (muted)`, and each change is logged, e.g. `🔇 me muted at 00:12:41`. The keys only affect `assist`: when `goscribe record` runs in another terminal, mute it there too.
+- Press `w` ("what did I miss?") for a short recap of the last minutes, e.g. after a distraction: `📝 00:42:10 Recap of the last 5 min:` and 2 to 6 points, in the language of the meeting. It goes back 5 minutes by default (`-recap 10m`, or `assist_recap: 10m` in the config). It is one `-provider` call: when an update is running, the recap follows it, without waiting for the update interval.
 
 #### Librarian
 

@@ -602,8 +602,18 @@ func TestStreamSidesMute(t *testing.T) {
 	toggle <- "system" // not captured here: ignored
 	toggle <- "mic"
 	waitFor("audio")
+	toggle <- "recap"
 	cancel()
 	<-collected
+	recaps := 0
+	for _, e := range got {
+		if e.Kind == assistant.RecapEvent {
+			recaps++
+		}
+	}
+	if recaps != 1 {
+		t.Errorf("recap events = %d, want 1", recaps)
+	}
 
 	var mutes []string
 	for _, e := range got {
@@ -618,5 +628,15 @@ func TestStreamSidesMute(t *testing.T) {
 	defer mu.Unlock()
 	if sessions != 1 {
 		t.Errorf("sessions = %d, want one kept open across mute and unmute", sessions)
+	}
+}
+
+func TestAssistRecapFlag(t *testing.T) {
+	fakeClaude(t, "") // CI has no claude CLI; -provider claude must get past its check
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELEVENLABS_API_KEY", "k")
+	stderr := &syncBuf{}
+	if code := runAssist([]string{"-provider", "claude", "-recap", "0s"}, &syncBuf{}, stderr); code != 2 || !strings.Contains(stderr.String(), "-recap must be positive") {
+		t.Errorf("exit = %d, stderr = %q", code, stderr.String())
 	}
 }
