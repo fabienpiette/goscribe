@@ -47,6 +47,8 @@ type Config struct {
 	ClaudeModel string `yaml:"claude_model,omitempty"`
 	CodexModel  string `yaml:"codex_model,omitempty"`
 	HermesModel string `yaml:"hermes_model,omitempty"`
+	// Provider for hermes (e.g. openrouter); empty: the Hermes config's.
+	HermesProvider string `yaml:"hermes_provider,omitempty"`
 	// How far back the recap key (w) of goscribe assist goes (default 5m).
 	AssistRecap time.Duration `yaml:"assist_recap,omitempty"`
 	Language    string        `yaml:"language,omitempty"`

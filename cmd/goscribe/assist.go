@@ -133,6 +133,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		return usageErr("%v", err)
 	}
 	harness.Models = cfg.HarnessModels()
+	harness.HermesProvider = cfg.HermesProvider
 	if *modelFlag != "" && harness.IsHarness(prov) {
 		harness.Models[prov] = *modelFlag
 	}

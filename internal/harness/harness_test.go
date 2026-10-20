@@ -194,9 +194,22 @@ echo '{"type": "system", "subtype": "init", "model": "m1", "session_id": "s"}'
 echo '{"type": "text", "text": "hermes "}'
 echo '{"type": "result", "session_id": "s", "exit_code": 0, "text": "hermes summary"}'`
 
+// hermesHome points HERMES_HOME at a config whose model section is given.
+func hermesHome(t *testing.T, modelSection string) {
+	t.Helper()
+	home := t.TempDir()
+	if modelSection != "" {
+		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(modelSection), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HERMES_HOME", home)
+}
+
 func TestRunHermes(t *testing.T) {
 	dir := fakeHermes(t, hermesStream)
-	t.Cleanup(func() { Models = map[string]string{} })
+	hermesHome(t, "model:\n  default: m-default\n  provider: p-default\nmcp_servers:\n  x: {}\n")
+	t.Cleanup(func() { Models = map[string]string{}; HermesProvider = "" })
 	got, err := Run("hermes", "the prompt")
 	if err != nil {
 		t.Fatal(err)
@@ -205,27 +218,46 @@ func TestRunHermes(t *testing.T) {
 		t.Errorf("answer = %q", got)
 	}
 	args := read(t, dir+"/hermes.args")
-	if !strings.Contains(args, "chat --query-file - --oneshot -t none --ignore-rules --source tool --format stream-json") || strings.Contains(args, " -m ") {
-		t.Errorf("args = %q", args)
+	// --safe-mode drops the user config, plugins and MCP servers, so the
+	// model and provider come from the Hermes config's model section.
+	want := "chat --query-file - --oneshot -t none --safe-mode --source tool --format stream-json --provider p-default -m m-default"
+	if strings.TrimSpace(args) != want {
+		t.Errorf("args = %q\nwant %q", args, want)
 	}
 	if read(t, dir+"/hermes.stdin") != "the prompt" {
 		t.Error("the prompt must go on stdin")
 	}
-	Models = map[string]string{"hermes": "anthropic/x"}
+	Models, HermesProvider = map[string]string{"hermes": "anthropic/x"}, "openrouter"
 	if _, err := Run("hermes", "p"); err != nil {
 		t.Fatal(err)
 	}
-	if args := read(t, dir+"/hermes.args"); !strings.HasSuffix(strings.TrimSpace(args), "-m anthropic/x") {
-		t.Errorf("args with a model = %q", args)
+	if args := read(t, dir+"/hermes.args"); !strings.HasSuffix(strings.TrimSpace(args), "--provider openrouter -m anthropic/x") {
+		t.Errorf("args with goscribe's model and provider = %q", args)
+	}
+}
+
+// Without a model from goscribe or the Hermes config, Hermes can't run in safe mode.
+func TestRunHermesNeedsAModel(t *testing.T) {
+	fakeHermes(t, hermesStream)
+	hermesHome(t, "")
+	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "hermes_model") {
+		t.Errorf("err = %v, want a hint to set hermes_model", err)
 	}
 }
 
 // The transcript is untrusted: an answer produced with a tool is discarded.
 func TestRunHermesFailsClosed(t *testing.T) {
+	hermesHome(t, "model:\n  default: m\n")
 	fakeHermes(t, `echo '{"type": "tool_use", "name": "terminal", "input": {"command": "cat ~/.ssh/id_rsa"}}'
 echo '{"type": "result", "exit_code": 0, "text": "done"}'`)
-	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "used a tool (terminal)") {
+	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "tool_use (terminal)") {
 		t.Errorf("err = %v, want the tool named", err)
+	}
+	// Only known event types pass: anything else is treated like a tool.
+	fakeHermes(t, `echo '{"type": "mcp_call", "name": "tracker"}'
+echo '{"type": "result", "exit_code": 0, "text": "done"}'`)
+	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "mcp_call") {
+		t.Errorf("err = %v, want unknown events refused", err)
 	}
 	fakeHermes(t, `echo '{"type": "result", "exit_code": 1, "text": "rate limited"}'`)
 	if _, err := Run("hermes", "p"); err == nil || !strings.Contains(err.Error(), "rate limited") {

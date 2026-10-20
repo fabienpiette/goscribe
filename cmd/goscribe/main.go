@@ -120,6 +120,7 @@ func run(opts runOptions) error {
 		return fmt.Errorf("loading config file: %w", err)
 	}
 	harness.Models = cfg.HarnessModels()
+	harness.HermesProvider = cfg.HermesProvider
 
 	postActions := cfg.PostActions
 
@@ -568,7 +569,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  - transcriber: default transcription engine\n")
 		fmt.Fprintf(os.Stderr, "  - elevenlabs_api_key / elevenlabs_model: ElevenLabs settings (model default: scribe_v2)\n")
 		fmt.Fprintf(os.Stderr, "  - elevenlabs_keyterms / elevenlabs_num_speakers / elevenlabs_verbatim: ElevenLabs tuning\n")
-		fmt.Fprintf(os.Stderr, "  - claude_model / codex_model / hermes_model: model for the claude, codex and hermes CLIs (default: the CLI's own)\n")
+		fmt.Fprintf(os.Stderr, "  - claude_model / codex_model / hermes_model (+ hermes_provider): model for the claude, codex and hermes CLIs (default: the CLI's own; for hermes, its config's model section)\n")
 		fmt.Fprintf(os.Stderr, "  - whisper_model: local Whisper model (default: small)\n")
 		fmt.Fprintf(os.Stderr, "  - language: audio language code for local and elevenlabs\n\n")
 		fmt.Fprintf(os.Stderr, "PROVIDERS:\n")

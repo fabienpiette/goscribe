@@ -16,6 +16,8 @@ import (
 
 	"goscribe/internal/util"
 	"goscribe/pkg/config"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Binaries can be overridden for tests.
@@ -36,6 +38,10 @@ var codexDisabledFeatures = []string{
 
 // Timeout bounds a single harness call.
 var Timeout = 20 * time.Minute
+
+// HermesProvider is the inference provider passed to hermes (config
+// hermes_provider); empty means the one in the Hermes config.
+var HermesProvider string
 
 // Models picks the model per harness ("claude", "codex", "hermes"); a harness missing
 // from it uses its CLI's default model. Set from the config at startup.
@@ -96,18 +102,25 @@ func Run(name, prompt string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("%s not found on PATH (install Hermes Agent)", HermesBinary)
 		}
-		// No toolsets: Hermes has no "none" toolset, and an unknown name enables
-		// nothing (an empty -t would enable them all). No AGENTS.md, SOUL.md or
-		// memory; sessions are tagged as a tool's, out of the user's lists.
+		// The controls: --safe-mode drops the user config, plugins, MCP servers,
+		// AGENTS.md, SOUL.md and memory; -t none enables no toolset (Hermes has
+		// no explicit empty one, and an empty -t enables them all). Safe mode
+		// also drops the default model, so it is passed explicitly. Sessions are
+		// tagged as a tool's, out of the user's lists.
+		model, provider, err := hermesModel()
+		if err != nil {
+			return "", err
+		}
 		args := []string{"chat", "--query-file", "-", "--oneshot",
 			"-t", "none",
-			"--ignore-rules",
+			"--safe-mode",
 			"--source", "tool",
 			"--format", "stream-json",
 		}
-		if m := Models[name]; m != "" {
-			args = append(args, "-m", m)
+		if provider != "" {
+			args = append(args, "--provider", provider)
 		}
+		args = append(args, "-m", model)
 		out, err := runCLI(name, bin, prompt, Timeout, "", func(string) []string { return args })
 		if err != nil {
 			return "", err
@@ -116,6 +129,41 @@ func Run(name, prompt string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown harness '%s' (valid: claude, codex, hermes)", name)
 	}
+}
+
+// hermesModel returns the model and provider for hermes: goscribe's
+// (hermes_model, -model, hermes_provider) first, else the model section of
+// the Hermes config ($HERMES_HOME/config.yaml, ~/.hermes by default), which
+// --safe-mode would otherwise ignore.
+func hermesModel() (model, provider string, err error) {
+	model, provider = Models["hermes"], HermesProvider
+	if model == "" || provider == "" {
+		home := os.Getenv("HERMES_HOME")
+		if home == "" {
+			if h, err := os.UserHomeDir(); err == nil {
+				home = filepath.Join(h, ".hermes")
+			}
+		}
+		var cfg struct {
+			Model struct {
+				Default  string `yaml:"default"`
+				Provider string `yaml:"provider"`
+			} `yaml:"model"`
+		}
+		if data, err := os.ReadFile(filepath.Join(home, "config.yaml")); err == nil {
+			_ = yaml.Unmarshal(data, &cfg) // a broken file just gives no defaults
+		}
+		if model == "" {
+			model = cfg.Model.Default
+		}
+		if provider == "" {
+			provider = cfg.Model.Provider
+		}
+	}
+	if model == "" {
+		return "", "", fmt.Errorf("hermes runs in safe mode, which ignores its config: set hermes_model (and hermes_provider) in the goscribe config")
+	}
+	return model, provider, nil
 }
 
 // hermesEvent is one line of hermes --format stream-json.
@@ -127,9 +175,10 @@ type hermesEvent struct {
 }
 
 // hermesAnswer reads the final text from a Hermes event stream. It fails
-// closed: the transcript is untrusted, so an answer reached with any tool is
-// discarded, as -t none should have left none. Non-JSON lines (warnings) are
-// skipped.
+// closed: only the events of a plain answer (system, text, result) are
+// accepted, so an answer reached with a tool, or with anything unknown, is
+// discarded. This runs after the fact and can't undo a side effect: the
+// controls are --safe-mode and -t none. Non-JSON lines (warnings) are skipped.
 func hermesAnswer(stream string) (string, error) {
 	var result *hermesEvent
 	for _, line := range strings.Split(stream, "\n") {
@@ -138,10 +187,15 @@ func hermesAnswer(stream string) (string, error) {
 			continue
 		}
 		switch e.Type {
-		case "tool_use":
-			return "", fmt.Errorf("hermes used a tool (%s) although none is allowed; answer discarded", e.Name)
+		case "system", "text":
 		case "result":
 			result = &e
+		default:
+			what := e.Type
+			if e.Name != "" {
+				what += " (" + e.Name + ")"
+			}
+			return "", fmt.Errorf("hermes sent a %s event although no tool is allowed; answer discarded", what)
 		}
 	}
 	if result == nil {
