@@ -4,12 +4,16 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -466,4 +470,149 @@ func configWith(t *testing.T, dir, name, extra string) string {
 	p := filepath.Join(dir, name)
 	mustWrite(t, p, append(b, []byte("\n"+extra)...), 0644)
 	return p
+}
+
+// The gate passes audio through, sends silence of the same length while the
+// side is muted, and closes its output when the capture ends.
+func TestMuteGate(t *testing.T) {
+	in, out := make(chan []byte, 4), make(chan []byte, 4)
+	var muted atomic.Bool
+	go muteGate(in, out, &muted)
+	in <- []byte{1, 2, 3}
+	if got := <-out; !bytes.Equal(got, []byte{1, 2, 3}) {
+		t.Errorf("unmuted chunk = %v", got)
+	}
+	muted.Store(true)
+	chunk := []byte{4, 5, 6}
+	in <- chunk
+	if got := <-out; !bytes.Equal(got, []byte{0, 0, 0}) {
+		t.Errorf("muted chunk = %v, want silence", got)
+	}
+	if !bytes.Equal(chunk, []byte{4, 5, 6}) {
+		t.Error("the gate must not overwrite the captured chunk")
+	}
+	close(in)
+	if _, ok := <-out; ok {
+		t.Error("out must close when the capture ends")
+	}
+}
+
+func TestAssistMuteHint(t *testing.T) {
+	for _, c := range []struct {
+		sides []assistSide
+		want  string
+	}{
+		{[]assistSide{{"me", "mic0"}, {"others", "mon0"}}, "m/s"},
+		{[]assistSide{{"me", "mic0"}}, "m"},
+		{[]assistSide{{"others", "mon0"}}, "s"},
+	} {
+		if got := assistMuteHint(c.sides); got != c.want {
+			t.Errorf("assistMuteHint(%v) = %q, want %q", c.sides, got, c.want)
+		}
+	}
+	if sideForKey("mic") != "me" || sideForKey("system") != "others" || sideForKey("x") != "" {
+		t.Error("mute key labels must map to the assist speakers")
+	}
+}
+
+// End to end: pressing the mute key sends silence to the live session (which
+// stays open) and back to real audio on the next press, with mute events.
+func TestStreamSidesMute(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	mustWrite(t, ffmpeg, []byte("#!/bin/sh\nwhile :; do yes | head -c 6400; sleep 0.05; done\n"), 0755)
+	origBin := recorder.Binary
+	recorder.Binary = ffmpeg
+	defer func() { recorder.Binary = origBin }()
+
+	var mu sync.Mutex
+	var kinds []string // "audio" or "silence", per chunk received
+	sessions := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.CloseNow() }()
+		mu.Lock()
+		sessions++
+		mu.Unlock()
+		for {
+			var msg struct {
+				Audio string `json:"audio_base_64"`
+			}
+			if wsjson.Read(r.Context(), c, &msg) != nil {
+				return
+			}
+			pcm, _ := base64.StdEncoding.DecodeString(msg.Audio)
+			kind := "silence"
+			for _, b := range pcm {
+				if b != 0 {
+					kind = "audio"
+					break
+				}
+			}
+			mu.Lock()
+			kinds = append(kinds, kind)
+			mu.Unlock()
+		}
+	}))
+	defer srv.Close()
+	origURL, origFlush := realtime.BaseURL, realtime.FlushTimeout
+	realtime.BaseURL, realtime.FlushTimeout = "ws"+strings.TrimPrefix(srv.URL, "http"), 100*time.Millisecond
+	defer func() { realtime.BaseURL, realtime.FlushTimeout = origURL, origFlush }()
+
+	last := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(kinds) == 0 {
+			return ""
+		}
+		return kinds[len(kinds)-1]
+	}
+	waitFor := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for last() != what {
+			if time.Now().After(deadline) {
+				t.Fatalf("no %s chunk reached the session", what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	toggle := make(chan string)
+	events := streamSides(ctx, make(chan struct{}), []assistSide{{"me", "mic0"}}, realtime.Options{APIKey: "k"}, toggle)
+	var got []assistant.Event
+	collected := make(chan struct{})
+	go func() {
+		for e := range events {
+			got = append(got, e)
+		}
+		close(collected)
+	}()
+
+	waitFor("audio")
+	toggle <- "mic"
+	waitFor("silence")
+	toggle <- "system" // not captured here: ignored
+	toggle <- "mic"
+	waitFor("audio")
+	cancel()
+	<-collected
+
+	var mutes []string
+	for _, e := range got {
+		if e.Kind == assistant.MuteEvent {
+			mutes = append(mutes, fmt.Sprintf("%s:%v", e.Speaker, e.Muted))
+		}
+	}
+	if strings.Join(mutes, ",") != "me:true,me:false" {
+		t.Errorf("mute events = %v", mutes)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sessions != 1 {
+		t.Errorf("sessions = %d, want one kept open across mute and unmute", sessions)
+	}
 }

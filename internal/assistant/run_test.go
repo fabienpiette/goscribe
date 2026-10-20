@@ -734,3 +734,69 @@ func TestRunFailureLabelOnce(t *testing.T) {
 		t.Errorf("feed:\n%s", feed)
 	}
 }
+
+// Mute events log each change, drop the muted side's words in progress and
+// show the muted side and the keys on the status line.
+func TestRunMuteEvents(t *testing.T) {
+	fastTimers(t)
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: (&fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}).think,
+			Out: out, Interactive: true, MuteHint: "m/s"}, events)
+	}()
+	waitUntil(t, "status line", func() bool { return strings.Contains(out.String(), "m/s: mute · Ctrl+C: stop") })
+	events <- Event{Kind: PartialEvent, Speaker: "me", Text: "half a sentence"}
+	events <- Event{Kind: MuteEvent, Speaker: "me", Muted: true}
+	waitUntil(t, "muted status", func() bool { return strings.Contains(out.String(), "me (muted)") })
+	// The live session lags behind the audio: words said before the key press
+	// arrive while muted, and are dropped like the rest.
+	events <- Event{Kind: PartialEvent, Speaker: "me", Text: "late partial"}
+	events <- line("me", "a late committed line from before the mute")
+	events <- line("others", "the other side still counts")
+	events <- Event{Kind: MuteEvent, Speaker: "me", Muted: false}
+	events <- line("me", "back after the unmute")
+	close(events)
+	<-done
+	feed := out.String()
+	for _, bad := range []string{"late partial", "a late committed line"} {
+		if strings.Contains(feed, bad) {
+			t.Errorf("text from a muted side must be dropped (%q):\n%q", bad, feed)
+		}
+	}
+	for _, want := range []string{"others the other side still counts", "me     back after the unmute"} {
+		if !strings.Contains(feed, want) {
+			t.Errorf("feed missing %q:\n%q", want, feed)
+		}
+	}
+	for _, want := range []string{"🔇 me muted at 00:00:00", "🔊 me unmuted at 00:00:00"} {
+		if !strings.Contains(feed, want) {
+			t.Errorf("feed missing %q:\n%q", want, feed)
+		}
+	}
+	muted := feed[strings.Index(feed, "🔇 me muted"):]
+	if end := strings.Index(muted, "🔊"); end > 0 {
+		muted = muted[:end]
+	}
+	if strings.Contains(muted, "half a sentence") {
+		t.Errorf("a muted side's words in progress must not stay on the status line:\n%q", muted)
+	}
+}
+
+// Without mute keys (not a terminal, or not Linux), the status line keeps its usual hint.
+func TestRunStatusWithoutMuteKeys(t *testing.T) {
+	fastTimers(t)
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: (&fakeThink{}).think, Out: out, Interactive: true}, events)
+	}()
+	waitUntil(t, "status line", func() bool { return strings.Contains(out.String(), "(Ctrl+C to stop)") })
+	close(events)
+	<-done
+	if strings.Contains(out.String(), "mute") {
+		t.Errorf("no mute hint without keys:\n%q", out.String())
+	}
+}
