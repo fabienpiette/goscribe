@@ -225,7 +225,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	// Names from the context ("keyterms:" lines) help live speech-to-text
 	// spell what the model will look up in the context.
-	fromContext := assistant.Keyterms(background)
+	rawContext := assistant.ParseKeyterms(background)
+	fromContext := assistant.MergeKeyterms(nil, rawContext)
+	tooLong := assistant.LongKeyterms(append(append([]string{}, opts.Keyterms...), rawContext...))
 	opts.Keyterms = assistant.MergeKeyterms(assistant.MergeKeyterms(nil, opts.Keyterms), fromContext)
 
 	sides := assistSides(inputs)
@@ -262,6 +264,10 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 			header, notes, muteHint, recapHint, assistant.WindowLabel(recapWindow))
 	} else {
 		fmt.Fprintf(stdout, "Assist %s → %s (Ctrl+C to stop)\n", header, notes)
+	}
+	if len(tooLong) > 0 {
+		fmt.Fprintf(stdout, "⚠ %d keyterm(s) over %d characters left out (live speech-to-text refuses them): %s\n",
+			len(tooLong), assistant.MaxKeytermLen, strings.Join(tooLong, ", "))
 	}
 	if len(background) > assistant.WarnContextBytes {
 		fmt.Fprintf(stdout, "⚠ the context is %d KB: every update resends it, which is slower and costlier\n", len(background)>>10)

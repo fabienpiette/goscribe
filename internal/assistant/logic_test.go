@@ -171,9 +171,10 @@ func TestSources(t *testing.T) {
 func TestKeyterms(t *testing.T) {
 	context := "### file: brief.md\n\n---\nkeyterms: [Acme, \"Globex\", design tokens]\n---\n" +
 		"Some text: keyterms here are not a list\n" +
-		"**Keyterms:** Sam, acme, Marie Curie,, " + strings.Repeat("x", 51) + "\n"
+		"**Keyterms:** Sam, acme, Marie Curie,, Globex security-audit skill, " + strings.Repeat("x", 20) + "\n"
 	got := Keyterms(context)
-	if strings.Join(got, "|") != "Acme|Globex|design tokens|Sam|Marie Curie" {
+	// Live speech-to-text refuses keyterms over 20 characters: they are left out.
+	if strings.Join(got, "|") != "Acme|Globex|design tokens|Sam|Marie Curie|"+strings.Repeat("x", 20) {
 		t.Errorf("Keyterms = %v", got)
 	}
 	if Keyterms("no list here") != nil {
@@ -181,7 +182,7 @@ func TestKeyterms(t *testing.T) {
 	}
 	var many []string
 	for i := 0; i < MaxKeyterms+10; i++ {
-		many = append(many, strings.Repeat("k", i%40+1)+string(rune('a'+i%26))+strings.Repeat("z", i/26))
+		many = append(many, strings.Repeat("k", i%10+1)+string(rune('a'+i%26))+strings.Repeat("z", i/26))
 	}
 	if n := len(MergeKeyterms([]string{"Acme"}, many)); n != MaxKeyterms {
 		t.Errorf("merged keyterms = %d, want the ElevenLabs limit %d", n, MaxKeyterms)
@@ -380,5 +381,12 @@ func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLongKeyterms(t *testing.T) {
+	got := LongKeyterms([]string{"Acme", "Globex security-audit skill", " " + strings.Repeat("y", 21) + " ", strings.Repeat("z", 20)})
+	if strings.Join(got, "|") != "Globex security-audit skill|"+strings.Repeat("y", 21) {
+		t.Errorf("LongKeyterms = %q", got)
 	}
 }

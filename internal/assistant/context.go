@@ -86,8 +86,10 @@ func Sources(context string) []string {
 
 // Keyterm limits of ElevenLabs speech-to-text.
 const (
-	MaxKeyterms   = 100
-	maxKeytermLen = 50
+	MaxKeyterms = 100
+	// MaxKeytermLen is the realtime API's limit; longer keyterms make it
+	// refuse the whole session.
+	MaxKeytermLen = 20
 )
 
 // Keyterms collects the names and jargon listed on "keyterms:" lines of the
@@ -95,6 +97,12 @@ const (
 // speech-to-text spells them as the context does. Brackets and quotes of a
 // YAML list are accepted.
 func Keyterms(context string) []string {
+	return MergeKeyterms(nil, ParseKeyterms(context))
+}
+
+// ParseKeyterms returns every term on the "keyterms:" lines, before
+// MergeKeyterms trims, dedups and drops the ones the API refuses.
+func ParseKeyterms(context string) []string {
 	var terms []string
 	for _, l := range strings.Split(context, "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(l), ":")
@@ -102,7 +110,7 @@ func Keyterms(context string) []string {
 			continue
 		}
 		value = strings.Trim(strings.TrimSpace(strings.TrimLeft(value, "*_")), "[]")
-		terms = MergeKeyterms(terms, strings.Split(value, ","))
+		terms = append(terms, strings.Split(value, ",")...)
 	}
 	return terms
 }
@@ -113,10 +121,23 @@ func Keyterms(context string) []string {
 func MergeKeyterms(terms []string, extra []string) []string {
 	for _, t := range extra {
 		t = strings.Trim(strings.TrimSpace(t), `"'`)
-		if t == "" || len([]rune(t)) > maxKeytermLen || len(terms) == MaxKeyterms || containsExact(terms, t) {
+		if t == "" || len([]rune(t)) > MaxKeytermLen || len(terms) == MaxKeyterms || containsExact(terms, t) {
 			continue
 		}
 		terms = append(terms, t)
 	}
 	return terms
+}
+
+// LongKeyterms lists the terms that MergeKeyterms leaves out for being longer
+// than MaxKeytermLen, so the user can be told.
+func LongKeyterms(terms []string) []string {
+	var long []string
+	for _, t := range terms {
+		t = strings.Trim(strings.TrimSpace(t), `"'`)
+		if len([]rune(t)) > MaxKeytermLen {
+			long = append(long, t)
+		}
+	}
+	return long
 }
