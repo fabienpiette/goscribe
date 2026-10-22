@@ -1,7 +1,10 @@
 package provider
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
 
 	"goscribe/internal/elevenlabs"
 	"goscribe/internal/gemini"
@@ -27,6 +30,9 @@ type TranscribeOptions struct {
 
 // Transcribe dispatches to the selected engine. local and elevenlabs never fall
 // back to a cloud LLM provider: an explicit engine choice should fail loudly.
+// Notices receives warnings about engine changes, such as a fallback.
+var Notices io.Writer = os.Stderr
+
 func Transcribe(audioPath string, o TranscribeOptions) (string, error) {
 	switch o.Transcriber {
 	case "local":
@@ -34,7 +40,18 @@ func Transcribe(audioPath string, o TranscribeOptions) (string, error) {
 	case "elevenlabs":
 		el := o.ElevenLabs
 		el.Language = o.Language
-		return elevenlabs.Transcribe(audioPath, el)
+		text, err := elevenlabs.Transcribe(audioPath, el)
+		if !errors.Is(err, elevenlabs.ErrQuota) {
+			return text, err
+		}
+		// Out of quota: the local engine still gives a transcript, without
+		// speaker names; retranscribe later for ElevenLabs' quality.
+		fmt.Fprintln(Notices, "⚠ ElevenLabs quota exceeded: transcribing locally (faster-whisper) instead")
+		text, localErr := whisperlocal.Transcribe(audioPath, o.WhisperModel, o.Language)
+		if localErr != nil {
+			return "", fmt.Errorf("%w; local fallback failed: %v", err, localErr)
+		}
+		return text, nil
 	case "", "openai", "gemini":
 		prov := o.Transcriber
 		if prov == "" {
