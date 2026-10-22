@@ -154,7 +154,7 @@ func TestAssistEndToEnd(t *testing.T) {
 
 	notes := filepath.Join(t.TempDir(), "standup.md")
 	ctxFile := filepath.Join(t.TempDir(), "agenda.md")
-	mustWrite(t, ctxFile, []byte("# Agenda\nMigration go/no-go.\nkeyterms: Acme, Globex"), 0644)
+	mustWrite(t, ctxFile, []byte("# Agenda\nMigration go/no-go.\nkeyterms: Acme, Globex, Acme rollback runbook review"), 0644)
 
 	out := &syncBuf{}
 	done := make(chan int, 1)
@@ -208,6 +208,9 @@ func TestAssistEndToEnd(t *testing.T) {
 	defer mu.Unlock()
 	if len(keys) != 2 || keys[0] != "el-key" {
 		t.Errorf("one realtime session per side with the key; got %q", keys)
+	}
+	if !strings.Contains(feed, "⚠ 1 keyterm(s) over 20 characters left out (live speech-to-text refuses them): Acme rollback runbook review") {
+		t.Errorf("feed must warn about the long keyterm:\n%s", feed)
 	}
 	if strings.Join(terms, ",") != "Acme,Globex" {
 		t.Errorf("keyterms from the context = %q", terms)
