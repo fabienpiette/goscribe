@@ -589,7 +589,7 @@ func TestStreamSidesMute(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	toggle := make(chan string)
-	events := streamSides(ctx, make(chan struct{}), []assistSide{{"me", "mic0"}}, realtime.Options{APIKey: "k"}, toggle)
+	events := streamSides(ctx, make(chan struct{}), []assistSide{{"me", "mic0"}}, realtime.Options{APIKey: "k"}, realtime.LocalOptions{}, toggle)
 	var got []assistant.Event
 	collected := make(chan struct{})
 	go func() {
@@ -652,5 +652,85 @@ func TestAssistHermesNeedsCLI(t *testing.T) {
 	stderr := &syncBuf{}
 	if code := runAssist([]string{"-provider", "hermes", "-elevenlabs-key", "k"}, &syncBuf{}, stderr); code != 2 || !strings.Contains(stderr.String(), "-provider hermes needs the goscribe-no-such-hermes CLI on PATH") {
 		t.Errorf("exit = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+// When ElevenLabs is out of quota, a side switches to local transcription.
+func TestStreamSidesQuotaFallsBackToLocal(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	mustWrite(t, ffmpeg, []byte("#!/bin/sh\nwhile :; do yes | head -c 6400; sleep 0.05; done\n"), 0755)
+	origBin := recorder.Binary
+	recorder.Binary = ffmpeg
+	defer func() { recorder.Binary = origBin }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.CloseNow() }()
+		var msg map[string]any
+		if wsjson.Read(r.Context(), c, &msg) != nil {
+			return
+		}
+		_ = wsjson.Write(r.Context(), c, map[string]any{"message_type": "quota_exceeded", "error": "You have exceeded your quota."})
+		for wsjson.Read(r.Context(), c, &msg) == nil {
+		}
+	}))
+	defer srv.Close()
+	origURL := realtime.BaseURL
+	realtime.BaseURL = "ws" + strings.TrimPrefix(srv.URL, "http")
+	origMin, origMax := realtime.MinLocalSegment, realtime.MaxLocalSegment
+	realtime.MinLocalSegment, realtime.MaxLocalSegment = 200*time.Millisecond, 400*time.Millisecond
+	defer func() {
+		realtime.BaseURL = origURL
+		realtime.MinLocalSegment, realtime.MaxLocalSegment = origMin, origMax
+	}()
+
+	local := realtime.LocalOptions{Transcribe: func(string) (string, error) { return "local words", nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	events := streamSides(ctx, make(chan struct{}), []assistSide{{"me", "mic0"}}, realtime.Options{APIKey: "k"}, local, nil)
+	var mu sync.Mutex
+	var got []assistant.Event
+	collected := make(chan struct{})
+	go func() {
+		for e := range events {
+			mu.Lock()
+			got = append(got, e)
+			mu.Unlock()
+		}
+		close(collected)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		lines := 0
+		for _, e := range got {
+			if e.Kind == assistant.LineEvent && e.Text == "local words" {
+				lines++
+			}
+		}
+		mu.Unlock()
+		if lines > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no local line; events: %+v", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-collected
+	notice := false
+	for _, e := range got {
+		if e.Kind == assistant.NoticeEvent && strings.Contains(e.Text, "me: ElevenLabs is out of quota: switching to local transcription") {
+			notice = true
+		}
+		if e.Kind == assistant.NoticeEvent && strings.Contains(e.Text, "live transcription stopped") {
+			t.Errorf("the quota error must not stop the side: %q", e.Text)
+		}
+	}
+	if !notice {
+		t.Errorf("no switch notice; events: %+v", got)
 	}
 }

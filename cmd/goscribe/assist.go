@@ -20,6 +20,7 @@ import (
 	"goscribe/internal/provider"
 	"goscribe/internal/realtime"
 	"goscribe/internal/recorder"
+	"goscribe/internal/whisperlocal"
 	"goscribe/pkg/config"
 )
 
@@ -56,6 +57,8 @@ Good to know:
     the meeting wraps up. A "keyterms: Name, Term" line adds names and jargon to
     the live speech-to-text, like -keyterms.
   - Needs an ElevenLabs API key (config elevenlabs_api_key or $ELEVENLABS_API_KEY).
+    Out of quota, it switches to local transcription (faster-whisper, slower
+    and less accurate) when that is installed.
     Live transcription is billed per stream: two with -source both.
   - -librarian lets the model look things up in your own sources (past
     decisions, tickets, documents) through a read-only Claude Code session.
@@ -273,7 +276,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "⚠ the context is %d KB: every update resends it, which is slower and costlier\n", len(background)>>10)
 	}
 
-	events := streamSides(ctx, force, sides, opts, toggle)
+	events := streamSides(ctx, force, sides, opts, localFallback(cfg, opts.Language), toggle)
 	acfg := assistant.Config{
 		Context:     background,
 		Notes:       notes,
@@ -447,6 +450,18 @@ func assistSides(in recorder.Inputs) []assistSide {
 	return sides
 }
 
+// localFallback transcribes with faster-whisper when ElevenLabs is out of
+// quota; no fallback when it isn't installed.
+func localFallback(cfg *config.Config, language string) realtime.LocalOptions {
+	if _, err := exec.LookPath(whisperlocal.Binary); err != nil {
+		return realtime.LocalOptions{}
+	}
+	model := pick(cfg.AssistLocalModel, "", "base")
+	return realtime.LocalOptions{Transcribe: func(wav string) (string, error) {
+		return whisperlocal.Transcribe(wav, model, language)
+	}}
+}
+
 // sideForKey maps a mute key's label (recorder.MuteKeys) to the assist speaker.
 func sideForKey(label string) string {
 	switch label {
@@ -501,7 +516,9 @@ func muteGate(in <-chan []byte, out chan []byte, muted *atomic.Bool) {
 // flushes its last words; the returned channel closes once every side is
 // done. force (second Ctrl+C) cuts the sessions without waiting.
 // Each label received on toggle mutes or unmutes that side; nil means no mute keys.
-func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide, opts realtime.Options, toggle <-chan string) <-chan assistant.Event {
+// When ElevenLabs is out of quota, a side switches to local transcription
+// (local.Transcribe nil: no fallback).
+func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide, opts realtime.Options, local realtime.LocalOptions, toggle <-chan string) <-chan assistant.Event {
 	events := make(chan assistant.Event, 256)
 	rtCtx, cancelRT := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -524,9 +541,14 @@ func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide,
 		}()
 		go func() {
 			defer wg.Done()
-			err := realtime.Stream(rtCtx, opts, audio, func(e realtime.Event) {
-				events <- assistantEvent(side.speaker, e)
-			})
+			emit := func(e realtime.Event) { events <- assistantEvent(side.speaker, e) }
+			err := realtime.Stream(rtCtx, opts, audio, emit)
+			var fatal *realtime.FatalError
+			if errors.As(err, &fatal) && fatal.Type == "quota_exceeded" && local.Transcribe != nil {
+				events <- assistant.Event{Kind: assistant.NoticeEvent, Text: fmt.Sprintf(
+					"⚠ %s: ElevenLabs is out of quota: switching to local transcription (faster-whisper, about 10–30 s behind and less accurate)", side.speaker)}
+				err = realtime.StreamLocal(rtCtx, local, audio, emit)
+			}
 			if err != nil && !errors.Is(err, context.Canceled) {
 				events <- assistant.Event{Kind: assistant.NoticeEvent, Text: fmt.Sprintf("✖ %s: live transcription stopped: %v", side.speaker, err)}
 			}
