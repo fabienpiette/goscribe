@@ -4,7 +4,9 @@
 package elevenlabs
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -80,6 +82,10 @@ func formFields(o Options) [][2]string {
 	return fields
 }
 
+// ErrQuota marks an exhausted ElevenLabs quota: callers can fall back to
+// another engine.
+var ErrQuota = errors.New("ElevenLabs quota exceeded")
+
 func Transcribe(audioPath string, o Options) (string, error) {
 	if o.APIKey == "" {
 		return "", fmt.Errorf("ElevenLabs API key required. Use -elevenlabs-key, elevenlabs_api_key in config, or ELEVENLABS_API_KEY")
@@ -131,6 +137,9 @@ func Transcribe(audioPath string, o Options) (string, error) {
 		return "", fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if bytes.Contains(body, []byte("quota_exceeded")) {
+			return "", fmt.Errorf("%w (status %d): %s", ErrQuota, resp.StatusCode, util.TruncateString(string(body), 300))
+		}
 		return "", fmt.Errorf("ElevenLabs API error (status %d): %s", resp.StatusCode, util.TruncateString(string(body), 300))
 	}
 

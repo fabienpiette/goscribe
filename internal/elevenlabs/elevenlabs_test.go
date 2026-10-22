@@ -2,6 +2,7 @@ package elevenlabs
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -189,5 +190,24 @@ func TestFormatTranscript(t *testing.T) {
 				t.Errorf("formatTranscript() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// An exhausted quota is recognizable, so callers can fall back.
+func TestTranscribeQuotaExceeded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"detail":{"status":"quota_exceeded","message":"You have exceeded your quota."}}`))
+	}))
+	defer server.Close()
+	overrideBaseURL(t, server.URL)
+
+	_, err := Transcribe(writeAudio(t), Options{APIKey: "k"})
+	if !errors.Is(err, ErrQuota) || !strings.Contains(err.Error(), "exceeded your quota") {
+		t.Errorf("err = %v, want ErrQuota with the API message", err)
+	}
+	// Other errors are not quota errors.
+	if errors.Is(errors.New("ElevenLabs API error (status 401): invalid api key"), ErrQuota) {
+		t.Error("only quota errors match ErrQuota")
 	}
 }

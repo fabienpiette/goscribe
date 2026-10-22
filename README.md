@@ -268,7 +268,7 @@ Hermes runs with `--safe-mode`, which drops its user config, plugins, MCP server
 
 **local** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) via the `whisper-ctranslate2` CLI, fully offline. Install with `uv tool install whisper-ctranslate2` (or `pipx`). The model is downloaded on first use; uses the GPU when available, otherwise the CPU.
 
-**elevenlabs** — [ElevenLabs Scribe](https://elevenlabs.io/docs/capabilities/speech-to-text), tuned for meetings: speaker diarization, filler words and false starts removed (`no_verbatim`), no audio-event tags, and one paragraph per speaker turn with its start time, e.g. `[00:12:34] speaker_1: …`. Optional: `-keyterms` / `elevenlabs_keyterms` to favor names and jargon (ElevenLabs adds a 20% surcharge), `-num-speakers` / `elevenlabs_num_speakers` to cap the speaker count, `elevenlabs_verbatim: true` to keep fillers. Needs an ElevenLabs API key.
+**elevenlabs** — [ElevenLabs Scribe](https://elevenlabs.io/docs/capabilities/speech-to-text), tuned for meetings: speaker diarization, filler words and false starts removed (`no_verbatim`), no audio-event tags, and one paragraph per speaker turn with its start time, e.g. `[00:12:34] speaker_1: …`. Optional: `-keyterms` / `elevenlabs_keyterms` to favor names and jargon (ElevenLabs adds a 20% surcharge), `-num-speakers` / `elevenlabs_num_speakers` to cap the speaker count, `elevenlabs_verbatim: true` to keep fillers. Needs an ElevenLabs API key. When the ElevenLabs quota is exhausted, goscribe says so and transcribes with `local` instead (no speaker labels), when faster-whisper is installed; re-run with `elevenlabs` once the quota is back for the better transcript.
 
 ## Tags
 
