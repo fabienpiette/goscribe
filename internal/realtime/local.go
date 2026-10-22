@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,12 @@ var (
 	MinLocalSegment = 5 * time.Second
 	MaxLocalSegment = 20 * time.Second
 	LocalPause      = 800 * time.Millisecond
+	// A 200 ms chunk is speech when its RMS level reaches VoicedRMS (about
+	// -40 dBFS): a peak test would count clicks and keyboard taps. A segment
+	// with less than MinVoiced of speech is dropped, as each one costs a model
+	// load.
+	VoicedRMS = 300.0
+	MinVoiced = time.Second
 )
 
 // LocalOptions configures StreamLocal.
@@ -89,7 +96,13 @@ func StreamLocal(ctx context.Context, o LocalOptions, audio <-chan []byte, emit 
 	}
 
 	var segment []byte
-	var quiet time.Duration // quiet time at the end of the segment
+	var quiet, voiced time.Duration // quiet time at the end, speech time in all
+	cut := func() {
+		if voiced >= MinVoiced {
+			enqueue(segment)
+		}
+		segment, quiet, voiced = nil, 0, 0
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -100,8 +113,12 @@ func StreamLocal(ctx context.Context, o LocalOptions, audio <-chan []byte, emit 
 			return ctx.Err()
 		case b, ok := <-audio:
 			if !ok {
-				if len(segment) > 0 {
-					enqueue(segment)
+				// The last segment waits for room: nothing is dropped at the end.
+				if len(segment) > 0 && voiced >= MinVoiced {
+					select {
+					case queue <- segment:
+					case <-ctx.Done():
+					}
 				}
 				close(queue)
 				select {
@@ -116,20 +133,20 @@ func StreamLocal(ctx context.Context, o LocalOptions, audio <-chan []byte, emit 
 				}
 				return nil
 			}
-			loud := isLoud(b)
-			if len(segment) == 0 && !loud {
+			speech := rms(b) >= VoicedRMS
+			if len(segment) == 0 && !speech {
 				continue // silence between segments is not transcribed
 			}
 			segment = append(segment, b...)
-			if loud {
+			if speech {
 				quiet = 0
+				voiced += pcmDuration(b)
 			} else {
 				quiet += pcmDuration(b)
 			}
 			length := pcmDuration(segment)
 			if (length >= MinLocalSegment && quiet >= LocalPause) || length >= MaxLocalSegment {
-				enqueue(segment)
-				segment, quiet = nil, 0
+				cut()
 			}
 		}
 	}
@@ -144,6 +161,20 @@ func transcribeSegment(dir string, n int, pcm []byte, transcribe func(string) (s
 	defer os.Remove(path)
 	text, err := transcribe(path)
 	return strings.Join(strings.Fields(text), " "), err
+}
+
+// rms is the root mean square level of 16-bit little-endian samples.
+func rms(pcm []byte) float64 {
+	n := len(pcm) / 2
+	if n == 0 {
+		return 0
+	}
+	var sum float64
+	for i := 0; i+1 < len(pcm); i += 2 {
+		s := float64(int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8))
+		sum += s * s
+	}
+	return math.Sqrt(sum / float64(n))
 }
 
 // pcmDuration is the length of 16 kHz mono s16le audio.
