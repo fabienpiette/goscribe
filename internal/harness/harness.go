@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -35,6 +36,11 @@ var codexDisabledFeatures = []string{
 	"shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external",
 	"computer_use", "in_app_browser", "plugins", "remote_plugin", "hooks", "tool_suggest",
 }
+
+// OwnProcessGroup starts the CLIs in a process group of their own, so a
+// terminal Ctrl+C reaches goscribe only. goscribe assist sets it: a Ctrl+C
+// there ends the meeting, and must not kill an update or a lookup in flight.
+var OwnProcessGroup bool
 
 // Timeout bounds a single harness call.
 var Timeout = 20 * time.Minute
@@ -229,6 +235,11 @@ func runCLI(label, bin, prompt string, timeout time.Duration, outName string, ar
 	cmd.Dir = workDir
 	cmd.WaitDelay = time.Second // do not wait on grandchildren holding the pipes
 	cmd.Stdin = strings.NewReader(prompt)
+	if OwnProcessGroup {
+		util.OwnProcessGroup(cmd)
+		runtime.LockOSThread() // see util.OwnProcessGroup
+		defer runtime.UnlockOSThread()
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -137,6 +137,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	harness.Models = cfg.HarnessModels()
 	harness.HermesProvider = cfg.HermesProvider
+	harness.OwnProcessGroup = true // Ctrl+C ends the meeting, not the call in flight
 	if *modelFlag != "" && harness.IsHarness(prov) {
 		harness.Models[prov] = *modelFlag
 	}
@@ -458,7 +459,7 @@ func localFallback(cfg *config.Config, language string) realtime.LocalOptions {
 	}
 	model := pick(cfg.AssistLocalModel, "", "base")
 	return realtime.LocalOptions{Transcribe: func(wav string) (string, error) {
-		return whisperlocal.Transcribe(wav, model, language)
+		return whisperlocal.TranscribeLive(wav, model, language)
 	}}
 }
 

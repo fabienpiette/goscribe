@@ -680,11 +680,11 @@ func TestStreamSidesQuotaFallsBackToLocal(t *testing.T) {
 	defer srv.Close()
 	origURL := realtime.BaseURL
 	realtime.BaseURL = "ws" + strings.TrimPrefix(srv.URL, "http")
-	origMin, origMax := realtime.MinLocalSegment, realtime.MaxLocalSegment
-	realtime.MinLocalSegment, realtime.MaxLocalSegment = 200*time.Millisecond, 400*time.Millisecond
+	origMin, origMax, origVoiced := realtime.MinLocalSegment, realtime.MaxLocalSegment, realtime.MinVoiced
+	realtime.MinLocalSegment, realtime.MaxLocalSegment, realtime.MinVoiced = 200*time.Millisecond, 400*time.Millisecond, 100*time.Millisecond
 	defer func() {
 		realtime.BaseURL = origURL
-		realtime.MinLocalSegment, realtime.MaxLocalSegment = origMin, origMax
+		realtime.MinLocalSegment, realtime.MaxLocalSegment, realtime.MinVoiced = origMin, origMax, origVoiced
 	}()
 
 	local := realtime.LocalOptions{Transcribe: func(string) (string, error) { return "local words", nil }}

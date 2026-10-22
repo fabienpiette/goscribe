@@ -164,3 +164,65 @@ func TestStreamLocalCancel(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
+
+// noiseChunk is 200 ms of background noise with a few loud clicks: its peak
+// is high, its level (RMS) low.
+func noiseChunk() []byte {
+	b := make([]byte, SampleRate*2/5)
+	for i := 0; i+1 < len(b); i += 2 {
+		v := int16(40)
+		if i%1600 == 0 {
+			v = 3000 // a click
+		}
+		b[i], b[i+1] = byte(v), byte(uint16(v)>>8)
+	}
+	return b
+}
+
+// Noise with clicks, or a short sound, is not worth a transcription.
+func TestStreamLocalSkipsNoise(t *testing.T) {
+	f := &fakeLocal{}
+	emit, _ := collect()
+	audio := make(chan []byte, 1000)
+	for i := 0; i < 50; i++ { // 10 s of clicks and hum
+		audio <- noiseChunk()
+	}
+	feed(audio, 0.6, true) // a short "hm"
+	feed(audio, 2, false)
+	close(audio)
+	if err := StreamLocal(context.Background(), LocalOptions{Transcribe: f.transcribe}, audio, emit); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.lengths()); n != 0 {
+		t.Errorf("transcribed %d segment(s) of noise, want none", n)
+	}
+}
+
+// When the audio ends, the last segment waits for room: nothing is dropped
+// at the end, as transcription can catch up then.
+func TestStreamLocalEndDropsNothing(t *testing.T) {
+	f := &fakeLocal{block: make(chan struct{})}
+	emit, events := collect()
+	audio := make(chan []byte, 1000)
+	feed(audio, 6, true) // segment 1: stuck in transcription
+	feed(audio, 1, false)
+	feed(audio, 6, true) // segment 2: waiting
+	feed(audio, 1, false)
+	feed(audio, 3, true) // last words, cut when the audio ends
+	close(audio)
+	done := make(chan error, 1)
+	go func() { done <- StreamLocal(context.Background(), LocalOptions{Transcribe: f.transcribe}, audio, emit) }()
+	time.Sleep(50 * time.Millisecond)
+	close(f.block)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.lengths()); n != 3 {
+		t.Errorf("transcribed %d segments, want all 3", n)
+	}
+	for _, e := range events() {
+		if e.Kind == Warning {
+			t.Errorf("unexpected warning at the end: %q", e.Text)
+		}
+	}
+}
