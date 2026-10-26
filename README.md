@@ -181,10 +181,16 @@ instance and uploads volume.
 Config lives at `~/.goscribe/config.yml`. Add custom actions:
 
 ```yaml
-provider: "openai"
+provider: "openai"              # openai, gemini, claude, codex or hermes
 openai_api_key: ""
 gemini_api_key: ""
 gemini_model: "gemini-2.0-flash"
+
+# Optional models for the local agent CLIs (empty: the CLI's default)
+claude_model: ""
+codex_model: ""
+hermes_model: ""                # empty: the model section of your Hermes config
+hermes_provider: ""
 
 # Optional transcription engine settings
 transcriber: "local"            # local, elevenlabs, openai or gemini
@@ -202,6 +208,10 @@ record_source: "both"           # mic, system or both
 record_mic: ""                  # device name from `goscribe record -list-sources`
 record_system: ""               # computer sound monitor; empty = default output
 record_quality: "voice"         # voice or music
+
+# Optional assist settings (and a librarian: block, see "Live assistant")
+assist_recap: 5m                # how far back the w recap goes
+assist_local_model: "base"      # faster-whisper model when ElevenLabs is out of quota
 
 post_actions:
   - id: "custom-summary"
