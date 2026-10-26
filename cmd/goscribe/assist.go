@@ -277,7 +277,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "⚠ the context is %d KB: every update resends it, which is slower and costlier\n", len(background)>>10)
 	}
 
-	events := streamSides(ctx, force, sides, opts, localFallback(cfg, opts.Language), toggle)
+	local, closeLocal := localFallback(cfg, opts.Language)
+	defer closeLocal()
+	events := streamSides(ctx, force, sides, opts, local, toggle)
 	acfg := assistant.Config{
 		Context:     background,
 		Notes:       notes,
@@ -452,15 +454,21 @@ func assistSides(in recorder.Inputs) []assistSide {
 }
 
 // localFallback transcribes with faster-whisper when ElevenLabs is out of
-// quota; no fallback when it isn't installed.
-func localFallback(cfg *config.Config, language string) realtime.LocalOptions {
+// quota: through one model server shared by both sides (the model loads once,
+// on the first segment), else one whisper-ctranslate2 run per segment. No
+// fallback when faster-whisper isn't installed. close stops the server.
+func localFallback(cfg *config.Config, language string) (local realtime.LocalOptions, close func()) {
 	if _, err := exec.LookPath(whisperlocal.Binary); err != nil {
-		return realtime.LocalOptions{}
+		return realtime.LocalOptions{}, func() {}
 	}
 	model := pick(cfg.AssistLocalModel, "", "base")
+	if whisperlocal.ServerAvailable() {
+		server := whisperlocal.NewServer(model, language)
+		return realtime.LocalOptions{Transcribe: server.Transcribe, Warm: server.Warm}, server.Close
+	}
 	return realtime.LocalOptions{Transcribe: func(wav string) (string, error) {
 		return whisperlocal.TranscribeLive(wav, model, language)
-	}}
+	}}, func() {}
 }
 
 // sideForKey maps a mute key's label (recorder.MuteKeys) to the assist speaker.
@@ -547,7 +555,7 @@ func streamSides(ctx context.Context, force <-chan struct{}, sides []assistSide,
 			var fatal *realtime.FatalError
 			if errors.As(err, &fatal) && fatal.Type == "quota_exceeded" && local.Transcribe != nil {
 				events <- assistant.Event{Kind: assistant.NoticeEvent, Text: fmt.Sprintf(
-					"⚠ %s: ElevenLabs is out of quota: switching to local transcription (faster-whisper, about 10–30 s behind and less accurate)", side.speaker)}
+					"⚠ %s: ElevenLabs is out of quota: switching to local transcription (faster-whisper: a few seconds behind, less accurate, no partial words)", side.speaker)}
 				err = realtime.StreamLocal(rtCtx, local, audio, emit)
 			}
 			if err != nil && !errors.Is(err, context.Canceled) {

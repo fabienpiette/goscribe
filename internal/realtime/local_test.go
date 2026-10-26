@@ -226,3 +226,24 @@ func TestStreamLocalEndDropsNothing(t *testing.T) {
 		}
 	}
 }
+
+// Warm runs as soon as the local transcription starts, before any segment.
+func TestStreamLocalWarms(t *testing.T) {
+	warmed := make(chan struct{})
+	f := &fakeLocal{}
+	emit, _ := collect()
+	audio := make(chan []byte)
+	done := make(chan error, 1)
+	go func() {
+		done <- StreamLocal(context.Background(), LocalOptions{Transcribe: f.transcribe, Warm: func() { close(warmed) }}, audio, emit)
+	}()
+	select {
+	case <-warmed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Warm not called before any audio")
+	}
+	close(audio)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
