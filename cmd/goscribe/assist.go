@@ -55,7 +55,7 @@ Good to know:
   - The -context files (.md) are sent to the -provider model with every update.
     Put the agenda or goals in them: points still not covered are raised when
     the meeting wraps up. A "keyterms: Name, Term" line adds names and jargon to
-    the live speech-to-text, like -keyterms.
+    the live speech-to-text, like -keyterms (at most 20 characters each).
   - Needs an ElevenLabs API key (config elevenlabs_api_key or $ELEVENLABS_API_KEY).
     Out of quota, it switches to local transcription (faster-whisper, slower
     and less accurate) when that is installed.
