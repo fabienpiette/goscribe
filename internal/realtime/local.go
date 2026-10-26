@@ -33,6 +33,9 @@ type LocalOptions struct {
 	// Transcribe turns one WAV file (16 kHz mono s16le) into text, e.g. with
 	// faster-whisper.
 	Transcribe func(wavPath string) (string, error)
+	// Warm, when set, runs in the background as soon as StreamLocal starts,
+	// e.g. to load the model before the first segment is cut.
+	Warm func()
 }
 
 // StreamLocal is the offline stand-in for Stream: it cuts the audio into
@@ -57,6 +60,10 @@ func StreamLocal(ctx context.Context, o LocalOptions, audio <-chan []byte, emit 
 		if !stopped {
 			emit(e)
 		}
+	}
+
+	if o.Warm != nil {
+		go o.Warm()
 	}
 
 	queue := make(chan []byte, 1)

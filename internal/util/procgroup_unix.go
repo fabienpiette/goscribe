@@ -15,3 +15,11 @@ func OwnProcessGroup(cmd *exec.Cmd) {
 	}
 	cmd.SysProcAttr.Setpgid = true
 }
+
+// KillProcessGroup kills cmd and everything it started (its process group,
+// see OwnProcessGroup).
+func KillProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
