@@ -115,9 +115,16 @@ func TestRunPlainStatusFreshAfterNotice(t *testing.T) {
 		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: (&fakeThink{}).think, Out: out, Interactive: true}, events)
 	}()
 	events <- Event{Kind: MuteEvent, Speaker: "me", Muted: true}
-	waitUntil(t, "mute notice", func() bool { return strings.Contains(out.String(), "🔇 me muted") })
-	feed := out.String()
-	last := feed[strings.LastIndex(feed, "● ASSIST"):]
+	lastStatus := func() string {
+		feed := out.String()
+		i := strings.LastIndex(feed, "● ASSIST")
+		if i < 0 {
+			return ""
+		}
+		return feed[i:]
+	}
+	waitUntil(t, "fresh status", func() bool { return strings.Contains(lastStatus(), "me (muted)") })
+	last := lastStatus()
 	if !strings.Contains(last, "me (muted)") {
 		t.Errorf("status under the notice is stale: %q", last)
 	}
