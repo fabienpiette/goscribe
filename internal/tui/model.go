@@ -188,6 +188,10 @@ func (m *model) submit() {
 		m.toggle(map[string]string{"me": "mic", "others": "system"}[cmd.Arg])
 	case cmd.Name == "recap":
 		m.opts.Send(assistant.Event{Kind: assistant.RecapEvent, Window: cmd.Window})
+	case cmd.Name == "fix":
+		m.opts.Send(assistant.Event{Kind: assistant.FixEvent, Fix: assistant.FixRequest{
+			Op: cmd.Op, Wrong: cmd.Wrong, Right: cmd.Right, N: cmd.N,
+		}})
 	case cmd.Name == "question":
 		m.opts.Send(assistant.Event{Kind: assistant.QuestionEvent, Text: cmd.Text})
 	}
@@ -368,6 +372,7 @@ func dashboard(b assistant.Board, width, height int) string {
 	add("DECISIONS", bullets(b.Decisions)...)
 	add("OPEN QUESTIONS", bullets(b.OpenQuestions)...)
 	add("SOURCES", bullets(b.Sources)...)
+	add("FIXES", bullets(b.Fixes)...)
 
 	total := func() int {
 		n := max(len(sections)-1, 0) // blank lines between sections

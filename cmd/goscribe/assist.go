@@ -42,7 +42,7 @@ It captures the audio on its own: run it in a second terminal next to
 In a terminal it takes the full screen: the live feed, a dashboard of the
 meeting (summary, decisions, open questions) and a chat input. Type a question
 about the meeting and press Enter, or a command: /help, /mute me|others,
-/recap [duration]. Alt+m mutes or unmutes your mic, Alt+s the computer sound,
+/recap [duration], /fix <wrong> <right>. Alt+m mutes or unmutes your mic, Alt+s the computer sound,
 Alt+w asks for a recap of the last minutes (-recap, default 5m). Tab shows the
 dashboard on a narrow window; PgUp/PgDn or the mouse wheel scroll, End goes
 back to live; hold Shift and drag to select text to copy. At the end, the
@@ -50,6 +50,13 @@ final summary and the notes and transcript paths stay in the terminal.
 
 With -plain, or when the output is not a terminal, it prints the feed as
 lines instead; there, m and s mute and w asks for the recap.
+
+/fix corrects a misheard word: /fix cash cache replaces the whole word, in any
+case, in the lines to come and in what was already said, the summary and the
+lists, the transcript file and the notes (## Fixes). Quote phrases: /fix "dark
+mood" "dark mode". Suggested fixes show as FIX?; answer with /fix yes|no [n],
+nothing changes until you accept. /fix lists the fixes, /fix rm n stops one for
+new lines. Live speech-to-text keyterms are not updated mid-meeting.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute
