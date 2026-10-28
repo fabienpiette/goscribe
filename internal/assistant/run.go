@@ -568,7 +568,12 @@ func (s *state) writeNotes(final bool) error {
 // suggestionBadges are the feed badges of the suggestion types.
 var suggestionBadges = map[string]string{TypeQuestion: "ASK", TypeAnswer: "ANSWER", TypeMissed: "MISSED", TypeRisk: "RISK"}
 
-func (s *state) show(it Item) { s.c.View.Show(it) }
+// show adds an item, then refreshes the status: what a line changes (a side
+// muted, a partial replaced, a call over) must not linger under it.
+func (s *state) show(it Item) {
+	s.c.View.Show(it)
+	s.status(time.Now())
+}
 
 // notice shows text as is, info dimmed.
 func (s *state) notice(text string) { s.show(Item{Kind: ItemNotice, Text: text, Plain: text}) }

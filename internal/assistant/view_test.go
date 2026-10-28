@@ -102,3 +102,25 @@ func TestRunSendsStructuredItemsToView(t *testing.T) {
 		t.Errorf("Run must send a board and a status at start: %d, %d", len(v.boards), len(v.statuses))
 	}
 }
+
+// A line refreshes the status under it: after a mute notice, the plain view's
+// last status line shows the side muted, without waiting for a tick.
+func TestRunPlainStatusFreshAfterNotice(t *testing.T) {
+	fastTimers(t)
+	Tick = time.Hour
+	out := &syncBuffer{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: (&fakeThink{}).think, Out: out, Interactive: true}, events)
+	}()
+	events <- Event{Kind: MuteEvent, Speaker: "me", Muted: true}
+	waitUntil(t, "mute notice", func() bool { return strings.Contains(out.String(), "🔇 me muted") })
+	feed := out.String()
+	last := feed[strings.LastIndex(feed, "● ASSIST"):]
+	if !strings.Contains(last, "me (muted)") {
+		t.Errorf("status under the notice is stale: %q", last)
+	}
+	close(events)
+	<-done
+}
