@@ -1311,8 +1311,8 @@ func TestRunFixRewritesEverything(t *testing.T) {
 	}
 	close(events)
 	<-done
-	if b := v.Boards(); !slices.Equal(b[len(b)-1].Fixes, []string{"cash → cache"}) {
-		t.Errorf("last board fixes = %q", b[len(b)-1].Fixes)
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"cash → cache"}) || !strings.Contains(b.Summary, "cache pass") {
+		t.Errorf("last board = %+v", b)
 	}
 	tb, _ := os.ReadFile(transcript)
 	if strings.Contains(string(tb), "cash") || !strings.Contains(string(tb), "others: the cache work") || !strings.Contains(string(tb), "me: more cache") {
@@ -1324,23 +1324,49 @@ func TestRunFixRewritesEverything(t *testing.T) {
 	}
 }
 
-// An update in flight when the fix arrives was asked without it: its reply is
-// fixed too, so the memory does not go back to the misheard word.
+// An update in flight when a fix arrives was asked without it: its reply is
+// fixed before it is applied, so the memory does not go back to the misheard
+// word, the fields it leaves out are not fixed twice, and a decision it
+// repeats with the old word is not shown again.
 func TestRunFixDuringUpdate(t *testing.T) {
-	release := make(chan struct{})
-	f := &fakeThink{replies: []func() (string, error){func() (string, error) { <-release; return `{"summary":"cash pass"}`, nil }}}
+	rel1, rel2 := make(chan struct{}), make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"film plan","decisions":["ship the film"]}`),
+		func() (string, error) { <-rel1; return `{"summary":"film pass"}`, nil },
+		func() (string, error) {
+			<-rel2
+			return `{"summary":"short film done","decisions":["ship the short film"]}`, nil
+		},
+	}}
 	v := &recordingView{}
 	events, input, done, _, _ := startFixRun(t, f, v)
-	events <- line("others", "the cash work")
-	waitUntil(t, "update in flight", func() bool { return f.count() == 1 })
-	input <- fixEvent("add", "cash", "cache", 0)
-	close(release)
-	waitUntil(t, "update applied", func() bool {
-		b := v.Boards()
-		return b[len(b)-1].Summary != ""
-	})
-	if b := v.Boards(); b[len(b)-1].Summary != "cache pass" {
-		t.Errorf("summary = %q", b[len(b)-1].Summary)
+	lastBoard := func() Board { b := v.Boards(); return b[len(b)-1] }
+	events <- line("others", "first part")
+	waitUntil(t, "first update", func() bool { return lastBoard().Summary == "film plan" })
+	events <- line("others", "second part")
+	waitUntil(t, "second update in flight", func() bool { return f.count() == 2 })
+	input <- fixEvent("add", "film", "short film", 0)
+	close(rel1)
+	waitUntil(t, "second update", func() bool { return lastBoard().Summary == "short film pass" })
+	if d := lastBoard().Decisions; !slices.Equal(d, []string{"ship the short film"}) {
+		t.Errorf("decisions after a summary-only reply = %q", d)
+	}
+	events <- line("others", "third part")
+	waitUntil(t, "third update in flight", func() bool { return f.count() == 3 })
+	input <- fixEvent("add", "ship", "send", 0)
+	close(rel2)
+	waitUntil(t, "third update", func() bool { return lastBoard().Summary == "short film done" })
+	if d := lastBoard().Decisions; !slices.Equal(d, []string{"send the short film"}) {
+		t.Errorf("decisions after a reply with the old word = %q", d)
+	}
+	n := 0
+	for _, it := range v.Items() {
+		if it.Badge == "DECISION" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("DECISION items = %d, want 1:\n%+v", n, v.Items())
 	}
 	close(events)
 	<-done

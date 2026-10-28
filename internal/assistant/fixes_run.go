@@ -27,7 +27,7 @@ func (s *state) addFix(wrong, right string) {
 	at := s.elapsed(time.Now())
 	f := Fix{Wrong: wrong, Right: right, At: at}
 	s.mem.Fixes = append(s.mem.Fixes, f)
-	if s.thinking {
+	if s.thinking && !s.recapping { // a recap reply does not touch the memory
 		s.lateFixes = append(s.lateFixes, f)
 	}
 	changed := 0
@@ -94,5 +94,23 @@ func (s *state) answerGuess(op string, n int) {
 		s.info("no suggested fix to accept")
 	default:
 		s.info("no suggested fix to reject")
+	}
+}
+
+// fixReply applies fixes to a reply asked before they were made. Only the
+// reply is fixed: the memory already has them, and fixing it again would
+// double-apply a fix whose right side holds the wrong one.
+func fixReply(r *Reply, fixes []Fix) {
+	if len(fixes) == 0 {
+		return
+	}
+	r.Summary = ApplyFixes(r.Summary, fixes)
+	for _, list := range [][]string{r.Decisions, r.OpenQuestions, r.NotCovered} {
+		for i := range list {
+			list[i] = ApplyFixes(list[i], fixes)
+		}
+	}
+	for i := range r.Suggestions {
+		r.Suggestions[i].Text = ApplyFixes(r.Suggestions[i].Text, fixes)
 	}
 }

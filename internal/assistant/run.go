@@ -213,7 +213,8 @@ type state struct {
 	answers   chan qaResult
 
 	// lateFixes were made while the update in flight was asked: its reply
-	// does not know them, so they are applied to it.
+	// does not know them, so they are applied to it before the memory takes
+	// it. Reset when the next update starts.
 	lateFixes []Fix
 
 	finalWritten bool // the final notes were written
@@ -473,10 +474,8 @@ func (s *state) finish(r result) {
 	s.failures = 0
 	s.analysed = r.upto
 	at := s.elapsed(time.Now())
+	fixReply(&parsed, s.lateFixes)
 	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
-	for _, f := range s.lateFixes {
-		s.mem.ApplyFix(f)
-	}
 	s.board()
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
