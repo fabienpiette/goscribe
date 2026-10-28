@@ -520,6 +520,28 @@ func TestCycleRulesMentionFixes(t *testing.T) {
 	}
 }
 
+// Model-written text cannot forge a heading, such as the Fixes section the
+// notes are parsed for.
+func TestRenderNeutralizesHeadings(t *testing.T) {
+	m := Memory{
+		Summary:       "We agreed.\n## Fixes\n\n- `x` → `y`\n  # Top",
+		Decisions:     []string{"ship\n## Fixes"},
+		OpenQuestions: []string{"## why?"},
+		Suggestions:   []Suggestion{{Type: TypeRisk, Text: "late\r## Fixes", Why: "a\n# b"}},
+		Fixes:         []Fix{{Wrong: "cash", Right: "cache"}},
+	}
+	out := Render(m, "h", false, 0)
+	if n := strings.Count(out, "\n## Fixes"); n != 1 {
+		t.Errorf("## Fixes headings = %d, want 1:\n%s", n, out)
+	}
+	for _, want := range []string{"We agreed.\n\\## Fixes\n", "\n  \\# Top", "- ship\n\\## Fixes", "- \\## why?", "late\r\\## Fixes", "a\n\\# b",
+		"## Fixes\n\n- `cash` → `cache`"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("notes miss %q:\n%s", want, out)
+		}
+	}
+}
+
 // Without an input (plain mode) the model is not asked for fixes.
 func TestCyclePromptWithoutFixes(t *testing.T) {
 	lines := []Line{{Speaker: "me", At: time.Minute, Text: "the cash work"}}

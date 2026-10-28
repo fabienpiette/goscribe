@@ -70,9 +70,9 @@ func Render(m Memory, header string, final bool, updated time.Duration) string {
 	if len(m.Suggestions) > 0 {
 		b.WriteString("## Suggestions\n\n")
 		for _, s := range m.Suggestions {
-			fmt.Fprintf(&b, "- [%s] %s: %s", clock(s.At), suggestionTitle(s), s.Text)
+			fmt.Fprintf(&b, "- [%s] %s: %s", clock(s.At), suggestionTitle(s), inertHeadings(s.Text))
 			if note := suggestionNote(s); note != "" {
-				fmt.Fprintf(&b, " _(%s)_", note)
+				fmt.Fprintf(&b, " _(%s)_", inertHeadings(note))
 			}
 			b.WriteString("\n")
 		}
@@ -136,7 +136,28 @@ var markdownActive = strings.NewReplacer(
 	"`", "\\`", "*", `\*`, "_", `\_`,
 )
 
-func escapeMarkdown(s string) string { return markdownActive.Replace(s) }
+func escapeMarkdown(s string) string { return inertHeadings(markdownActive.Replace(s)) }
+
+// inertHeadings escapes a "#" that starts a line (after optional blanks), so
+// model-written text never makes a heading: it could forge a section, such as
+// ## Fixes, that the notes are read for.
+func inertHeadings(s string) string {
+	var b strings.Builder
+	lineStart := true
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r':
+			lineStart = true
+		case lineStart && r == '#':
+			b.WriteByte('\\')
+			lineStart = false
+		case r != ' ' && r != '\t':
+			lineStart = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // codeSpan wraps s in a backtick fence longer than any backtick run inside it.
 func codeSpan(s string) string {
@@ -160,6 +181,7 @@ func section(b *strings.Builder, title, body string) {
 	if body == "" {
 		body = "_Nothing yet._"
 	}
+	body = inertHeadings(body)
 	fmt.Fprintf(b, "## %s\n\n%s\n\n", title, body)
 }
 
@@ -169,7 +191,7 @@ func listSection(b *strings.Builder, title string, items []string) {
 	}
 	fmt.Fprintf(b, "## %s\n\n", title)
 	for _, it := range items {
-		b.WriteString("- " + it + "\n")
+		b.WriteString("- " + inertHeadings(it) + "\n")
 	}
 	b.WriteString("\n")
 }
