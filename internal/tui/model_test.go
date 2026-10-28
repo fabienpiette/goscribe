@@ -498,3 +498,19 @@ func TestModelFixesSection(t *testing.T) {
 		}
 	}
 }
+
+// The /help summaries line up after the longest usage.
+func TestModelHelpAligned(t *testing.T) {
+	m := send(sized(t, &recorder{}, 400, 60), typed("/help"), enter)
+	longest := 0
+	for _, c := range assistant.Commands {
+		longest = max(longest, utf8.RuneCountInString(c.Usage))
+	}
+	v := m.View()
+	for _, c := range assistant.Commands {
+		want := fmt.Sprintf("%-*s %s", longest, c.Usage, strings.Fields(c.Summary)[0])
+		if !strings.Contains(v, want) {
+			t.Errorf("help lacks %q:\n%s", want, v)
+		}
+	}
+}

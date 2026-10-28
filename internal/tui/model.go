@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -180,8 +181,12 @@ func (m *model) submit() {
 	case err != nil:
 		m.info(err.Error())
 	case cmd.Name == "help":
+		width := 0 // the summaries line up after the longest usage
 		for _, c := range assistant.Commands {
-			m.info(fmt.Sprintf("%-18s %s", c.Usage, c.Summary))
+			width = max(width, utf8.RuneCountInString(c.Usage))
+		}
+		for _, c := range assistant.Commands {
+			m.info(fmt.Sprintf("%-*s %s", width, c.Usage, c.Summary))
 		}
 		m.info(keysHelp)
 	case cmd.Name == "mute":
