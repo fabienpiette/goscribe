@@ -25,6 +25,7 @@ var (
 	dashStyle      = lipgloss.NewStyle().Background(lighter).Foreground(brightFg).Padding(0, 1)
 	dashTitleStyle = lipgloss.NewStyle().Background(lighter).Foreground(dimFg).Bold(true)
 	dashTextStyle  = lipgloss.NewStyle().Background(lighter).Foreground(brightFg)
+	dashDimStyle   = dashTextStyle.Foreground(dimFg)
 )
 
 // speakerColors color the speaker of a transcript line.

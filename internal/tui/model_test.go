@@ -409,3 +409,49 @@ func TestModelEndStatusKeepsClockAndMutes(t *testing.T) {
 		}
 	}
 }
+
+// Muting a side that is not captured says so instead of toggling.
+func TestModelMuteSideNotCaptured(t *testing.T) {
+	r := &recorder{}
+	o := r.options()
+	o.Sides = []string{"me"}
+	m := send(New(o), tea.WindowSizeMsg{Width: 140, Height: 30})
+	m = send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}, Alt: true})
+	m = send(m, typed("/mute others"), enter)
+	m = send(m, typed("/mute me"), enter)
+	if fmt.Sprint(r.toggled) != "[mic]" {
+		t.Errorf("toggled = %v, want only [mic]", r.toggled)
+	}
+	if n := strings.Count(m.View(), "others is not captured"); n != 2 {
+		t.Errorf("%d \"not captured\" lines, want 2:\n%s", n, m.View())
+	}
+}
+
+// A dashboard taller than the window cuts the longest sections visibly and
+// keeps every title.
+func TestModelDashboardClipsVisibly(t *testing.T) {
+	r := &recorder{}
+	m := sized(t, r, 140, 30)
+	m = send(m, BoardMsg{
+		Summary:       strings.Repeat("Acme and Globex agreed to ship the dark-mode release on Monday. ", 20),
+		NotCovered:    []string{"budget", "hiring"},
+		Decisions:     []string{"ship Monday", "Sam owns the runbook"},
+		OpenQuestions: []string{"who reviews PROJ-123?"},
+		Sources:       []string{"agenda.md", "last-sync.md"},
+	})
+	v := m.View()
+	if got := strings.Count(v, "\n") + 1; got != 30 {
+		t.Errorf("view is %d lines, want 30", got)
+	}
+	checkWidth(t, v, 140)
+	for _, want := range []string{"SUMMARY", "AGENDA LEFT", "DECISIONS", "OPEN QUESTIONS", "SOURCES", "last-sync.md", "more lines"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("dashboard misses %q:\n%s", want, v)
+		}
+	}
+	// A short board is not cut.
+	m = send(m, BoardMsg{Summary: "Short.", Sources: []string{"agenda.md"}})
+	if v := m.View(); strings.Contains(v, "more line") {
+		t.Errorf("short board cut:\n%s", v)
+	}
+}

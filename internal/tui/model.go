@@ -5,6 +5,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -119,7 +120,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	if k.Alt && k.Type == tea.KeyRunes { // never typed: Alt+m/s/w toggle, Alt+b/f/d edit words
 		if label, ok := altKeys[firstRune(k)]; ok {
-			m.opts.Toggle(label)
+			m.toggle(label)
 			return nil
 		}
 		if !m.editKey(k) {
@@ -184,13 +185,27 @@ func (m *model) submit() {
 		}
 		m.info(keysHelp)
 	case cmd.Name == "mute":
-		m.opts.Toggle(map[string]string{"me": "mic", "others": "system"}[cmd.Arg])
+		m.toggle(map[string]string{"me": "mic", "others": "system"}[cmd.Arg])
 	case cmd.Name == "recap":
 		m.opts.Send(assistant.Event{Kind: assistant.RecapEvent, Window: cmd.Window})
 	case cmd.Name == "question":
 		m.opts.Send(assistant.Event{Kind: assistant.QuestionEvent, Text: cmd.Text})
 	}
 	m.goLive()
+}
+
+// labelSides are the sides the mute labels toggle.
+var labelSides = map[string]string{"mic": "me", "system": "others"}
+
+// toggle passes a mute or recap label on; muting a side that is not captured
+// only says so.
+func (m *model) toggle(label string) {
+	if side, ok := labelSides[label]; ok && !slices.Contains(m.opts.Sides, side) {
+		m.info(side + " is not captured")
+		m.refresh()
+		return
+	}
+	m.opts.Toggle(label)
 }
 
 func (m *model) info(text string) {
@@ -326,26 +341,70 @@ func bar(left, right string, width int) string {
 	return barStyle.MaxWidth(width).Render(line)
 }
 
-// dashboard is the memory of the meeting, empty sections hidden.
+// dashboard is the memory of the meeting, empty sections hidden. When it
+// does not fit in height, the longest sections lose their last lines to a
+// "… N more lines" line, down to one line each: every title stays.
 func dashboard(b assistant.Board, width, height int) string {
 	inner := max(width-2, 1)
 	text := dashTextStyle.Width(inner)
-	var blocks []string
-	section := func(title string, lines ...string) {
-		if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+	type section struct {
+		title  string
+		body   []string // wrapped lines
+		hidden int      // lines cut to fit
+	}
+	var sections []*section
+	add := func(title string, items ...string) {
+		if len(items) == 0 || (len(items) == 1 && items[0] == "") {
 			return
 		}
-		block := []string{dashTitleStyle.Width(inner).Render(title)}
-		for _, l := range lines {
-			block = append(block, text.Render(l))
+		sec := &section{title: title}
+		for _, it := range items {
+			sec.body = append(sec.body, strings.Split(text.Render(it), "\n")...)
 		}
-		blocks = append(blocks, strings.Join(block, "\n"))
+		sections = append(sections, sec)
 	}
-	section("SUMMARY", clean(b.Summary))
-	section("AGENDA LEFT", bullets(b.NotCovered)...)
-	section("DECISIONS", bullets(b.Decisions)...)
-	section("OPEN QUESTIONS", bullets(b.OpenQuestions)...)
-	section("SOURCES", bullets(b.Sources)...)
+	add("SUMMARY", clean(b.Summary))
+	add("AGENDA LEFT", bullets(b.NotCovered)...)
+	add("DECISIONS", bullets(b.Decisions)...)
+	add("OPEN QUESTIONS", bullets(b.OpenQuestions)...)
+	add("SOURCES", bullets(b.Sources)...)
+
+	total := func() int {
+		n := max(len(sections)-1, 0) // blank lines between sections
+		for _, sec := range sections {
+			n += 1 + len(sec.body)
+			if sec.hidden > 0 {
+				n++
+			}
+		}
+		return n
+	}
+	for total() > height {
+		var longest *section // the first one on ties: the summary goes first
+		for _, sec := range sections {
+			if len(sec.body) > 1 && (longest == nil || len(sec.body) > len(longest.body)) {
+				longest = sec
+			}
+		}
+		if longest == nil {
+			break // too short a window: MaxHeight cuts the rest
+		}
+		longest.body = longest.body[:len(longest.body)-1]
+		longest.hidden++
+	}
+
+	blocks := make([]string, len(sections))
+	for i, sec := range sections {
+		lines := append([]string{dashTitleStyle.Width(inner).Render(sec.title)}, sec.body...)
+		if sec.hidden > 0 {
+			more := fmt.Sprintf("… %d more lines", sec.hidden)
+			if sec.hidden == 1 {
+				more = "… 1 more line"
+			}
+			lines = append(lines, dashDimStyle.Width(inner).Render(more))
+		}
+		blocks[i] = strings.Join(lines, "\n")
+	}
 	return dashStyle.Width(width).MaxWidth(width).Height(height).MaxHeight(height).
 		Render(strings.Join(blocks, "\n"+text.Render("")+"\n"))
 }
