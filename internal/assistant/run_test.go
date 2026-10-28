@@ -1114,3 +1114,34 @@ func TestRunQuestionAfterEndRefused(t *testing.T) {
 		t.Errorf("model calls = %d, want only the update", f.count())
 	}
 }
+
+func TestRunWritesTranscript(t *testing.T) {
+	fastTimers(t)
+	path := filepath.Join(t.TempDir(), "t-transcript.md")
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Header: "HDR", Transcript: path, Out: &syncBuffer{},
+			Think: (&fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}).think}, events)
+	}()
+	events <- line("others", "hello from them")
+	events <- Event{Kind: MuteEvent, Speaker: "me", Muted: true}
+	events <- line("me", "muted words")
+	events <- Event{Kind: MuteEvent, Speaker: "me", Muted: false}
+	events <- line("me", "hello from me")
+	close(events)
+	<-done
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	for _, want := range []string{"# Transcript\n\nHDR", "] others: hello from them", "] me: hello from me"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("transcript missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "muted words") {
+		t.Errorf("muted line must not be saved:\n%s", s)
+	}
+}

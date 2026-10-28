@@ -31,11 +31,13 @@ type Event struct {
 }
 
 type Config struct {
-	Context  string        // trusted meeting background (LoadContext)
-	Notes    string        // notes file path, rewritten after each update
-	Header   string        // one line describing the session, for the notes
-	Engine   string        // provider name, for messages ("claude")
-	Interval time.Duration // shortest time between two updates
+	Context string // trusted meeting background (LoadContext)
+	Notes   string // notes file path, rewritten after each update
+	// Transcript is the live transcript file path, appended line by line ("" = none).
+	Transcript string
+	Header     string        // one line describing the session, for the notes
+	Engine     string        // provider name, for messages ("claude")
+	Interval   time.Duration // shortest time between two updates
 	// Think sends one prompt to the model and returns its answer.
 	Think       func(instructions, transcript string) (string, error)
 	Out         io.Writer       // plain output, used when View is nil
@@ -203,7 +205,9 @@ type state struct {
 	askedQ    string
 	answers   chan qaResult
 
-	notesErr bool
+	notesErr      bool
+	transcriptErr bool
+	transcriptOn  bool // the transcript file exists
 }
 
 func (s *state) elapsed(now time.Time) time.Duration { return now.Sub(s.start) }
@@ -229,6 +233,7 @@ func (s *state) handle(ev Event) {
 		delete(s.partials, ev.Speaker)
 		s.show(Item{Kind: ItemTranscript, At: l.At, Speaker: l.Speaker, Text: l.Text,
 			Plain: s.dim(fmt.Sprintf("  %s %-6s %s", clock(l.At), l.Speaker, l.Text))})
+		s.appendTranscript(l)
 		if len(s.lines) == 1 {
 			_ = s.writeNotes(false) // a failure is shown in the feed
 		}
@@ -717,6 +722,26 @@ func (s *state) writeNotes(final bool) error {
 		s.notice("⚠ cannot write the notes: " + err.Error())
 	}
 	return err
+}
+
+// appendTranscript saves a line to the transcript file, creating it with the
+// header at the first line. A failure is shown once in the feed.
+func (s *state) appendTranscript(l Line) {
+	if s.c.Transcript == "" {
+		return
+	}
+	var err error
+	if !s.transcriptOn {
+		if err = WriteTranscript(s.c.Transcript, s.header, s.lines); err == nil {
+			s.transcriptOn = true
+		}
+	} else {
+		err = AppendTranscript(s.c.Transcript, l)
+	}
+	if err != nil && !s.transcriptErr {
+		s.transcriptErr = true
+		s.notice("⚠ cannot write the transcript: " + err.Error())
+	}
 }
 
 // suggestionBadges are the feed badges of the suggestion types.

@@ -255,6 +255,8 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		header += fmt.Sprintf(" · librarian: %s, %d tool(s)", lib.Provider, len(lib.AllowedTools))
 	}
 
+	transcript := assistant.TranscriptPath(notes)
+
 	ctx, force, stopSignals := watchSignals()
 	defer stopSignals()
 
@@ -265,9 +267,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	if toggle != nil {
 		muteHint, recapHint = assistMuteHint(sides), string(recapKey)
 		fmt.Fprintf(stdout, "Assist %s → %s (%s to mute or unmute, %s for a recap of the last %s, Ctrl+C to stop)\n",
-			header, notes, muteHint, recapHint, assistant.WindowLabel(recapWindow))
+			header, notes+", transcript "+transcript, muteHint, recapHint, assistant.WindowLabel(recapWindow))
 	} else {
-		fmt.Fprintf(stdout, "Assist %s → %s (Ctrl+C to stop)\n", header, notes)
+		fmt.Fprintf(stdout, "Assist %s → %s (Ctrl+C to stop)\n", header, notes+", transcript "+transcript)
 	}
 	if len(tooLong) > 0 {
 		fmt.Fprintf(stdout, "⚠ %d keyterm(s) over %d characters left out (live speech-to-text refuses them): %s\n",
@@ -283,6 +285,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	acfg := assistant.Config{
 		Context:     background,
 		Notes:       notes,
+		Transcript:  transcript,
 		Header:      header,
 		Engine:      prov,
 		Interval:    every,
