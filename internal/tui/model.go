@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -89,7 +90,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refresh()
 	case StatusMsg:
-		m.status, m.started = assistant.Status(msg), true
+		st := assistant.Status(msg)
+		if st.State == "" { // the meeting is over: keep its length and who was muted
+			st.Elapsed, st.Muted = m.status.Elapsed, m.status.Muted
+		}
+		m.status, m.started = st, true
 		m.feed.partialSpeaker, m.feed.partial = msg.PartialSpeaker, msg.Partial
 		m.refresh()
 	case BoardMsg:
@@ -112,11 +117,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
-	if k.Alt { // never typed: Alt+m/s/w toggle, other Alt keys do nothing
-		if label, ok := altKeys[firstRune(k)]; ok && k.Type == tea.KeyRunes {
+	if k.Alt && k.Type == tea.KeyRunes { // never typed: Alt+m/s/w toggle, Alt+b/f/d edit words
+		if label, ok := altKeys[firstRune(k)]; ok {
 			m.opts.Toggle(label)
+			return nil
 		}
-		return nil
+		if !m.editKey(k) {
+			return nil
+		}
 	}
 	switch k.Type {
 	case tea.KeyCtrlC:
@@ -141,6 +149,17 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		return cmd
 	}
 	return nil
+}
+
+// editKey tells whether k is one of the input's editing keys (Alt+b, Alt+f, Alt+d...).
+func (m *model) editKey(k tea.KeyMsg) bool {
+	km := m.in.KeyMap
+	for _, b := range []key.Binding{km.WordForward, km.WordBackward, km.DeleteWordBackward, km.DeleteWordForward} {
+		if key.Matches(k, b) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstRune(k tea.KeyMsg) rune {
@@ -194,6 +213,9 @@ func (m *model) layout() {
 	m.vp.Width, m.vp.Height = max(m.feedWidth(), 0), m.bodyHeight()
 	m.in.Width = max(m.width-lipgloss.Width(m.in.Prompt)-len(helpHint)-2, 1)
 	m.refresh()
+	if !m.live { // a taller or wider window can bring the bottom into view
+		m.followIfAtBottom()
+	}
 }
 
 // refresh rebuilds the feed content, and follows it when live.
@@ -319,7 +341,7 @@ func dashboard(b assistant.Board, width, height int) string {
 		}
 		blocks = append(blocks, strings.Join(block, "\n"))
 	}
-	section("SUMMARY", b.Summary)
+	section("SUMMARY", clean(b.Summary))
 	section("AGENDA LEFT", bullets(b.NotCovered)...)
 	section("DECISIONS", bullets(b.Decisions)...)
 	section("OPEN QUESTIONS", bullets(b.OpenQuestions)...)
@@ -331,7 +353,7 @@ func dashboard(b assistant.Board, width, height int) string {
 func bullets(items []string) []string {
 	out := make([]string, len(items))
 	for i, it := range items {
-		out[i] = "• " + it
+		out[i] = "• " + clean(it)
 	}
 	return out
 }

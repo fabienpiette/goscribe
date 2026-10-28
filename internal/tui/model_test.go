@@ -324,3 +324,88 @@ func TestModelEndedQuits(t *testing.T) {
 		t.Fatal("EndedMsg did not quit")
 	}
 }
+
+func TestModelStripsEscapeSequences(t *testing.T) {
+	evil := "ok\x1b]52;c;ZXZpbA==\a then\x1b[2J and\rback done\x9b"
+	m := sized(t, &recorder{}, 140, 30)
+	m = send(m, BoardMsg{Summary: evil, Decisions: []string{evil}},
+		ItemMsg{Kind: assistant.ItemAssist, Badge: "RISK", Text: evil, Note: evil},
+		line(0, "others", evil),
+		StatusMsg{State: "listening", PartialSpeaker: "me", Partial: evil})
+	v := m.View()
+	for _, bad := range []string{"\x1b", "\a", "\r", "\x9b"} {
+		if strings.Contains(v, bad) {
+			t.Errorf("view contains %q:\n%q", bad, v)
+		}
+	}
+	if !strings.Contains(v, "ok then and back done") {
+		t.Errorf("text lost while cleaning:\n%s", v)
+	}
+}
+
+func TestModelStatusDoesNotRewrapOldEntries(t *testing.T) {
+	m := sized(t, &recorder{}, 140, 30)
+	for i := range 1000 {
+		m = send(m, line(time.Duration(i)*time.Second, "others", fmt.Sprintf("line number %d", i)))
+	}
+	f := &m.(*model).feed
+	before := f.rendered
+	m = send(m, StatusMsg{State: "listening", PartialSpeaker: "me", Partial: "so"}, StatusMsg{State: "listening"})
+	if f.rendered != before {
+		t.Errorf("status updates wrapped %d old entries again", f.rendered-before)
+	}
+	m = send(m, line(0, "me", "one more"))
+	if f.rendered != before+1 {
+		t.Errorf("a new item wrapped %d entries, want 1", f.rendered-before)
+	}
+	send(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if f.rendered != before+1+1001 {
+		t.Errorf("a resize wrapped %d entries, want all 1001", f.rendered-before-1)
+	}
+}
+
+func TestModelAltBackspaceDeletesWord(t *testing.T) {
+	r := &recorder{}
+	m := sized(t, r, 140, 30)
+	m = send(m, typed("why not Acme"), tea.KeyMsg{Type: tea.KeyBackspace, Alt: true}, enter)
+	if len(r.sent) != 1 || r.sent[0].Text != "why not" {
+		t.Errorf("sent = %+v, want the question \"why not\"", r.sent)
+	}
+	send(m, typed("ask Sam"), tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}, Alt: true}, typed("x"), enter)
+	if len(r.sent) != 2 || r.sent[1].Text != "ask xSam" {
+		t.Errorf("sent = %+v, want Alt+b to move a word back", r.sent)
+	}
+	if len(r.toggled) != 0 {
+		t.Errorf("toggled = %v, want none", r.toggled)
+	}
+}
+
+func TestModelResizeToBottomReturnsToLive(t *testing.T) {
+	m := sized(t, &recorder{}, 140, 30)
+	for i := range 100 {
+		m = send(m, line(0, "others", fmt.Sprintf("line number %d", i)))
+	}
+	m = send(m, tea.KeyMsg{Type: tea.KeyPgUp}, line(0, "me", "late one"))
+	if !strings.Contains(m.View(), "↓ 1 new") {
+		t.Fatal("no new marker")
+	}
+	m = send(m, tea.WindowSizeMsg{Width: 140, Height: 200})
+	if v := m.View(); strings.Contains(v, "new") {
+		t.Fatalf("marker stuck though the whole feed fits:\n%s", v)
+	}
+	m = send(m, tea.WindowSizeMsg{Width: 140, Height: 30}, line(0, "me", "later"))
+	if v := m.View(); strings.Contains(v, "new") || !strings.Contains(v, "later") {
+		t.Fatalf("feed not live after the resize:\n%s", v)
+	}
+}
+
+func TestModelEndStatusKeepsClockAndMutes(t *testing.T) {
+	m := sized(t, &recorder{}, 140, 30)
+	m = send(m, StatusMsg{Elapsed: 83 * time.Second, State: "listening", Muted: map[string]bool{"me": true}}, StatusMsg{})
+	top := strings.Split(m.View(), "\n")[0]
+	for _, want := range []string{"01:23", "meeting over", "me (muted)", "others live"} {
+		if !strings.Contains(top, want) {
+			t.Errorf("top bar lacks %q: %q", want, top)
+		}
+	}
+}
