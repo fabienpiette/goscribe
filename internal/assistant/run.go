@@ -24,6 +24,8 @@ type Event struct {
 	Speaker string // "me" or "others"
 	Text    string
 	Muted   bool // MuteEvent: the side is now muted
+	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
+	Window time.Duration
 }
 
 type Config struct {
@@ -38,9 +40,14 @@ type Config struct {
 	Interactive bool            // Out is a terminal: status line and dim lines
 	View        View            // shows the feed, status and dashboard; nil means NewPlainView on Out
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
-	MuteHint    string          // mute keys for the status line, e.g. "m/s"; "" when there are none
-	RecapKey    string          // the key that asks for a recap, for the status line; "" when there is none
-	RecapWindow time.Duration   // how far back a recap goes; 0 means defaultRecapWindow
+	Input       <-chan Event    // the user's commands; nil in plain mode. Closing it does not end the run
+	// Final is called once at the end of Run with the final memory and the
+	// notes path, also when the final notes failed or were forced; nil means
+	// no call.
+	Final       func(m Memory, notes string)
+	MuteHint    string        // mute keys for the status line, e.g. "m/s"; "" when there are none
+	RecapKey    string        // the key that asks for a recap, for the status line; "" when there is none
+	RecapWindow time.Duration // how far back a recap goes; 0 means defaultRecapWindow
 	// Research sends one prompt to the librarian and returns its answer and
 	// the tool calls its allowlist refused; nil turns the librarian off.
 	Research              func(prompt string) (ResearchReply, error)
@@ -94,8 +101,16 @@ func Run(c Config, events <-chan Event) error {
 	s.board()
 	s.status(time.Now())
 
+	input := c.Input
 	for events != nil {
 		select {
+		case ev, ok := <-input:
+			if !ok {
+				input = nil // a closed Input never ends the run
+				continue
+			}
+			s.handle(ev)
+			s.maybeStart(time.Now())
 		case ev, ok := <-events:
 			if !ok {
 				events = nil
@@ -149,8 +164,9 @@ type state struct {
 	lastSpeaker string
 
 	thinking   bool
-	recapping  bool // the call in flight is a recap
-	recapAsked bool // a recap waits for the call in flight
+	recapping  bool          // the call in flight is a recap
+	recapAsked bool          // a recap waits for the call in flight
+	recapWin   time.Duration // window of the recap asked or in flight; 0 means the default one
 	thinkStart time.Time
 	lastStart  time.Time
 	failures   int
@@ -196,7 +212,7 @@ func (s *state) handle(ev Event) {
 	case NoticeEvent:
 		s.notice(Clean(ev.Text))
 	case RecapEvent:
-		s.askRecap(time.Now())
+		s.askRecap(time.Now(), ev.Window)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -210,6 +226,9 @@ func (s *state) handle(ev Event) {
 
 // recapWindow is how far back a recap goes.
 func (s *state) recapWindow() time.Duration {
+	if s.recapWin > 0 {
+		return s.recapWin
+	}
 	if s.c.RecapWindow > 0 {
 		return s.c.RecapWindow
 	}
@@ -217,7 +236,7 @@ func (s *state) recapWindow() time.Duration {
 }
 
 // askRecap notes a recap request; it starts as soon as no call is in flight.
-func (s *state) askRecap(now time.Time) {
+func (s *state) askRecap(now time.Time, window time.Duration) {
 	if s.ending {
 		return
 	}
@@ -225,11 +244,14 @@ func (s *state) askRecap(now time.Time) {
 		s.info("📝 a recap is already on its way")
 		return
 	}
-	if len(recentLines(s.lines, s.elapsed(now), s.recapWindow())) == 0 {
-		s.info("📝 nothing was said in the last " + WindowLabel(s.recapWindow()))
+	if window <= 0 {
+		window = s.recapWindow()
+	}
+	if len(recentLines(s.lines, s.elapsed(now), window)) == 0 {
+		s.info("📝 nothing was said in the last " + WindowLabel(window))
 		return
 	}
-	s.recapAsked = true
+	s.recapAsked, s.recapWin = true, window
 }
 
 func (s *state) startRecap(now time.Time) {
@@ -241,6 +263,7 @@ func (s *state) startRecap(now time.Time) {
 
 // finishRecap shows a recap answer in the feed.
 func (s *state) finishRecap(r result) {
+	defer func() { s.recapWin = 0 }()
 	var recap struct {
 		Recap []string `json:"recap"`
 	}
@@ -482,6 +505,7 @@ func (s *state) watchdog(now time.Time) {
 	s.gen++ // its answer, if it ever comes, is ignored
 	s.thinking = false
 	if s.recapping { // a lost recap does not slow the updates down
+		s.recapWin = 0
 		s.notice(fmt.Sprintf("⚠ recap failed: %s did not answer in %s", s.c.Engine, limit.Round(time.Second)))
 		return
 	}
@@ -492,16 +516,20 @@ func (s *state) watchdog(now time.Time) {
 // end waits for the update in progress, then writes the final notes. It
 // ignores lookups: one in flight is not waited for, and none starts.
 func (s *state) end() error {
+	defer func() {
+		if s.c.Final != nil {
+			s.c.Final(s.mem, s.c.Notes)
+		}
+	}()
 	s.ending = true
 	s.c.View.Status(Status{}) // clears the status line
 	if s.thinking {
 		s.notice(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))
-		select {
-		case r := <-s.waitCurrent():
-			s.finish(r)
-		case <-s.c.Force:
+		r, ok := s.await(s.waitCurrent())
+		if !ok {
 			return s.writeNotes(false)
 		}
+		s.finish(r)
 	}
 	if wordCount(s.lines) < minFinalWords {
 		if len(s.lines) > 0 {
@@ -513,8 +541,7 @@ func (s *state) end() error {
 	s.notice(fmt.Sprintf("⏳ writing the final notes (%s)…", s.c.Engine))
 	instructions, transcript := FinalPrompt(s.c.Context, s.mem, s.lines)
 	s.call(time.Now(), len(s.lines), false, instructions, transcript)
-	select {
-	case r := <-s.waitCurrent():
+	if r, ok := s.await(s.waitCurrent()); ok {
 		s.thinking = false
 		answer, err := r.answer, r.err
 		var parsed Reply
@@ -532,8 +559,25 @@ func (s *state) end() error {
 		}
 		s.notice("✓ Final notes written to " + s.c.Notes)
 		return nil
-	case <-s.c.Force:
-		return s.writeNotes(false)
+	}
+	return s.writeNotes(false)
+}
+
+// await waits for a call's result, reading Input meanwhile so that a sender
+// never blocks; false means Force was closed first.
+func (s *state) await(res <-chan result) (result, bool) {
+	input := s.c.Input
+	for {
+		select {
+		case r := <-res:
+			return r, true
+		case <-s.c.Force:
+			return result{}, false
+		case _, ok := <-input:
+			if !ok {
+				input = nil
+			}
+		}
 	}
 }
 

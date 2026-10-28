@@ -898,3 +898,75 @@ func TestRecapPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestRunInputEventsAreHandled(t *testing.T) {
+	fastTimers(t)
+	out := &syncBuffer{}
+	events := make(chan Event)
+	input := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: (&fakeThink{}).think, Out: out, Input: input}, events)
+	}()
+	input <- Event{Kind: MuteEvent, Speaker: "me", Muted: true}
+	waitUntil(t, "mute notice", func() bool { return strings.Contains(out.String(), "🔇 me muted at") })
+	events <- line("me", twelveWords)
+	close(input) // a closed Input does not end the run
+	events <- line("others", "still running")
+	waitUntil(t, "later line", func() bool { return strings.Contains(out.String(), "still running") })
+	close(events)
+	<-done
+	if strings.Contains(out.String(), twelveWords) {
+		t.Errorf("a line from the muted side must be dropped:\n%s", out.String())
+	}
+}
+
+func TestRunRecapCustomWindow(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){answer(`{"recap":["Sam owns the rollback."]}`)}}
+	out := &syncBuffer{}
+	events := make(chan Event)
+	input := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, Out: out, Input: input, RecapWindow: time.Minute}, events)
+	}()
+	events <- line("others", "Sam owns the rollback")
+	input <- Event{Kind: RecapEvent, Window: 10 * time.Minute}
+	waitUntil(t, "recap", func() bool { return strings.Contains(out.String(), "Sam owns the rollback.") })
+	close(events)
+	<-done
+	instr, _ := f.call(0)
+	if want := "the last " + WindowLabel(10*time.Minute); !strings.Contains(instr, want) {
+		t.Errorf("recap instructions miss %q:\n%s", want, instr)
+	}
+	if !strings.Contains(out.String(), "Recap of the last 10 min") {
+		t.Errorf("feed:\n%s", out.String())
+	}
+}
+
+func TestRunFinalCallback(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"Final."}`)}}
+	notes := filepath.Join(t.TempDir(), "notes.md")
+	events := make(chan Event)
+	var mu sync.Mutex
+	var calls int
+	var gotMem Memory
+	var gotNotes string
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, Out: &syncBuffer{}, Notes: notes,
+			Final: func(m Memory, n string) { mu.Lock(); calls, gotMem, gotNotes = calls+1, m, n; mu.Unlock() }}, events)
+	}()
+	events <- line("me", twelveWords+" "+twelveWords+" "+twelveWords)
+	close(events)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 || gotNotes != notes || gotMem.Summary != "Final." {
+		t.Errorf("Final calls=%d notes=%q summary=%q", calls, gotNotes, gotMem.Summary)
+	}
+}
