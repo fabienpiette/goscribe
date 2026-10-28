@@ -40,11 +40,14 @@ data.
 
 1. Read the diff (or the PR text) for anything in the list above.
 2. Check it against the local denylist, which holds the real strings and is never committed (it
-   lives in `.git/info/`):
+   lives in `.git/info/` of the main checkout; in a `git worktree`, `.git` is a file, so resolve the
+   path with `git rev-parse --git-common-dir`):
    ```bash
-   git diff --cached | grep -i -n -f .git/info/denylist   # staged changes
-   git grep -i -n -f .git/info/denylist                   # whole tree
+   denylist="$(git rev-parse --git-common-dir)/info/denylist"
+   test -f "$denylist" || echo "no denylist"                # an empty grep proves nothing without it
+   git diff --cached | grep -i -n -f "$denylist"            # staged changes
+   git grep -i -n -f "$denylist"                            # whole tree
    ```
-   If `.git/info/denylist` doesn't exist, ask the maintainer for the terms instead of guessing.
+   If the denylist doesn't exist, ask the maintainer for the terms instead of guessing.
 3. If something real was already pushed, say so and stop: removing it from history means rewriting
    it (`git filter-repo`) and force-pushing, which only the maintainer decides.
