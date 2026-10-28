@@ -512,10 +512,10 @@ func TestCycleRulesMentionFixes(t *testing.T) {
 		}
 	}
 	if strings.Contains(instr, "never propose these again") {
-		t.Error("no answered-guesses block without guesses")
+		t.Error("no suggested-guesses block without guesses")
 	}
 	instr, _ = CyclePrompt("", Memory{}, nil, lines, false, []Fix{{Wrong: "cash", Right: "cache"}})
-	if want := "Fixes already suggested or rejected (never propose these again):\n- cash → cache\n"; !strings.Contains(instr, want) {
+	if want := "Fixes you suggested earlier (your own suggestions, not the user's corrections; never propose these again):\n- cash → cache\n"; !strings.Contains(instr, want) {
 		t.Errorf("instructions miss %q:\n%s", want, instr)
 	}
 }

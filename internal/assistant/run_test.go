@@ -1518,7 +1518,7 @@ func TestGuessedFixRejectedNotReproposed(t *testing.T) {
 	}
 	events <- line("me", "more cash")
 	waitUntil(t, "second update", func() bool { return f.count() == 2 })
-	if instr, _ := f.call(1); !strings.Contains(instr, "Fixes already suggested or rejected (never propose these again):\n- cash → cache\n") {
+	if instr, _ := f.call(1); !strings.Contains(instr, "Fixes you suggested earlier (your own suggestions, not the user's corrections; never propose these again):\n- cash → cache\n") {
 		t.Errorf("the update must be told about the rejected guess:\n%s", instr)
 	}
 	events <- line("me", "and cash")
@@ -1560,6 +1560,36 @@ func TestGuessedFixFiltered(t *testing.T) {
 	}
 	if b := lastBoard(); !slices.Equal(b.Fixes, []string{"film → short film", "cash → cache ?"}) {
 		t.Errorf("board = %+v", b)
+	}
+	close(events)
+	<-done
+}
+
+// A guess the user types meanwhile, in another case, is in force already:
+// accepting it must not add it twice, or film → short film would double up.
+func TestGuessedFixAlreadyInForce(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"one","fixes":[{"wrong":"film","right":"short film","why":"x"}]}`),
+		answer(`{"summary":"two"}`),
+	}}
+	v := &recordingView{}
+	events, input, done, _, _ := startFixRun(t, f, v)
+	events <- line("others", "the film work")
+	waitUntil(t, "guess", func() bool { return hasItem(v, isGuess) })
+	input <- fixEvent("add", "Film", "short film", 0)
+	input <- fixEvent("yes", "", "", 0)
+	waitUntil(t, "in force", func() bool { return hasInfo(v, "fix 1 is already in force") })
+	if n := countItems(v, func(it Item) bool { return it.Badge == "FIX" }); n != 1 {
+		t.Errorf("FIX items = %d, want 1:\n%+v", n, v.Items())
+	}
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"Film → short film"}) {
+		t.Errorf("board = %+v", b)
+	}
+	events <- line("me", "a film now")
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	if _, tr := f.call(1); !strings.Contains(tr, "others: the short film work") || !strings.Contains(tr, "me: a short film now") ||
+		strings.Contains(tr, "short short") {
+		t.Errorf("the fix must apply once:\n%s", tr)
 	}
 	close(events)
 	<-done

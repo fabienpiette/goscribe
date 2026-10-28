@@ -201,9 +201,9 @@ func sameFix(a, b Fix) bool {
 	return strings.EqualFold(a.Wrong, b.Wrong) && strings.EqualFold(a.Right, b.Right)
 }
 
-// answeredGuesses are the suggested fixes waiting or rejected, for the model
+// unacceptedGuesses are the suggested fixes waiting or rejected, for the model
 // not to propose them again; accepted ones are listed with the fixes in force.
-func (s *state) answeredGuesses() []Fix {
+func (s *state) unacceptedGuesses() []Fix {
 	var out []Fix
 	for _, p := range s.proposals {
 		if p.State != guessAccepted {
