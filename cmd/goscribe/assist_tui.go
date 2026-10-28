@@ -50,12 +50,12 @@ func printEndSummary(w io.Writer, m assistant.Memory, final bool, notes, transcr
 		if !final {
 			fmt.Fprintln(w, "Live summary (final notes not written):")
 		}
-		fmt.Fprintf(w, "%s\n\n", m.Summary)
+		fmt.Fprintf(w, "%s\n\n", assistant.Clean(m.Summary)) // model output: no control characters on the terminal
 	}
 	if len(m.ActionItems) > 0 {
 		fmt.Fprintln(w, "Action items:")
 		for _, a := range m.ActionItems {
-			fmt.Fprintf(w, "- %s\n", a)
+			fmt.Fprintf(w, "- %s\n", assistant.Clean(a))
 		}
 		fmt.Fprintln(w)
 	}

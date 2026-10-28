@@ -798,6 +798,12 @@ func TestPrintEndSummary(t *testing.T) {
 	if want := "Live summary (final notes not written):\nShipping Monday.\n\nNotes: n.md\n"; b.String() != want {
 		t.Errorf("live summary:\n%q\nwant:\n%q", b.String(), want)
 	}
+	// Model output reaches the real terminal here: no escape sequences.
+	b.Reset()
+	printEndSummary(&b, assistant.Memory{Summary: "Ship\x1b]52;c;aGk=\a Monday.\r", ActionItems: []string{"Sam:\x1b[2J write it"}}, true, "n.md", "")
+	if strings.ContainsAny(b.String(), "\x1b\a\r") {
+		t.Errorf("escape sequences printed: %q", b.String())
+	}
 }
 
 // fakeProgram stands for the Bubble Tea program: it records the messages and
