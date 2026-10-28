@@ -1,8 +1,10 @@
 package assistant
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 )
@@ -10,11 +12,12 @@ import (
 type EventKind int
 
 const (
-	PartialEvent EventKind = iota // words still being recognized
-	LineEvent                     // a committed transcript line
-	NoticeEvent                   // a status message to show as is
-	MuteEvent                     // a side was muted or unmuted (Muted)
-	RecapEvent                    // the user asked for a recap of the last minutes
+	PartialEvent  EventKind = iota // words still being recognized
+	LineEvent                      // a committed transcript line
+	NoticeEvent                    // a status message to show as is
+	MuteEvent                      // a side was muted or unmuted (Muted)
+	RecapEvent                     // the user asked for a recap of the last minutes
+	QuestionEvent                  // the user typed a question (Text)
 )
 
 // Event is what the transcription side sends to Run.
@@ -23,22 +26,32 @@ type Event struct {
 	Speaker string // "me" or "others"
 	Text    string
 	Muted   bool // MuteEvent: the side is now muted
+	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
+	Window time.Duration
 }
 
 type Config struct {
-	Context  string        // trusted meeting background (LoadContext)
-	Notes    string        // notes file path, rewritten after each update
-	Header   string        // one line describing the session, for the notes
-	Engine   string        // provider name, for messages ("claude")
-	Interval time.Duration // shortest time between two updates
+	Context string // trusted meeting background (LoadContext)
+	Notes   string // notes file path, rewritten after each update
+	// Transcript is the live transcript file path, appended line by line ("" = none).
+	Transcript string
+	Header     string        // one line describing the session, for the notes
+	Engine     string        // provider name, for messages ("claude")
+	Interval   time.Duration // shortest time between two updates
 	// Think sends one prompt to the model and returns its answer.
 	Think       func(instructions, transcript string) (string, error)
-	Out         io.Writer
+	Out         io.Writer       // plain output, used when View is nil
 	Interactive bool            // Out is a terminal: status line and dim lines
+	View        View            // shows the feed, status and dashboard; nil means NewPlainView on Out
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
-	MuteHint    string          // mute keys for the status line, e.g. "m/s"; "" when there are none
-	RecapKey    string          // the key that asks for a recap, for the status line; "" when there is none
-	RecapWindow time.Duration   // how far back a recap goes; 0 means defaultRecapWindow
+	Input       <-chan Event    // the user's commands; nil in plain mode. Closing it does not end the run
+	// Final is called once at the end of Run with the final memory and the
+	// notes path, also when the final notes failed or were forced; written
+	// tells whether the final notes were written. nil means no call.
+	Final       func(m Memory, notes string, written bool)
+	MuteHint    string        // mute keys for the status line, e.g. "m/s"; "" when there are none
+	RecapKey    string        // the key that asks for a recap, for the status line; "" when there is none
+	RecapWindow time.Duration // how far back a recap goes; 0 means defaultRecapWindow
 	// Research sends one prompt to the librarian and returns its answer and
 	// the tool calls its allowlist refused; nil turns the librarian off.
 	Research              func(prompt string) (ResearchReply, error)
@@ -79,16 +92,29 @@ const (
 // Force is closed first. It returns an error only if the notes can't be
 // written at the end.
 func Run(c Config, events <-chan Event) error {
+	if c.View == nil {
+		c.View = NewPlainView(c.Out, c.Interactive, c.MuteHint, c.RecapKey)
+	}
 	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16),
-		lookupResults: make(chan lookupResult, 1), partials: map[string]string{}, muted: map[string]bool{}}
+		lookupResults: make(chan lookupResult, 1), answers: make(chan qaResult, 4), partials: map[string]string{}, muted: map[string]bool{}}
 	// Suggestion times are offsets from this start; with the wall clock, they
 	// can be matched against a recording started at another moment.
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
 	ticker := time.NewTicker(Tick)
 	defer ticker.Stop()
+	s.board()
+	s.status(time.Now())
 
+	input := c.Input
 	for events != nil {
 		select {
+		case ev, ok := <-input:
+			if !ok {
+				input = nil // a closed Input never ends the run
+				continue
+			}
+			s.handle(ev)
+			s.maybeStart(time.Now())
 		case ev, ok := <-events:
 			if !ok {
 				events = nil
@@ -100,6 +126,9 @@ func Run(c Config, events <-chan Event) error {
 			s.finish(r)
 		case r := <-s.lookupResults:
 			s.finishLookup(r)
+		case r := <-s.answers:
+			s.finishQuestion(r)
+			s.maybeAsk(time.Now())
 		case now := <-ticker.C:
 			s.watchdog(now)
 			s.maybeStart(now)
@@ -120,6 +149,15 @@ type result struct {
 
 // defaultRecapWindow is how far back a recap goes when RecapWindow is unset.
 const defaultRecapWindow = 5 * time.Minute
+
+// qaResult is the answer of a typed question; abandoned ones carry an older gen.
+type qaResult struct {
+	gen      int
+	question string
+	at       time.Duration // when the question was asked
+	answer   string
+	err      error
+}
 
 type lookupResult struct {
 	lookup Lookup
@@ -142,8 +180,9 @@ type state struct {
 	lastSpeaker string
 
 	thinking   bool
-	recapping  bool // the call in flight is a recap
-	recapAsked bool // a recap waits for the call in flight
+	recapping  bool          // the call in flight is a recap
+	recapAsked bool          // a recap waits for the call in flight
+	recapWin   time.Duration // window of the recap asked or in flight; 0 means the default one
 	thinkStart time.Time
 	lastStart  time.Time
 	failures   int
@@ -157,7 +196,18 @@ type state struct {
 	ending        bool // the meeting is over: no new lookups
 	lookupResults chan lookupResult
 
-	notesErr bool
+	// Typed questions have their own call, so they never delay the updates.
+	asking    bool
+	questions []string // typed questions waiting for the one in flight
+	askStart  time.Time
+	askGen    int // abandoned question calls carry an older askGen and are ignored
+	answers   chan qaResult
+
+	finalWritten bool // the final notes were written
+
+	notesErr      bool
+	transcriptErr bool
+	transcriptOn  bool // the transcript file exists
 }
 
 func (s *state) elapsed(now time.Time) time.Duration { return now.Sub(s.start) }
@@ -181,14 +231,18 @@ func (s *state) handle(ev Event) {
 		l := Line{Speaker: ev.Speaker, At: s.elapsed(time.Now()), Text: text}
 		s.lines = append(s.lines, l)
 		delete(s.partials, ev.Speaker)
-		s.print(s.dim(fmt.Sprintf("  %s %-6s %s", clock(l.At), l.Speaker, l.Text)))
+		s.show(Item{Kind: ItemTranscript, At: l.At, Speaker: l.Speaker, Text: l.Text,
+			Plain: s.dim(fmt.Sprintf("  %s %-6s %s", clock(l.At), l.Speaker, l.Text))})
+		s.appendTranscript(l)
 		if len(s.lines) == 1 {
 			_ = s.writeNotes(false) // a failure is shown in the feed
 		}
 	case NoticeEvent:
-		s.print(Clean(ev.Text))
+		s.notice(Clean(ev.Text))
 	case RecapEvent:
-		s.askRecap(time.Now())
+		s.askRecap(time.Now(), ev.Window)
+	case QuestionEvent:
+		s.askQuestion(ev.Text)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -196,12 +250,15 @@ func (s *state) handle(ev Event) {
 			icon, word = "🔇", "muted"
 			delete(s.partials, ev.Speaker) // its words in progress won't be finished
 		}
-		s.print(fmt.Sprintf("%s %s %s at %s", icon, ev.Speaker, word, clock(s.elapsed(time.Now()))))
+		s.notice(fmt.Sprintf("%s %s %s at %s", icon, ev.Speaker, word, clock(s.elapsed(time.Now()))))
 	}
 }
 
 // recapWindow is how far back a recap goes.
 func (s *state) recapWindow() time.Duration {
+	if s.recapWin > 0 {
+		return s.recapWin
+	}
 	if s.c.RecapWindow > 0 {
 		return s.c.RecapWindow
 	}
@@ -209,30 +266,34 @@ func (s *state) recapWindow() time.Duration {
 }
 
 // askRecap notes a recap request; it starts as soon as no call is in flight.
-func (s *state) askRecap(now time.Time) {
+func (s *state) askRecap(now time.Time, window time.Duration) {
 	if s.ending {
 		return
 	}
 	if s.recapAsked || (s.thinking && s.recapping) {
-		s.print(s.dim("📝 a recap is already on its way"))
+		s.info("📝 a recap is already on its way")
 		return
 	}
-	if len(recentLines(s.lines, s.elapsed(now), s.recapWindow())) == 0 {
-		s.print(s.dim("📝 nothing was said in the last " + WindowLabel(s.recapWindow())))
+	if window <= 0 {
+		window = s.recapWindow()
+	}
+	if len(recentLines(s.lines, s.elapsed(now), window)) == 0 {
+		s.info("📝 nothing was said in the last " + WindowLabel(window))
 		return
 	}
-	s.recapAsked = true
+	s.recapAsked, s.recapWin = true, window
 }
 
 func (s *state) startRecap(now time.Time) {
 	s.recapAsked = false
-	s.print(s.dim(fmt.Sprintf("📝 recapping the last %s (%s)…", WindowLabel(s.recapWindow()), s.c.Engine)))
+	s.info(fmt.Sprintf("📝 recapping the last %s (%s)…", WindowLabel(s.recapWindow()), s.c.Engine))
 	instructions, transcript := RecapPrompt(s.mem, s.lines, s.elapsed(now), s.recapWindow())
 	s.call(now, s.analysed, true, instructions, transcript)
 }
 
 // finishRecap shows a recap answer in the feed.
 func (s *state) finishRecap(r result) {
+	defer func() { s.recapWin = 0 }()
 	var recap struct {
 		Recap []string `json:"recap"`
 	}
@@ -242,19 +303,92 @@ func (s *state) finishRecap(r result) {
 	}
 	if err != nil {
 		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
-		s.print("⚠ recap failed: " + oneLine(msg, 200))
+		s.notice("⚠ recap failed: " + oneLine(msg, 200))
 		return
 	}
 	at := s.elapsed(time.Now())
 	points := cleanList(recap.Recap, maxRecapPoints)
 	if len(points) == 0 {
-		s.print(s.dim(fmt.Sprintf("📝 %s nothing notable in the last %s", clock(at), WindowLabel(s.recapWindow()))))
+		s.info(fmt.Sprintf("📝 %s nothing notable in the last %s", clock(at), WindowLabel(s.recapWindow())))
 		return
 	}
-	s.print(fmt.Sprintf("📝 %s Recap of the last %s:", clock(at), WindowLabel(s.recapWindow())))
+	s.notice(fmt.Sprintf("📝 %s Recap of the last %s:", clock(at), WindowLabel(s.recapWindow())))
 	for _, p := range points {
-		s.print("  • " + Clean(p))
+		s.show(Item{Kind: ItemAssist, At: at, Badge: "RECAP", Text: Clean(p), Plain: "  • " + Clean(p)})
 	}
+}
+
+// askQuestion shows a typed question in the feed and queues it; it starts as
+// soon as no other question is in flight.
+func (s *state) askQuestion(text string) {
+	q := Clean(strings.TrimSpace(text))
+	if q == "" {
+		return
+	}
+	s.show(Item{Kind: ItemTranscript, At: s.elapsed(time.Now()), Speaker: "you", Text: q, Plain: "› " + q})
+	s.questions = append(s.questions, q)
+}
+
+// maybeAsk starts the next waiting question when none is in flight.
+func (s *state) maybeAsk(now time.Time) {
+	if s.asking || s.ending || len(s.questions) == 0 {
+		return
+	}
+	q := s.questions[0]
+	s.questions = s.questions[1:]
+	s.askGen++
+	gen, think, answers := s.askGen, s.c.Think, s.answers
+	s.asking, s.askStart = true, now
+	at := s.elapsed(now)
+	instructions, transcript := QuestionPrompt(s.c.Context, s.mem, s.lines, at, q)
+	go func() {
+		answer, err := think(instructions, transcript)
+		select {
+		case answers <- qaResult{gen: gen, question: q, at: at, answer: answer, err: err}:
+		default: // only abandoned calls can find the buffer full
+		}
+	}()
+}
+
+// finishQuestion shows an answer, keeps it in the memory and writes the notes.
+func (s *state) finishQuestion(r qaResult) {
+	if r.gen != s.askGen || !s.asking {
+		return
+	}
+	s.asking = false
+	var reply struct {
+		Answer string `json:"answer"`
+		Source string `json:"source"`
+	}
+	err := r.err
+	if err == nil {
+		err = parseJSON(r.answer, &reply)
+	}
+	if err == nil && strings.TrimSpace(reply.Answer) == "" {
+		err = errors.New("empty answer")
+	}
+	if err != nil {
+		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
+		s.notice("⚠ question failed: " + oneLine(msg, 200))
+		return
+	}
+	qa := QA{Question: r.question, Answer: Clean(strings.TrimSpace(reply.Answer)), Source: Clean(strings.TrimSpace(reply.Source)), At: r.at}
+	qa.General = qa.Source == "general"
+	s.mem.QA = append(s.mem.QA, qa)
+	it := Item{Kind: ItemAssist, At: s.elapsed(time.Now()), Badge: "ANSWER", Text: qa.Answer}
+	line := fmt.Sprintf("💬 %s Answer: %s", clock(it.At), qa.Answer)
+	switch {
+	case qa.General:
+		it.Note = "general knowledge"
+	case qa.Source != "":
+		it.Note = qa.Source
+	}
+	if it.Note != "" {
+		line += s.dim(" — " + it.Note)
+	}
+	it.Plain = line
+	s.show(it)
+	_ = s.writeNotes(false) // a failure is shown in the feed
 }
 
 // interval is the wait between updates, doubled after each failure.
@@ -267,6 +401,7 @@ func (s *state) interval() time.Duration {
 }
 
 func (s *state) maybeStart(now time.Time) {
+	s.maybeAsk(now)
 	if !s.thinking && s.recapAsked {
 		s.startRecap(now)
 		return
@@ -317,26 +452,31 @@ func (s *state) finish(r result) {
 		s.failures++
 		// Harness errors already start with "<engine> failed: ".
 		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
-		s.print(fmt.Sprintf("⚠ %s failed: %s; next try in %s", s.c.Engine, oneLine(msg, 200), s.interval().Round(time.Second)))
+		s.notice(fmt.Sprintf("⚠ %s failed: %s; next try in %s", s.c.Engine, oneLine(msg, 200), s.interval().Round(time.Second)))
 		return
 	}
 	s.failures = 0
 	s.analysed = r.upto
 	at := s.elapsed(time.Now())
 	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
+	s.board()
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
-		line := fmt.Sprintf("%s %s %s: %s", l.icon, clock(at), l.label, Clean(sg.Text))
-		if sg.Priority == High {
+		it := Item{Kind: ItemAssist, At: at, Badge: suggestionBadges[sg.Type], Text: Clean(sg.Text), High: sg.Priority == High}
+		line := fmt.Sprintf("%s %s %s: %s", l.icon, clock(at), l.label, it.Text)
+		if it.High {
 			line = "‼ " + line
 		}
 		if note := suggestionNote(sg); note != "" {
-			line += s.dim(" — " + Clean(note))
+			it.Note = Clean(note)
+			line += s.dim(" — " + it.Note)
 		}
-		s.print(line)
+		it.Plain = line
+		s.show(it)
 	}
 	for _, d := range decisions {
-		s.print(fmt.Sprintf("✅ %s Decision: %s", clock(at), Clean(d)))
+		s.show(Item{Kind: ItemAssist, At: at, Badge: "DECISION", Text: Clean(d),
+			Plain: fmt.Sprintf("✅ %s Decision: %s", clock(at), Clean(d))})
 	}
 	_ = s.writeNotes(false) // a failure is shown in the feed
 	s.queueLookup(parsed, at)
@@ -367,7 +507,7 @@ func (s *state) queueLookup(r Reply, at time.Duration) {
 		keepWaiting()
 		if !s.limitShown {
 			s.limitShown = true
-			s.print(s.dim(fmt.Sprintf("📚 lookup limit reached (%d)", limit)))
+			s.info(fmt.Sprintf("📚 lookup limit reached (%d)", limit))
 		}
 		return
 	}
@@ -393,7 +533,8 @@ func (s *state) maybeLookup(now time.Time) {
 		return
 	}
 	s.looking = true
-	s.print(s.dim(fmt.Sprintf("🔎 %s Looking up: %s", clock(s.elapsed(now)), l.Query)))
+	s.show(Item{Kind: ItemAssist, At: s.elapsed(now), Badge: "LOOKUP", Text: l.Query,
+		Plain: s.dim(fmt.Sprintf("🔎 %s Looking up: %s", clock(s.elapsed(now)), l.Query))})
 	prompt := LibrarianPrompt(s.c.LibrarianInstructions, s.c.LibrarianTools, l, s.mem, now)
 	research, results := s.c.Research, s.lookupResults
 	go func() {
@@ -419,7 +560,7 @@ func (s *state) showRefused(calls []string) {
 		}
 		shown = append(shown, oneLine(c, 80))
 	}
-	s.print(s.dim(fmt.Sprintf("📚 refused %d tool call(s) not in librarian.allowed_tools: %s", len(calls), strings.Join(shown, ", "))))
+	s.info(fmt.Sprintf("📚 refused %d tool call(s) not in librarian.allowed_tools: %s", len(calls), strings.Join(shown, ", ")))
 }
 
 // finishLookup merges a librarian answer into the memory, the feed and the
@@ -433,12 +574,14 @@ func (s *state) finishLookup(r lookupResult) {
 		f, err = ParseFinding(r.reply.Answer)
 	}
 	if err != nil {
-		s.print("⚠ librarian failed: " + oneLine(err.Error(), 200))
+		s.notice("⚠ librarian failed: " + oneLine(err.Error(), 200))
 		return
 	}
 	f.Query, f.At = r.lookup.Query, s.elapsed(time.Now())
 	s.mem.AddFinding(f)
+	s.board()
 	if f.Found {
+		it := Item{Kind: ItemAssist, At: f.At, Badge: "LIBRARIAN", Text: f.Answer}
 		line := fmt.Sprintf("📚 %s Librarian: %s", clock(f.At), f.Answer)
 		var titles []string
 		for _, src := range f.Sources {
@@ -447,56 +590,87 @@ func (s *state) finishLookup(r lookupResult) {
 			}
 		}
 		if len(titles) > 0 {
-			line += " — " + strings.Join(titles, ", ")
+			it.Note = strings.Join(titles, ", ")
+			line += " — " + it.Note
 		}
-		s.print(line)
+		it.Plain = line
+		s.show(it)
 	} else {
-		s.print(s.dim("📚 nothing found for " + f.Query))
+		s.info("📚 nothing found for " + f.Query)
 	}
 	_ = s.writeNotes(false) // a failure is shown in the feed
 }
 
+func (s *state) watchdogLimit() time.Duration { return max(MinWatchdog, 6*s.c.Interval) }
+
+// questionWatchdog drops the question in flight once it took too long.
+func (s *state) questionWatchdog(now time.Time) {
+	limit := s.watchdogLimit()
+	if s.asking && now.Sub(s.askStart) >= limit {
+		s.askGen++ // its answer, if it ever comes, is ignored
+		s.asking = false
+		s.notice(fmt.Sprintf("⚠ question failed: %s did not answer in %s; dropped", s.c.Engine, limit.Round(time.Second)))
+	}
+}
+
 func (s *state) watchdog(now time.Time) {
-	limit := max(MinWatchdog, 6*s.c.Interval)
+	limit := s.watchdogLimit()
+	s.questionWatchdog(now)
 	if !s.thinking || now.Sub(s.thinkStart) < limit {
 		return
 	}
 	s.gen++ // its answer, if it ever comes, is ignored
 	s.thinking = false
 	if s.recapping { // a lost recap does not slow the updates down
-		s.print(fmt.Sprintf("⚠ recap failed: %s did not answer in %s", s.c.Engine, limit.Round(time.Second)))
+		s.recapWin = 0
+		s.notice(fmt.Sprintf("⚠ recap failed: %s did not answer in %s", s.c.Engine, limit.Round(time.Second)))
 		return
 	}
 	s.failures++
-	s.print(fmt.Sprintf("⚠ %s did not answer in %s; skipping this update", s.c.Engine, limit.Round(time.Second)))
+	s.notice(fmt.Sprintf("⚠ %s did not answer in %s; skipping this update", s.c.Engine, limit.Round(time.Second)))
 }
 
-// end waits for the update in progress, then writes the final notes. It
-// ignores lookups: one in flight is not waited for, and none starts.
+// end waits for the update and the question in progress, then writes the
+// final notes. Questions still queued are left unanswered. It ignores
+// lookups: one in flight is not waited for, and none starts.
 func (s *state) end() error {
+	defer func() {
+		if s.c.Final != nil {
+			s.c.Final(s.mem, s.c.Notes, s.finalWritten)
+		}
+	}()
 	s.ending = true
-	s.clearStatus()
+	s.c.View.Status(Status{}) // clears the status line
 	if s.thinking {
-		s.print(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))
-		select {
-		case r := <-s.waitCurrent():
-			s.finish(r)
-		case <-s.c.Force:
+		s.notice(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))
+		r, ok := s.await(s.waitCurrent())
+		if !ok {
 			return s.writeNotes(false)
 		}
+		s.finish(r)
+	}
+	if s.asking {
+		s.notice(fmt.Sprintf("⏳ finishing the current answer (%s)…", s.c.Engine))
+		for s.asking {
+			if _, ok := s.await(nil); !ok {
+				return s.writeNotes(false)
+			}
+		}
+	}
+	if n := len(s.questions); n > 0 {
+		s.info(fmt.Sprintf("%d question(s) left unanswered", n))
 	}
 	if wordCount(s.lines) < minFinalWords {
 		if len(s.lines) > 0 {
-			s.print("Too little was said for a final summary.")
+			s.notice("Too little was said for a final summary.")
 		}
 		return s.writeNotes(false)
 	}
 
-	s.print(fmt.Sprintf("⏳ writing the final notes (%s)…", s.c.Engine))
+	s.notice(fmt.Sprintf("⏳ writing the final notes (%s)…", s.c.Engine))
 	instructions, transcript := FinalPrompt(s.c.Context, s.mem, s.lines)
 	s.call(time.Now(), len(s.lines), false, instructions, transcript)
-	select {
-	case r := <-s.waitCurrent():
+	if r, ok := s.await(s.waitCurrent()); ok {
 		s.thinking = false
 		answer, err := r.answer, r.err
 		var parsed Reply
@@ -504,17 +678,56 @@ func (s *state) end() error {
 			parsed, err = Parse(answer)
 		}
 		if err != nil {
-			s.print(fmt.Sprintf("⚠ final notes failed: %s; the notes keep the live summary", oneLine(err.Error(), 160)))
+			s.notice(fmt.Sprintf("⚠ final notes failed: %s; the notes keep the live summary", oneLine(err.Error(), 160)))
 			return s.writeNotes(false)
 		}
 		s.mem.ApplyFinal(parsed)
+		s.board()
 		if err := s.writeNotes(true); err != nil {
 			return err
 		}
-		s.print("✓ Final notes written to " + s.c.Notes)
+		s.finalWritten = true
+		s.notice("✓ Final notes written to " + s.c.Notes)
 		return nil
-	case <-s.c.Force:
-		return s.writeNotes(false)
+	}
+	return s.writeNotes(false)
+}
+
+// await waits for a call's result, reading Input meanwhile so that a sender
+// never blocks (a question or recap is refused, a mute is dropped). It
+// takes the answer of the question in flight, and refreshes the status on
+// each tick. With a nil res, it returns after that answer or the question
+// watchdog. false means Force was closed first.
+func (s *state) await(res <-chan result) (result, bool) {
+	input := s.c.Input
+	ticker := time.NewTicker(Tick)
+	defer ticker.Stop()
+	for {
+		select {
+		case r := <-res:
+			return r, true
+		case <-s.c.Force:
+			return result{}, false
+		case a := <-s.answers:
+			s.finishQuestion(a)
+			if res == nil && !s.asking {
+				return result{}, true
+			}
+		case now := <-ticker.C:
+			s.questionWatchdog(now)
+			if res == nil && !s.asking {
+				return result{}, true
+			}
+			s.status(now)
+		case ev, ok := <-input:
+			if !ok {
+				input = nil
+				continue
+			}
+			if ev.Kind == QuestionEvent || ev.Kind == RecapEvent {
+				s.info("the meeting is over: nothing more is answered")
+			}
+		}
 	}
 }
 
@@ -541,55 +754,65 @@ func (s *state) writeNotes(final bool) error {
 	err := WriteNotes(s.c.Notes, Render(s.mem, s.header, final, s.elapsed(time.Now())))
 	if err != nil && !s.notesErr {
 		s.notesErr = true
-		s.print("⚠ cannot write the notes: " + err.Error())
+		s.notice("⚠ cannot write the notes: " + err.Error())
 	}
 	return err
 }
 
-func (s *state) print(line string) {
-	s.clearStatus()
-	fmt.Fprintln(s.c.Out, line)
+// appendTranscript saves a line to the transcript file, creating it with the
+// header at the first line. A failure is shown once in the feed.
+func (s *state) appendTranscript(l Line) {
+	if s.c.Transcript == "" {
+		return
+	}
+	var err error
+	if !s.transcriptOn {
+		if err = WriteTranscript(s.c.Transcript, s.header, s.lines); err == nil {
+			s.transcriptOn = true
+		}
+	} else {
+		err = AppendTranscript(s.c.Transcript, l)
+	}
+	if err != nil && !s.transcriptErr {
+		s.transcriptErr = true
+		s.notice("⚠ cannot write the transcript: " + err.Error())
+	}
+}
+
+// suggestionBadges are the feed badges of the suggestion types.
+var suggestionBadges = map[string]string{TypeQuestion: "ASK", TypeAnswer: "ANSWER", TypeMissed: "MISSED", TypeRisk: "RISK"}
+
+// show adds an item, then refreshes the status: what a line changes (a side
+// muted, a partial replaced, a call over) must not linger under it.
+func (s *state) show(it Item) {
+	s.c.View.Show(it)
 	s.status(time.Now())
 }
 
-func (s *state) clearStatus() {
-	if s.c.Interactive {
-		fmt.Fprint(s.c.Out, "\r\033[K")
-	}
-}
+// notice shows text as is, info dimmed.
+func (s *state) notice(text string) { s.show(Item{Kind: ItemNotice, Text: text, Plain: text}) }
+func (s *state) info(text string)   { s.show(Item{Kind: ItemInfo, Text: text, Plain: s.dim(text)}) }
 
 func (s *state) status(now time.Time) {
-	if !s.c.Interactive {
-		return
+	st := Status{Elapsed: s.elapsed(now), Engine: s.c.Engine, State: "listening", Looking: s.looking, Asking: s.asking,
+		Muted: map[string]bool{}, PartialSpeaker: s.lastSpeaker, Partial: s.partials[s.lastSpeaker]}
+	for side, m := range s.muted {
+		st.Muted[side] = m
 	}
-	line := "● ASSIST " + clock(s.elapsed(now))
-	for _, side := range []string{"me", "others"} {
-		if s.muted[side] {
-			line += "  " + side + " (muted)"
+	if s.thinking {
+		st.State, st.Busy = "thinking", now.Sub(s.thinkStart)
+		if s.recapping {
+			st.State = "recapping"
 		}
 	}
-	if p := s.partials[s.lastSpeaker]; p != "" {
-		line += fmt.Sprintf("  %s ▸ %q", s.lastSpeaker, lastRunes(p, 60))
-	}
-	if s.thinking && s.recapping {
-		line += fmt.Sprintf("  · recapping %ds (%s)", int(now.Sub(s.thinkStart).Seconds()), s.c.Engine)
-	} else if s.thinking {
-		line += fmt.Sprintf("  · thinking %ds (%s)", int(now.Sub(s.thinkStart).Seconds()), s.c.Engine)
-	} else {
-		line += "  · listening"
-	}
-	var keys []string
-	if s.c.MuteHint != "" {
-		keys = append(keys, s.c.MuteHint+": mute")
-	}
-	if s.c.RecapKey != "" {
-		keys = append(keys, s.c.RecapKey+": recap")
-	}
-	hint := "   (Ctrl+C to stop)"
-	if len(keys) > 0 {
-		hint = "   (" + strings.Join(append(keys, "Ctrl+C: stop"), " · ") + ")"
-	}
-	fmt.Fprint(s.c.Out, "\r\033[K"+line+hint)
+	s.c.View.Status(st)
+}
+
+// board sends the memory to the dashboard.
+func (s *state) board() {
+	m := s.mem
+	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources)})
 }
 
 func (s *state) dim(text string) string {

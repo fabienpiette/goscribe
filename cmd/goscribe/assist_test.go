@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
@@ -25,6 +28,7 @@ import (
 	"goscribe/internal/harness"
 	"goscribe/internal/realtime"
 	"goscribe/internal/recorder"
+	"goscribe/internal/tui"
 	"goscribe/pkg/config"
 )
 
@@ -732,5 +736,311 @@ func TestStreamSidesQuotaFallsBackToLocal(t *testing.T) {
 	}
 	if !notice {
 		t.Errorf("no switch notice; events: %+v", got)
+	}
+}
+
+func TestUseTUI(t *testing.T) {
+	if useTUI(true, os.Stdin, os.Stdout) {
+		t.Error("-plain must turn the full-screen view off")
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if useTUI(false, os.Stdin, w) {
+		t.Error("a piped stdout must get the plain output")
+	}
+}
+
+func TestAssistPlainFlag(t *testing.T) {
+	_, stderr, code := assist(t, "-h")
+	if code != 0 || !strings.Contains(stderr, "-plain") {
+		t.Errorf("exit = %d, -h must list -plain:\n%s", code, stderr)
+	}
+	t.Setenv("HOME", t.TempDir())
+	_, stderr, code = assist(t, "-plain", "-provider", "mistral")
+	if code != 2 || !strings.Contains(stderr, "invalid provider") {
+		t.Errorf("-plain must be accepted: exit = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestStartupNotices(t *testing.T) {
+	got := startupNotices("me · fake", "n.md", "n.transcript.md", "Ctrl+C to stop", []string{"Acme rollback runbook review"}, assistant.WarnContextBytes+2048)
+	want := []string{
+		"Assist me · fake → n.md, transcript n.transcript.md (Ctrl+C to stop)",
+		"⚠ 1 keyterm(s) over 20 characters left out (live speech-to-text refuses them): Acme rollback runbook review",
+		fmt.Sprintf("⚠ the context is %d KB: every update resends it, which is slower and costlier", (assistant.WarnContextBytes+2048)>>10),
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("notices:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if got := startupNotices("h", "n.md", "t.md", "k", nil, 10); len(got) != 1 {
+		t.Errorf("no warnings expected: %q", got)
+	}
+}
+
+func TestPrintEndSummary(t *testing.T) {
+	var b bytes.Buffer
+	printEndSummary(&b, assistant.Memory{Summary: "Shipping Monday.", ActionItems: []string{"Sam: write the runbook", "Alex: review it"}}, true, "n.md", "n.transcript.md")
+	want := "Shipping Monday.\n\nAction items:\n- Sam: write the runbook\n- Alex: review it\n\nNotes: n.md\nTranscript: n.transcript.md\n"
+	if b.String() != want {
+		t.Errorf("summary:\n%q\nwant:\n%q", b.String(), want)
+	}
+	b.Reset()
+	printEndSummary(&b, assistant.Memory{}, false, "n.md", "n.transcript.md")
+	if want := "Notes: n.md\nTranscript: n.transcript.md\n"; b.String() != want {
+		t.Errorf("empty summary:\n%q\nwant:\n%q", b.String(), want)
+	}
+	b.Reset()
+	printEndSummary(&b, assistant.Memory{Summary: "Shipping Monday."}, false, "n.md", "")
+	if want := "Live summary (final notes not written):\nShipping Monday.\n\nNotes: n.md\n"; b.String() != want {
+		t.Errorf("live summary:\n%q\nwant:\n%q", b.String(), want)
+	}
+	// Model output reaches the real terminal here: no escape sequences.
+	b.Reset()
+	printEndSummary(&b, assistant.Memory{Summary: "Ship\x1b]52;c;aGk=\a Monday.\r", ActionItems: []string{"Sam:\x1b[2J write it"}}, true, "n.md", "")
+	if strings.ContainsAny(b.String(), "\x1b\a\r") {
+		t.Errorf("escape sequences printed: %q", b.String())
+	}
+}
+
+// fakeProgram stands for the Bubble Tea program: it records the messages and
+// runs until Run's end is announced.
+type fakeProgram struct {
+	model  tea.Model
+	mu     sync.Mutex
+	msgs   []tea.Msg
+	ended  chan struct{}
+	once   sync.Once
+	onExit func() // called when Run returns
+	// panicOn, when set, makes Send panic on the messages it accepts.
+	panicOn func(tea.Msg) bool
+	// runErr, when set, makes Run fail at once, like a screen that cannot start.
+	runErr error
+}
+
+func (p *fakeProgram) Send(msg tea.Msg) {
+	if p.panicOn != nil && p.panicOn(msg) {
+		panic("boom in the view")
+	}
+	p.mu.Lock()
+	p.msgs = append(p.msgs, msg)
+	p.mu.Unlock()
+	if _, ok := msg.(tui.EndedMsg); ok {
+		p.once.Do(func() { close(p.ended) })
+	}
+}
+
+func (p *fakeProgram) Run() (tea.Model, error) {
+	if p.runErr != nil {
+		return p.model, p.runErr
+	}
+	<-p.ended
+	if p.onExit != nil {
+		p.onExit()
+	}
+	return p.model, nil
+}
+
+func (p *fakeProgram) items() []assistant.Item {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var items []assistant.Item
+	for _, m := range p.msgs {
+		if it, ok := m.(tui.ItemMsg); ok {
+			items = append(items, assistant.Item(it))
+		}
+	}
+	return items
+}
+
+func newFakeProgram(p *fakeProgram) func(tea.Model) teaProgram {
+	return func(m tea.Model) teaProgram {
+		p.model, p.ended = m, make(chan struct{})
+		return p
+	}
+}
+
+// Review Focus 1: while the screen is on, the startup lines go to the feed and
+// nothing is written to stdout; the end summary comes after.
+func TestAssistTUIStartupNoticesGoToFeed(t *testing.T) {
+	notes := filepath.Join(t.TempDir(), "n.md")
+	var stdout bytes.Buffer
+	var atExit string
+	p := &fakeProgram{onExit: func() { atExit = stdout.String() }}
+	events := make(chan assistant.Event)
+	close(events)
+	notices := startupNotices("me · fake", notes, assistant.TranscriptPath(notes), "k", []string{"Acme rollback runbook review"}, 0)
+	s := tuiSession{
+		cfg:       assistant.Config{Notes: notes, Transcript: assistant.TranscriptPath(notes), Engine: "fake", Interval: time.Second, Think: func(_, _ string) (string, error) { return "", nil }},
+		notices:   notices,
+		sides:     []string{"me"},
+		toggle:    make(chan string, 1),
+		interrupt: func() {},
+		start:     newFakeProgram(p),
+	}
+	if err := s.run(events, &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if atExit != "" {
+		t.Errorf("stdout written while the screen was on: %q", atExit)
+	}
+	items := p.items()
+	if len(items) < len(notices) {
+		t.Fatalf("items = %+v", items)
+	}
+	for i, n := range notices {
+		if items[i].Kind != assistant.ItemNotice || items[i].Text != n {
+			t.Errorf("item %d = %+v, want the notice %q", i, items[i], n)
+		}
+	}
+	if !strings.Contains(stdout.String(), "Notes: "+notes) {
+		t.Errorf("end summary missing:\n%s", stdout.String())
+	}
+}
+
+// Review Focus 2: Ctrl+C twice while the model never answers ends at once and
+// leaves the live notes on disk.
+func TestTUIInterruptTwiceForces(t *testing.T) {
+	origTick := assistant.Tick
+	assistant.Tick = 10 * time.Millisecond
+	defer func() { assistant.Tick = origTick }()
+
+	ctx, force, interrupt, stop := watchSignalsInterruptible()
+	defer stop()
+	thinking := make(chan struct{}, 1)
+	never := make(chan struct{})
+	defer close(never)
+	think := func(_, _ string) (string, error) {
+		select {
+		case thinking <- struct{}{}:
+		default:
+		}
+		<-never
+		return "", nil
+	}
+
+	events := make(chan assistant.Event, 4)
+	events <- assistant.Event{Kind: assistant.LineEvent, Speaker: "me", Text: "we ship the migration on monday unless the rollback plan is not ready by friday"}
+	go func() {
+		<-ctx.Done()
+		close(events)
+	}()
+
+	notes := filepath.Join(t.TempDir(), "n.md")
+	p := &fakeProgram{}
+	s := tuiSession{
+		cfg:       assistant.Config{Notes: notes, Transcript: assistant.TranscriptPath(notes), Engine: "fake", Interval: 5 * time.Millisecond, Think: think, Force: force},
+		sides:     []string{"me"},
+		toggle:    make(chan string, 1),
+		interrupt: interrupt,
+		start:     newFakeProgram(p),
+	}
+	done := make(chan error, 1)
+	var stdout bytes.Buffer
+	go func() { done <- s.run(events, &stdout, io.Discard) }()
+
+	select {
+	case <-thinking:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no update started")
+	}
+	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
+	p.model.Update(ctrlC)
+	p.model.Update(ctrlC)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second Ctrl+C did not end the run")
+	}
+	if _, err := os.Stat(notes); err != nil {
+		t.Errorf("live notes missing: %v", err)
+	}
+}
+
+// A stray print while the screen is on (an API retry message) goes to the feed.
+func TestCaptureStdio(t *testing.T) {
+	origOut, origErr := os.Stdout, os.Stderr
+	var lines []string
+	restore := captureStdio(func(line string) { lines = append(lines, line) })
+	fmt.Println("  ⚠ Request failed, retrying in 1s")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "stderr too")
+	restore()
+	restore()
+	if os.Stdout != origOut || os.Stderr != origErr {
+		t.Fatal("stdout and stderr not restored")
+	}
+	if strings.Join(lines, "|") != "⚠ Request failed, retrying in 1s|stderr too" {
+		t.Errorf("lines = %q", lines)
+	}
+}
+
+// A panic while Run shows the meeting must end the screen (EndedMsg restores
+// the terminal) and come back as an error, with the stack on stderr after.
+func TestTUIRunPanicEndsScreen(t *testing.T) {
+	notes := filepath.Join(t.TempDir(), "n.md")
+	var stdout, stderr bytes.Buffer
+	var stderrAtExit string
+	p := &fakeProgram{
+		panicOn: func(m tea.Msg) bool { _, ok := m.(tui.BoardMsg); return ok },
+		onExit:  func() { stderrAtExit = stderr.String() },
+	}
+	events := make(chan assistant.Event)
+	s := tuiSession{
+		cfg:       assistant.Config{Notes: notes, Engine: "fake", Interval: time.Second, Think: func(_, _ string) (string, error) { return "", nil }},
+		toggle:    make(chan string, 1),
+		interrupt: func() {},
+		start:     newFakeProgram(p),
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.run(events, &stdout, &stderr) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a panic in Run left the screen on")
+	}
+	if err == nil || !strings.Contains(err.Error(), "boom in the view") {
+		t.Errorf("err = %v", err)
+	}
+	if stderrAtExit != "" {
+		t.Errorf("stderr written while the screen was on: %q", stderrAtExit)
+	}
+	if !strings.Contains(stderr.String(), "panic: boom in the view") || !strings.Contains(stderr.String(), "goroutine") {
+		t.Errorf("panic and stack missing on stderr:\n%s", stderr.String())
+	}
+}
+
+// When the screen cannot run, the meeting ends as with Ctrl+C and the reason
+// goes to the injected stderr.
+func TestTUIScreenFailureEndsMeeting(t *testing.T) {
+	notes := filepath.Join(t.TempDir(), "n.md")
+	events := make(chan assistant.Event)
+	var once sync.Once
+	p := &fakeProgram{runErr: errors.New("no tty")}
+	s := tuiSession{
+		cfg:       assistant.Config{Notes: notes, Engine: "fake", Interval: time.Second, Think: func(_, _ string) (string, error) { return "", nil }},
+		toggle:    make(chan string, 1),
+		interrupt: func() { once.Do(func() { close(events) }) },
+		start: func(m tea.Model) teaProgram {
+			p.model, p.ended = m, make(chan struct{})
+			return p
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	if err := s.run(events, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "The screen stopped (no tty)") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Notes: "+notes) {
+		t.Errorf("stdout = %q", stdout.String())
 	}
 }

@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -388,5 +389,74 @@ func TestLongKeyterms(t *testing.T) {
 	got := LongKeyterms([]string{"Acme", "Globex security-audit skill", " " + strings.Repeat("y", 21) + " ", strings.Repeat("z", 20)})
 	if strings.Join(got, "|") != "Globex security-audit skill|"+strings.Repeat("y", 21) {
 		t.Errorf("LongKeyterms = %q", got)
+	}
+}
+
+func TestCyclePromptIncludesQA(t *testing.T) {
+	m := Memory{QA: []QA{{Question: "what did Alex say about the deadline?", Answer: "Friday", Source: "research"}}}
+	instr, _ := CyclePrompt("", m, nil, []Line{{Speaker: "me", Text: "hi"}}, false)
+	for _, want := range []string{"The user asked during the meeting", "Q: what did Alex say", "A: Friday"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("instructions miss %q:\n%s", want, instr)
+		}
+	}
+	if instr, _ := CyclePrompt("", Memory{}, nil, nil, false); strings.Contains(instr, "The user asked") {
+		t.Error("no QA block without questions")
+	}
+}
+
+func TestQuestionPrompt(t *testing.T) {
+	lines := []Line{{Speaker: "others", At: time.Minute, Text: "old talk"}, {Speaker: "me", At: 9 * time.Minute, Text: "recent talk"}}
+	instr, tr := QuestionPrompt("Acme background", Memory{Summary: "We plan."}, lines, 10*time.Minute, "What is an SLO?")
+	if strings.Contains(tr, "old talk") || !strings.Contains(tr, "recent talk") {
+		t.Errorf("transcript must hold the last 5 minutes:\n%s", tr)
+	}
+	for _, want := range []string{"untrusted", "Acme background", "Summary: We plan.", `"source": "<context file>|research|general"`, "language of the question", "What is an SLO?"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("instructions miss %q:\n%s", want, instr)
+		}
+	}
+}
+
+// sixQA are typed questions; prompts keep the last recentQA (5).
+func sixQA() []QA {
+	var qas []QA
+	for i := 1; i <= 6; i++ {
+		qas = append(qas, QA{Question: fmt.Sprintf("question %d?", i), Answer: fmt.Sprintf("answer %d", i)})
+	}
+	return qas
+}
+
+func TestQuestionPromptIncludesQA(t *testing.T) {
+	instr, _ := QuestionPrompt("", Memory{QA: sixQA()}, nil, time.Minute, "and the one before?")
+	if !strings.Contains(instr, "- Q: question 6? → A: answer 6") || !strings.Contains(instr, "- Q: question 2? → A: answer 2") {
+		t.Errorf("instructions miss the last questions:\n%s", instr)
+	}
+	if strings.Contains(instr, "question 1?") {
+		t.Errorf("only the last %d questions are sent:\n%s", recentQA, instr)
+	}
+	if strings.Index(instr, "question 6?") > strings.Index(instr, "and the one before?") {
+		t.Error("the earlier questions go before the new one")
+	}
+	if instr, _ := QuestionPrompt("", Memory{}, nil, time.Minute, "q?"); strings.Contains(instr, "The user asked earlier") {
+		t.Error("no QA block without questions")
+	}
+}
+
+func TestFinalPromptIncludesQA(t *testing.T) {
+	instr, _ := FinalPrompt("", Memory{QA: sixQA()}, []Line{{Speaker: "me", Text: "hi"}})
+	if !strings.Contains(instr, "- Q: question 6? → A: answer 6") || strings.Contains(instr, "question 1?") {
+		t.Errorf("instructions must hold the last %d questions:\n%s", recentQA, instr)
+	}
+}
+
+func TestRenderQuestionsSection(t *testing.T) {
+	m := Memory{Research: []Finding{{Query: "q", Found: false}}, QA: []QA{{Question: "What is an SLO?", Answer: "A target", Source: "general", At: 12*time.Minute + 40*time.Second}}}
+	out := Render(m, "h", false, time.Hour)
+	if !strings.Contains(out, "## Questions") || !strings.Contains(out, "- [00:12:40] Q: What is an SLO? — A: A target _(general)_") {
+		t.Errorf("notes:\n%s", out)
+	}
+	if strings.Index(out, "## Research") > strings.Index(out, "## Questions") {
+		t.Error("Questions goes after Research")
 	}
 }
