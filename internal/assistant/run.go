@@ -18,14 +18,23 @@ const (
 	MuteEvent                      // a side was muted or unmuted (Muted)
 	RecapEvent                     // the user asked for a recap of the last minutes
 	QuestionEvent                  // the user typed a question (Text)
+	FixEvent                       // the user typed a /fix command (Fix)
 )
+
+// FixRequest is a parsed /fix command: Op is "add", "list", "rm", "yes" or
+// "no"; N is 0 for the latest or none given.
+type FixRequest struct {
+	Op, Wrong, Right string
+	N                int
+}
 
 // Event is what the transcription side sends to Run.
 type Event struct {
 	Kind    EventKind
 	Speaker string // "me" or "others"
 	Text    string
-	Muted   bool // MuteEvent: the side is now muted
+	Muted   bool       // MuteEvent: the side is now muted
+	Fix     FixRequest // FixEvent: what the user asked
 	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
 	Window time.Duration
 }

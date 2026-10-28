@@ -24,6 +24,27 @@ func TestParseCommand(t *testing.T) {
 		{in: "/recap 10m", want: Command{Name: "recap", Window: 10 * time.Minute}},
 		{in: "/recap -1m", wantErr: "usage: /recap [duration], e.g. /recap 10m"},
 		{in: "/recap soon", wantErr: "usage: /recap [duration], e.g. /recap 10m"},
+		{in: "/fix", want: Command{Name: "fix", Op: "list"}},
+		{in: "/fix cash cache", want: Command{Name: "fix", Op: "add", Wrong: "cash", Right: "cache"}},
+		{in: `/fix "dark mood" "dark mode"`, want: Command{Name: "fix", Op: "add", Wrong: "dark mood", Right: "dark mode"}},
+		{in: `/fix "yes" "yeah"`, want: Command{Name: "fix", Op: "add", Wrong: "yes", Right: "yeah"}},
+		{in: `/fix "rm" cache`, want: Command{Name: "fix", Op: "add", Wrong: "rm", Right: "cache"}},
+		{in: "/fix rm 2", want: Command{Name: "fix", Op: "rm", N: 2}},
+		{in: "/fix rm", wantErr: "usage: /fix rm <n>"},
+		{in: "/fix rm 0", wantErr: "usage: /fix rm <n>"},
+		{in: "/fix rm x", wantErr: "usage: /fix rm <n>"},
+		{in: "/fix yes", want: Command{Name: "fix", Op: "yes"}},
+		{in: "/fix no", want: Command{Name: "fix", Op: "no"}},
+		{in: "/fix yes 2", want: Command{Name: "fix", Op: "yes", N: 2}},
+		{in: "/fix no 3", want: Command{Name: "fix", Op: "no", N: 3}},
+		{in: "/fix yes x", wantErr: "usage: /fix yes|no [n]"},
+		{in: "/fix no 0", wantErr: "usage: /fix yes|no [n]"},
+		{in: "/fix yes 1 2", wantErr: "usage: /fix yes|no [n]"},
+		{in: `/fix "dark mood dark mode`, wantErr: "usage: /fix <wrong> <right>"},
+		{in: "/fix cash", wantErr: "usage: /fix <wrong> <right>"},
+		{in: "/fix a b c", wantErr: "usage: /fix <wrong> <right>"},
+		{in: "/fix a a", wantErr: "the fix changes nothing"},
+		{in: `/fix cash ""`, wantErr: "usage: /fix <wrong> <right>"},
 		{in: "/frobnicate", wantErr: "unknown command /frobnicate: type /help"},
 		{in: "/ what", wantErr: "unknown command /: type /help"},
 		{in: "", isEmpty: true},
@@ -54,7 +75,7 @@ func TestParseCommand(t *testing.T) {
 }
 
 func TestCommandsHelpListsEveryCommand(t *testing.T) {
-	for _, in := range []string{"/help", "/mute me", "/recap", "hello"} {
+	for _, in := range []string{"/help", "/mute me", "/recap", "/fix cash cache", "/fix", "/fix yes", "/fix rm 1", "hello"} {
 		cmd, err := ParseCommand(in)
 		if err != nil {
 			t.Fatalf("%q: %v", in, err)
