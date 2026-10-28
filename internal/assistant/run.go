@@ -217,6 +217,8 @@ type state struct {
 	// it. Reset when the next update starts.
 	lateFixes []Fix
 
+	proposals []proposal // fixes the model suggested, numbered from 1
+
 	finalWritten bool // the final notes were written
 
 	notesErr      bool
@@ -430,7 +432,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil)
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.answeredGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
 
@@ -476,6 +478,7 @@ func (s *state) finish(r result) {
 	at := s.elapsed(time.Now())
 	fixReply(&parsed, s.lateFixes)
 	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
+	guess, guessed := s.takeGuess(parsed.Fixes, at)
 	s.board()
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
@@ -494,6 +497,9 @@ func (s *state) finish(r result) {
 	for _, d := range decisions {
 		s.show(Item{Kind: ItemAssist, At: at, Badge: "DECISION", Text: Clean(d),
 			Plain: fmt.Sprintf("✅ %s Decision: %s", clock(at), Clean(d))})
+	}
+	if guessed {
+		s.showGuess(guess)
 	}
 	_ = s.writeNotes(false) // a failure is shown in the feed
 	s.queueLookup(parsed, at)
@@ -836,6 +842,11 @@ func (s *state) board() {
 	var fixes []string
 	for _, f := range m.Fixes {
 		fixes = append(fixes, fixLabel(f))
+	}
+	for _, p := range s.proposals {
+		if p.State == guessPending {
+			fixes = append(fixes, fixLabel(p.fix())+" ?")
+		}
 	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
 		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes})

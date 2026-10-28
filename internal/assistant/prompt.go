@@ -34,7 +34,7 @@ Reply with JSON only, no code fence, in this shape:
 
 // cycleShape is the reply shape; with the librarian, lookupsShape goes
 // before its closing brace.
-const cycleShape = `{"summary": "...", "decisions": ["..."], "open_questions": ["..."], "not_covered": ["..."], "suggestions": [{"type": "question|answer|missed|risk", "priority": "high|normal", "text": "...", "why": "...", "source": "..."}]`
+const cycleShape = `{"summary": "...", "decisions": ["..."], "open_questions": ["..."], "not_covered": ["..."], "suggestions": [{"type": "question|answer|missed|risk", "priority": "high|normal", "text": "...", "why": "...", "source": "..."}], "fixes": [{"wrong": "...", "right": "...", "why": "..."}]`
 
 const lookupsShape = `, "lookups": [{"query": "...", "why": "..."}]`
 
@@ -47,6 +47,7 @@ Rules:
 - "suggestions": 0 to 2 items, usually []. Suggest only what would change what the user says or decides in the next minutes, preferably something they could say as is. Skip points the new lines already raised. "text" at most 30 words, "why" at most 20 words.
 - "source": the context file used (as named in its "### file:" header), "research" for a research result, else "".
 - "priority": "high" only when the moment will soon pass (a decision about to be taken, an agenda item about to be dropped); else "normal".
+- "fixes": 0 or 1 item, usually []. Propose one only when a word in the new lines clashes with the meeting or the context and is very likely misheard (a sound-alike of a term, name or product from the context or the talk). "wrong" exactly as in the transcript, "right" as it should be written, "why" at most 12 words. Never one listed below as already fixed, suggested or rejected.
 %s- When the meeting wraps up or runs out of time ("we're out of time", "one last thing", "let's wrap up", goodbyes) and "not_covered" is not empty, suggest "missed" for the most important uncovered items, with priority "high".
 - Never repeat or rephrase an earlier suggestion.
 - Write in the language of the meeting.`
@@ -78,8 +79,9 @@ Rules:
 
 // CyclePrompt builds one update: the trusted instructions (rules, context,
 // memory) and the untrusted transcript part (earlier lines for continuity,
-// then the new lines). librarian lets the model ask lookups.
-func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool) (instructions, transcript string) {
+// then the new lines). librarian lets the model ask lookups; answered are
+// the fixes it suggested that wait for an answer or were rejected.
+func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool, answered []Fix) (instructions, transcript string) {
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
@@ -89,6 +91,13 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool
 	}
 	writeMemory(&b, m, asked)
 	writeFixes(&b, m.Fixes)
+	if len(answered) > 0 {
+		b.WriteString("Fixes already suggested or rejected (never propose these again):\n")
+		for _, f := range answered {
+			b.WriteString("- " + fixLabel(f) + "\n")
+		}
+		b.WriteString("\n")
+	}
 	writeQA(&b, m.QA, "The user asked during the meeting (do not suggest these again; build on the answers):")
 	if n := len(m.Suggestions); n > 0 {
 		b.WriteString("Already suggested (do not repeat or rephrase):\n")
