@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"goscribe/internal/assistant"
 	"goscribe/internal/tui"
@@ -81,16 +83,22 @@ type tuiSession struct {
 // watchSignals: Bubble Tea's own handler would quit on SIGTERM.
 func newTeaProgram(out *os.File) func(tea.Model) teaProgram {
 	return func(m tea.Model) teaProgram {
+		// The adaptive colors ask the terminal for its background (OSC 11) on
+		// first use. Ask now: inside Run, Bubble Tea's raw mode and stdin
+		// reader would race for the reply (a slow first frame, or the reply
+		// read as keys).
+		lipgloss.ColorProfile()
+		lipgloss.HasDarkBackground()
 		return tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(out), tea.WithoutSignalHandler())
 	}
 }
 
 // run shows the meeting until Run returns, then prints the end summary on
-// stdout. Nothing is written to stdout while the screen is on.
-func (s tuiSession) run(events <-chan assistant.Event, stdout io.Writer) error {
+// stdout. Nothing is written to stdout or stderr while the screen is on.
+func (s tuiSession) run(events <-chan assistant.Event, stdout, stderr io.Writer) error {
 	inputs := make(chan assistant.Event, 16)
 	// Both never block: Run reads Input only while it runs, and the toggle
-	// reader stops with the capture.
+	// reader in streamSides stops with ctx (first Ctrl+C) or force.
 	p := s.start(tui.New(tui.Options{
 		Send: func(e assistant.Event) {
 			select {
@@ -109,12 +117,11 @@ func (s tuiSession) run(events <-chan assistant.Event, stdout io.Writer) error {
 	}))
 
 	restore := func() {}
-	var screenGone atomic.Bool // the lines that come later go to the real stderr
+	var screenGone atomic.Bool // the lines that come later go to stderr
 	if s.stdio != nil {
-		errOut := os.Stderr
 		restore = s.stdio(func(line string) {
 			if screenGone.Load() {
-				fmt.Fprintln(errOut, line)
+				fmt.Fprintln(stderr, line)
 				return
 			}
 			p.Send(tui.ItemMsg(assistant.Item{Kind: assistant.ItemNotice, Text: line, Plain: line}))
@@ -127,12 +134,23 @@ func (s tuiSession) run(events <-chan assistant.Event, stdout io.Writer) error {
 	c.View, c.Input, c.Out, c.Interactive = tui.NewView(p.Send), inputs, io.Discard, false
 	c.Final = func(m assistant.Memory, _ string) { mem = m }
 	done := make(chan error, 1)
+	var crash string // a panic in Run and its stack, printed once the screen is gone
 	go func() {
+		var err error
+		// Bubble Tea recovers only its own goroutines: a panic here would
+		// leave the terminal in raw mode on the alternate screen.
+		defer func() {
+			if r := recover(); r != nil {
+				crash = fmt.Sprintf("panic: %v\n\n%s", r, debug.Stack())
+				err = fmt.Errorf("assist crashed: %v", r)
+			}
+			done <- err
+			p.Send(tui.EndedMsg{})
+		}()
 		for _, n := range s.notices {
 			c.View.Show(assistant.Item{Kind: assistant.ItemNotice, Text: n, Plain: n})
 		}
-		done <- assistant.Run(c, events)
-		p.Send(tui.EndedMsg{})
+		err = assistant.Run(c, events)
 	}()
 
 	_, perr := p.Run()
@@ -143,9 +161,12 @@ func (s tuiSession) run(events <-chan assistant.Event, stdout io.Writer) error {
 	case err = <-done:
 	default:
 		// The screen failed before the meeting ended: end it, as Ctrl+C would.
-		fmt.Fprintf(os.Stderr, "The screen stopped (%v): writing the final notes, Ctrl+C to quit at once\n", perr)
+		fmt.Fprintf(stderr, "The screen stopped (%v): writing the final notes, Ctrl+C to quit at once\n", perr)
 		s.interrupt()
 		err = <-done
+	}
+	if crash != "" {
+		fmt.Fprintln(stderr, crash)
 	}
 	printEndSummary(stdout, mem, c.Notes, c.Transcript)
 	return err

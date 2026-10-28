@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -802,9 +804,16 @@ type fakeProgram struct {
 	ended  chan struct{}
 	once   sync.Once
 	onExit func() // called when Run returns
+	// panicOn, when set, makes Send panic on the messages it accepts.
+	panicOn func(tea.Msg) bool
+	// runErr, when set, makes Run fail at once, like a screen that cannot start.
+	runErr error
 }
 
 func (p *fakeProgram) Send(msg tea.Msg) {
+	if p.panicOn != nil && p.panicOn(msg) {
+		panic("boom in the view")
+	}
 	p.mu.Lock()
 	p.msgs = append(p.msgs, msg)
 	p.mu.Unlock()
@@ -814,6 +823,9 @@ func (p *fakeProgram) Send(msg tea.Msg) {
 }
 
 func (p *fakeProgram) Run() (tea.Model, error) {
+	if p.runErr != nil {
+		return p.model, p.runErr
+	}
 	<-p.ended
 	if p.onExit != nil {
 		p.onExit()
@@ -858,7 +870,7 @@ func TestAssistTUIStartupNoticesGoToFeed(t *testing.T) {
 		interrupt: func() {},
 		start:     newFakeProgram(p),
 	}
-	if err := s.run(events, &stdout); err != nil {
+	if err := s.run(events, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if atExit != "" {
@@ -917,7 +929,7 @@ func TestTUIInterruptTwiceForces(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	var stdout bytes.Buffer
-	go func() { done <- s.run(events, &stdout) }()
+	go func() { done <- s.run(events, &stdout, io.Discard) }()
 
 	select {
 	case <-thinking:
@@ -955,5 +967,69 @@ func TestCaptureStdio(t *testing.T) {
 	}
 	if strings.Join(lines, "|") != "⚠ Request failed, retrying in 1s|stderr too" {
 		t.Errorf("lines = %q", lines)
+	}
+}
+
+// A panic while Run shows the meeting must end the screen (EndedMsg restores
+// the terminal) and come back as an error, with the stack on stderr after.
+func TestTUIRunPanicEndsScreen(t *testing.T) {
+	notes := filepath.Join(t.TempDir(), "n.md")
+	var stdout, stderr bytes.Buffer
+	var stderrAtExit string
+	p := &fakeProgram{
+		panicOn: func(m tea.Msg) bool { _, ok := m.(tui.BoardMsg); return ok },
+		onExit:  func() { stderrAtExit = stderr.String() },
+	}
+	events := make(chan assistant.Event)
+	s := tuiSession{
+		cfg:       assistant.Config{Notes: notes, Engine: "fake", Interval: time.Second, Think: func(_, _ string) (string, error) { return "", nil }},
+		toggle:    make(chan string, 1),
+		interrupt: func() {},
+		start:     newFakeProgram(p),
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.run(events, &stdout, &stderr) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a panic in Run left the screen on")
+	}
+	if err == nil || !strings.Contains(err.Error(), "boom in the view") {
+		t.Errorf("err = %v", err)
+	}
+	if stderrAtExit != "" {
+		t.Errorf("stderr written while the screen was on: %q", stderrAtExit)
+	}
+	if !strings.Contains(stderr.String(), "panic: boom in the view") || !strings.Contains(stderr.String(), "goroutine") {
+		t.Errorf("panic and stack missing on stderr:\n%s", stderr.String())
+	}
+}
+
+// When the screen cannot run, the meeting ends as with Ctrl+C and the reason
+// goes to the injected stderr.
+func TestTUIScreenFailureEndsMeeting(t *testing.T) {
+	notes := filepath.Join(t.TempDir(), "n.md")
+	events := make(chan assistant.Event)
+	var once sync.Once
+	p := &fakeProgram{runErr: errors.New("no tty")}
+	s := tuiSession{
+		cfg:       assistant.Config{Notes: notes, Engine: "fake", Interval: time.Second, Think: func(_, _ string) (string, error) { return "", nil }},
+		toggle:    make(chan string, 1),
+		interrupt: func() { once.Do(func() { close(events) }) },
+		start: func(m tea.Model) teaProgram {
+			p.model, p.ended = m, make(chan struct{})
+			return p
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	if err := s.run(events, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "The screen stopped (no tty)") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Notes: "+notes) {
+		t.Errorf("stdout = %q", stdout.String())
 	}
 }

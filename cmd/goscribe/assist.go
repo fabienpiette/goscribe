@@ -337,7 +337,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 			interrupt: interrupt,
 			start:     newTeaProgram(out),
 			stdio:     captureStdio,
-		}.run(events, stdout)
+		}.run(events, stdout, stderr)
 	} else {
 		err = assistant.Run(acfg, events)
 	}
