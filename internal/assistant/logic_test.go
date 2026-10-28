@@ -390,3 +390,40 @@ func TestLongKeyterms(t *testing.T) {
 		t.Errorf("LongKeyterms = %q", got)
 	}
 }
+
+func TestCyclePromptIncludesQA(t *testing.T) {
+	m := Memory{QA: []QA{{Question: "what did Alex say about the deadline?", Answer: "Friday", Source: "research"}}}
+	instr, _ := CyclePrompt("", m, nil, []Line{{Speaker: "me", Text: "hi"}}, false)
+	for _, want := range []string{"The user asked during the meeting", "Q: what did Alex say", "A: Friday"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("instructions miss %q:\n%s", want, instr)
+		}
+	}
+	if instr, _ := CyclePrompt("", Memory{}, nil, nil, false); strings.Contains(instr, "The user asked") {
+		t.Error("no QA block without questions")
+	}
+}
+
+func TestQuestionPrompt(t *testing.T) {
+	lines := []Line{{Speaker: "others", At: time.Minute, Text: "old talk"}, {Speaker: "me", At: 9 * time.Minute, Text: "recent talk"}}
+	instr, tr := QuestionPrompt("Acme background", Memory{Summary: "We plan."}, lines, 10*time.Minute, "What is an SLO?")
+	if strings.Contains(tr, "old talk") || !strings.Contains(tr, "recent talk") {
+		t.Errorf("transcript must hold the last 5 minutes:\n%s", tr)
+	}
+	for _, want := range []string{"untrusted", "Acme background", "Summary: We plan.", `"source": "<context file>|research|general"`, "language of the question", "What is an SLO?"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("instructions miss %q:\n%s", want, instr)
+		}
+	}
+}
+
+func TestRenderQuestionsSection(t *testing.T) {
+	m := Memory{Research: []Finding{{Query: "q", Found: false}}, QA: []QA{{Question: "What is an SLO?", Answer: "A target", Source: "general", At: 12*time.Minute + 40*time.Second}}}
+	out := Render(m, "h", false, time.Hour)
+	if !strings.Contains(out, "## Questions") || !strings.Contains(out, "- [00:12:40] Q: What is an SLO? — A: A target _(general)_") {
+		t.Errorf("notes:\n%s", out)
+	}
+	if strings.Index(out, "## Research") > strings.Index(out, "## Questions") {
+		t.Error("Questions goes after Research")
+	}
+}

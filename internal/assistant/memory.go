@@ -54,6 +54,15 @@ type Memory struct {
 	ActionItems   []string  // only from the final call
 	Research      []Finding // the librarian's results, oldest first
 	Asked         []string  // every lookup query accepted, for dedup and the limit
+	QA            []QA      // the user's typed questions and their answers, oldest first
+}
+
+// QA is a question the user typed and the answer they got.
+type QA struct {
+	Question, Answer string
+	Source           string // a context file, "research" or "general"
+	General          bool   // the answer is from general knowledge, not the meeting's sources
+	At               time.Duration
 }
 
 // Reply is what the model returns. A nil list means "unchanged"; an empty

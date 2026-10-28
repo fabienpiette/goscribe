@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -11,11 +12,12 @@ import (
 type EventKind int
 
 const (
-	PartialEvent EventKind = iota // words still being recognized
-	LineEvent                     // a committed transcript line
-	NoticeEvent                   // a status message to show as is
-	MuteEvent                     // a side was muted or unmuted (Muted)
-	RecapEvent                    // the user asked for a recap of the last minutes
+	PartialEvent  EventKind = iota // words still being recognized
+	LineEvent                      // a committed transcript line
+	NoticeEvent                    // a status message to show as is
+	MuteEvent                      // a side was muted or unmuted (Muted)
+	RecapEvent                     // the user asked for a recap of the last minutes
+	QuestionEvent                  // the user typed a question (Text)
 )
 
 // Event is what the transcription side sends to Run.
@@ -92,7 +94,7 @@ func Run(c Config, events <-chan Event) error {
 		c.View = NewPlainView(c.Out, c.Interactive, c.MuteHint, c.RecapKey)
 	}
 	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16),
-		lookupResults: make(chan lookupResult, 1), partials: map[string]string{}, muted: map[string]bool{}}
+		lookupResults: make(chan lookupResult, 1), answers: make(chan qaResult, 4), partials: map[string]string{}, muted: map[string]bool{}}
 	// Suggestion times are offsets from this start; with the wall clock, they
 	// can be matched against a recording started at another moment.
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
@@ -122,6 +124,9 @@ func Run(c Config, events <-chan Event) error {
 			s.finish(r)
 		case r := <-s.lookupResults:
 			s.finishLookup(r)
+		case r := <-s.answers:
+			s.finishQuestion(r)
+			s.maybeAsk(time.Now())
 		case now := <-ticker.C:
 			s.watchdog(now)
 			s.maybeStart(now)
@@ -142,6 +147,15 @@ type result struct {
 
 // defaultRecapWindow is how far back a recap goes when RecapWindow is unset.
 const defaultRecapWindow = 5 * time.Minute
+
+// qaResult is the answer of a typed question; abandoned ones carry an older gen.
+type qaResult struct {
+	gen      int
+	question string
+	at       time.Duration // when the question was asked
+	answer   string
+	err      error
+}
 
 type lookupResult struct {
 	lookup Lookup
@@ -180,6 +194,15 @@ type state struct {
 	ending        bool // the meeting is over: no new lookups
 	lookupResults chan lookupResult
 
+	// Typed questions have their own call, so they never delay the updates.
+	asking    bool
+	questions []string // typed questions waiting for the one in flight
+	askStart  time.Time
+	askGen    int // abandoned question calls carry an older askGen and are ignored
+	askedAt   time.Duration
+	askedQ    string
+	answers   chan qaResult
+
 	notesErr bool
 }
 
@@ -213,6 +236,8 @@ func (s *state) handle(ev Event) {
 		s.notice(Clean(ev.Text))
 	case RecapEvent:
 		s.askRecap(time.Now(), ev.Window)
+	case QuestionEvent:
+		s.askQuestion(ev.Text)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -288,6 +313,80 @@ func (s *state) finishRecap(r result) {
 	}
 }
 
+// askQuestion shows a typed question in the feed and queues it; it starts as
+// soon as no other question is in flight.
+func (s *state) askQuestion(text string) {
+	q := Clean(strings.TrimSpace(text))
+	if q == "" {
+		return
+	}
+	s.show(Item{Kind: ItemTranscript, At: s.elapsed(time.Now()), Speaker: "you", Text: q, Plain: "› " + q})
+	s.questions = append(s.questions, q)
+}
+
+// maybeAsk starts the next waiting question when none is in flight.
+func (s *state) maybeAsk(now time.Time) {
+	if s.asking || s.ending || len(s.questions) == 0 {
+		return
+	}
+	q := s.questions[0]
+	s.questions = s.questions[1:]
+	s.askGen++
+	gen, think, answers := s.askGen, s.c.Think, s.answers
+	s.asking, s.askStart = true, now
+	at := s.elapsed(now)
+	s.askedQ, s.askedAt = q, at
+	instructions, transcript := QuestionPrompt(s.c.Context, s.mem, s.lines, at, q)
+	go func() {
+		answer, err := think(instructions, transcript)
+		select {
+		case answers <- qaResult{gen: gen, question: q, at: at, answer: answer, err: err}:
+		default: // only abandoned calls can find the buffer full
+		}
+	}()
+}
+
+// finishQuestion shows an answer, keeps it in the memory and writes the notes.
+func (s *state) finishQuestion(r qaResult) {
+	if r.gen != s.askGen || !s.asking {
+		return
+	}
+	s.asking = false
+	var reply struct {
+		Answer string `json:"answer"`
+		Source string `json:"source"`
+	}
+	err := r.err
+	if err == nil {
+		err = parseJSON(r.answer, &reply)
+	}
+	if err == nil && strings.TrimSpace(reply.Answer) == "" {
+		err = errors.New("empty answer")
+	}
+	if err != nil {
+		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
+		s.notice("⚠ question failed: " + oneLine(msg, 200))
+		return
+	}
+	qa := QA{Question: r.question, Answer: Clean(strings.TrimSpace(reply.Answer)), Source: Clean(strings.TrimSpace(reply.Source)), At: r.at}
+	qa.General = qa.Source == "general"
+	s.mem.QA = append(s.mem.QA, qa)
+	it := Item{Kind: ItemAssist, At: s.elapsed(time.Now()), Badge: "ANSWER", Text: qa.Answer}
+	line := fmt.Sprintf("💬 %s Answer: %s", clock(it.At), qa.Answer)
+	switch {
+	case qa.General:
+		it.Note = "general knowledge"
+	case qa.Source != "":
+		it.Note = qa.Source
+	}
+	if it.Note != "" {
+		line += s.dim(" — " + it.Note)
+	}
+	it.Plain = line
+	s.show(it)
+	_ = s.writeNotes(false) // a failure is shown in the feed
+}
+
 // interval is the wait between updates, doubled after each failure.
 func (s *state) interval() time.Duration {
 	d := s.c.Interval
@@ -298,6 +397,7 @@ func (s *state) interval() time.Duration {
 }
 
 func (s *state) maybeStart(now time.Time) {
+	s.maybeAsk(now)
 	if !s.thinking && s.recapAsked {
 		s.startRecap(now)
 		return
@@ -499,6 +599,11 @@ func (s *state) finishLookup(r lookupResult) {
 
 func (s *state) watchdog(now time.Time) {
 	limit := max(MinWatchdog, 6*s.c.Interval)
+	if s.asking && now.Sub(s.askStart) >= limit {
+		s.askGen++ // its answer, if it ever comes, is ignored
+		s.asking = false
+		s.notice(fmt.Sprintf("⚠ question failed: %s did not answer in %s; dropped", s.c.Engine, limit.Round(time.Second)))
+	}
 	if !s.thinking || now.Sub(s.thinkStart) < limit {
 		return
 	}
@@ -564,7 +669,8 @@ func (s *state) end() error {
 }
 
 // await waits for a call's result, reading Input meanwhile so that a sender
-// never blocks; false means Force was closed first.
+// never blocks (a question or recap is refused, a mute is dropped); false
+// means Force was closed first.
 func (s *state) await(res <-chan result) (result, bool) {
 	input := s.c.Input
 	for {
@@ -573,9 +679,13 @@ func (s *state) await(res <-chan result) (result, bool) {
 			return r, true
 		case <-s.c.Force:
 			return result{}, false
-		case _, ok := <-input:
+		case ev, ok := <-input:
 			if !ok {
 				input = nil
+				continue
+			}
+			if ev.Kind == QuestionEvent || ev.Kind == RecapEvent {
+				s.info("the meeting is over: nothing more is answered")
 			}
 		}
 	}
@@ -624,7 +734,7 @@ func (s *state) notice(text string) { s.show(Item{Kind: ItemNotice, Text: text, 
 func (s *state) info(text string)   { s.show(Item{Kind: ItemInfo, Text: text, Plain: s.dim(text)}) }
 
 func (s *state) status(now time.Time) {
-	st := Status{Elapsed: s.elapsed(now), Engine: s.c.Engine, State: "listening", Looking: s.looking,
+	st := Status{Elapsed: s.elapsed(now), Engine: s.c.Engine, State: "listening", Looking: s.looking, Asking: s.asking,
 		Muted: map[string]bool{}, PartialSpeaker: s.lastSpeaker, Partial: s.partials[s.lastSpeaker]}
 	for side, m := range s.muted {
 		st.Muted[side] = m

@@ -970,3 +970,147 @@ func TestRunFinalCallback(t *testing.T) {
 		t.Errorf("Final calls=%d notes=%q summary=%q", calls, gotNotes, gotMem.Summary)
 	}
 }
+
+func hasItem(v *recordingView, ok func(Item) bool) bool {
+	for _, it := range v.Items() {
+		if ok(it) {
+			return true
+		}
+	}
+	return false
+}
+
+func startQuestionRun(t *testing.T, f *fakeThink, v *recordingView) (chan Event, chan Event, chan error) {
+	t.Helper()
+	fastTimers(t)
+	events, input := make(chan Event), make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, View: v, Input: input}, events)
+	}()
+	return events, input, done
+}
+
+func TestRunQuestionRunsInParallel(t *testing.T) {
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		func() (string, error) { <-release; return `{"summary":"s"}`, nil },
+		answer(`{"answer":"Friday.","source":"research"}`),
+	}}
+	v := &recordingView{}
+	events, input, done := startQuestionRun(t, f, v)
+	events <- line("others", twelveWords)
+	waitUntil(t, "update in flight", func() bool { return f.count() == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "what did Alex say about the deadline?"}
+	waitUntil(t, "second call", func() bool { return f.count() == 2 })
+	waitUntil(t, "answer", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "ANSWER" }) })
+	f.mu.Lock()
+	seen := f.maxSeen
+	f.mu.Unlock()
+	if seen != 2 {
+		t.Errorf("maxSeen = %d, want 2", seen)
+	}
+	var q, a = -1, -1
+	for i, it := range v.Items() {
+		if it.Kind == ItemTranscript && it.Speaker == "you" && it.Text == "what did Alex say about the deadline?" {
+			q = i
+		}
+		if it.Kind == ItemAssist && it.Badge == "ANSWER" && strings.HasPrefix(it.Plain, "💬 ") {
+			a = i
+		}
+	}
+	if q < 0 || a < q {
+		t.Errorf("question at %d, answer at %d:\n%+v", q, a, v.Items())
+	}
+	close(release)
+	close(events)
+	<-done
+}
+
+func TestRunSecondQuestionWaits(t *testing.T) {
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		func() (string, error) { <-release; return `{"answer":"one","source":"general"}`, nil },
+		answer(`{"answer":"two","source":"general"}`),
+	}}
+	v := &recordingView{}
+	events, input, done := startQuestionRun(t, f, v)
+	input <- Event{Kind: QuestionEvent, Text: "first?"}
+	waitUntil(t, "first call", func() bool { return f.count() == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "second?"}
+	time.Sleep(50 * time.Millisecond) // several ticks: the second must not start
+	if n := f.count(); n != 1 {
+		t.Fatalf("calls = %d while the first question is in flight", n)
+	}
+	close(release)
+	waitUntil(t, "second answer", func() bool { return hasItem(v, func(it Item) bool { return it.Text == "two" }) })
+	if f.maxSeen != 1 {
+		t.Errorf("maxSeen = %d, want 1", f.maxSeen)
+	}
+	close(events)
+	<-done
+}
+
+func TestRunQuestionGeneralIsLabelled(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"answer":"Service level objective","source":"general"}`)}}
+	v := &recordingView{}
+	notes := filepath.Join(t.TempDir(), "notes.md")
+	fastTimers(t)
+	events, input := make(chan Event), make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, View: v, Input: input, Notes: notes}, events)
+	}()
+	input <- Event{Kind: QuestionEvent, Text: "What is an SLO?"}
+	waitUntil(t, "answer", func() bool {
+		return hasItem(v, func(it Item) bool { return it.Badge == "ANSWER" && it.Note == "general knowledge" })
+	})
+	waitUntil(t, "notes", func() bool {
+		b, _ := os.ReadFile(notes)
+		return strings.Contains(string(b), "## Questions") && strings.Contains(string(b), "Q: What is an SLO?")
+	})
+	close(events)
+	<-done
+}
+
+func TestRunQuestionFailureAndAfterEnd(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){func() (string, error) { return "", errors.New("fake failed: boom") }}}
+	v := &recordingView{}
+	events, input, done := startQuestionRun(t, f, v)
+	input <- Event{Kind: QuestionEvent, Text: "why?"}
+	waitUntil(t, "failure", func() bool {
+		return hasItem(v, func(it Item) bool { return it.Kind == ItemNotice && it.Text == "⚠ question failed: boom" })
+	})
+	close(events)
+	<-done
+}
+
+func TestRunQuestionAfterEndRefused(t *testing.T) {
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){func() (string, error) { <-release; return `{"summary":"s"}`, nil }}}
+	v := &recordingView{}
+	events, input, done := startQuestionRun(t, f, v)
+	events <- line("others", twelveWords)
+	waitUntil(t, "update in flight", func() bool { return f.count() == 1 })
+	close(events)
+	waitUntil(t, "ending", func() bool {
+		return hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "finishing the current update") })
+	})
+	input <- Event{Kind: QuestionEvent, Text: "too late?"}
+	input <- Event{Kind: RecapEvent}
+	input <- Event{Kind: MuteEvent, Speaker: "me", Muted: true}
+	close(release)
+	<-done
+	n := 0
+	for _, it := range v.Items() {
+		if it.Kind == ItemInfo && strings.Contains(it.Text, "the meeting is over") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("refusals = %d, want 2 (question and recap)", n)
+	}
+	if f.count() != 1 {
+		t.Errorf("model calls = %d, want only the update", f.count())
+	}
+}
