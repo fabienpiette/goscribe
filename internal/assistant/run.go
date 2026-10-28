@@ -46,9 +46,9 @@ type Config struct {
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
 	Input       <-chan Event    // the user's commands; nil in plain mode. Closing it does not end the run
 	// Final is called once at the end of Run with the final memory and the
-	// notes path, also when the final notes failed or were forced; nil means
-	// no call.
-	Final       func(m Memory, notes string)
+	// notes path, also when the final notes failed or were forced; written
+	// tells whether the final notes were written. nil means no call.
+	Final       func(m Memory, notes string, written bool)
 	MuteHint    string        // mute keys for the status line, e.g. "m/s"; "" when there are none
 	RecapKey    string        // the key that asks for a recap, for the status line; "" when there is none
 	RecapWindow time.Duration // how far back a recap goes; 0 means defaultRecapWindow
@@ -201,9 +201,9 @@ type state struct {
 	questions []string // typed questions waiting for the one in flight
 	askStart  time.Time
 	askGen    int // abandoned question calls carry an older askGen and are ignored
-	askedAt   time.Duration
-	askedQ    string
 	answers   chan qaResult
+
+	finalWritten bool // the final notes were written
 
 	notesErr      bool
 	transcriptErr bool
@@ -340,7 +340,6 @@ func (s *state) maybeAsk(now time.Time) {
 	gen, think, answers := s.askGen, s.c.Think, s.answers
 	s.asking, s.askStart = true, now
 	at := s.elapsed(now)
-	s.askedQ, s.askedAt = q, at
 	instructions, transcript := QuestionPrompt(s.c.Context, s.mem, s.lines, at, q)
 	go func() {
 		answer, err := think(instructions, transcript)
@@ -602,13 +601,21 @@ func (s *state) finishLookup(r lookupResult) {
 	_ = s.writeNotes(false) // a failure is shown in the feed
 }
 
-func (s *state) watchdog(now time.Time) {
-	limit := max(MinWatchdog, 6*s.c.Interval)
+func (s *state) watchdogLimit() time.Duration { return max(MinWatchdog, 6*s.c.Interval) }
+
+// questionWatchdog drops the question in flight once it took too long.
+func (s *state) questionWatchdog(now time.Time) {
+	limit := s.watchdogLimit()
 	if s.asking && now.Sub(s.askStart) >= limit {
 		s.askGen++ // its answer, if it ever comes, is ignored
 		s.asking = false
 		s.notice(fmt.Sprintf("⚠ question failed: %s did not answer in %s; dropped", s.c.Engine, limit.Round(time.Second)))
 	}
+}
+
+func (s *state) watchdog(now time.Time) {
+	limit := s.watchdogLimit()
+	s.questionWatchdog(now)
 	if !s.thinking || now.Sub(s.thinkStart) < limit {
 		return
 	}
@@ -623,12 +630,13 @@ func (s *state) watchdog(now time.Time) {
 	s.notice(fmt.Sprintf("⚠ %s did not answer in %s; skipping this update", s.c.Engine, limit.Round(time.Second)))
 }
 
-// end waits for the update in progress, then writes the final notes. It
-// ignores lookups: one in flight is not waited for, and none starts.
+// end waits for the update and the question in progress, then writes the
+// final notes. Questions still queued are left unanswered. It ignores
+// lookups: one in flight is not waited for, and none starts.
 func (s *state) end() error {
 	defer func() {
 		if s.c.Final != nil {
-			s.c.Final(s.mem, s.c.Notes)
+			s.c.Final(s.mem, s.c.Notes, s.finalWritten)
 		}
 	}()
 	s.ending = true
@@ -640,6 +648,17 @@ func (s *state) end() error {
 			return s.writeNotes(false)
 		}
 		s.finish(r)
+	}
+	if s.asking {
+		s.notice(fmt.Sprintf("⏳ finishing the current answer (%s)…", s.c.Engine))
+		for s.asking {
+			if _, ok := s.await(nil); !ok {
+				return s.writeNotes(false)
+			}
+		}
+	}
+	if n := len(s.questions); n > 0 {
+		s.info(fmt.Sprintf("%d question(s) left unanswered", n))
 	}
 	if wordCount(s.lines) < minFinalWords {
 		if len(s.lines) > 0 {
@@ -667,6 +686,7 @@ func (s *state) end() error {
 		if err := s.writeNotes(true); err != nil {
 			return err
 		}
+		s.finalWritten = true
 		s.notice("✓ Final notes written to " + s.c.Notes)
 		return nil
 	}
@@ -674,16 +694,31 @@ func (s *state) end() error {
 }
 
 // await waits for a call's result, reading Input meanwhile so that a sender
-// never blocks (a question or recap is refused, a mute is dropped); false
-// means Force was closed first.
+// never blocks (a question or recap is refused, a mute is dropped). It
+// takes the answer of the question in flight, and refreshes the status on
+// each tick. With a nil res, it returns after that answer or the question
+// watchdog. false means Force was closed first.
 func (s *state) await(res <-chan result) (result, bool) {
 	input := s.c.Input
+	ticker := time.NewTicker(Tick)
+	defer ticker.Stop()
 	for {
 		select {
 		case r := <-res:
 			return r, true
 		case <-s.c.Force:
 			return result{}, false
+		case a := <-s.answers:
+			s.finishQuestion(a)
+			if res == nil && !s.asking {
+				return result{}, true
+			}
+		case now := <-ticker.C:
+			s.questionWatchdog(now)
+			if res == nil && !s.asking {
+				return result{}, true
+			}
+			s.status(now)
 		case ev, ok := <-input:
 			if !ok {
 				input = nil

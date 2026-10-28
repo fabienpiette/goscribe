@@ -3,16 +3,17 @@ package assistant
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 // TranscriptPath is the live transcript file next to the notes: the notes
-// name with "-transcript" before the extension. It is "" without notes.
+// name, without its extension, with "-transcript.md". It is "" without notes.
 func TranscriptPath(notes string) string {
 	if notes == "" {
 		return ""
 	}
-	return strings.TrimSuffix(notes, ".md") + "-transcript.md"
+	return strings.TrimSuffix(notes, filepath.Ext(notes)) + "-transcript.md"
 }
 
 func transcriptLine(l Line) string {

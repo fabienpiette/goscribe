@@ -88,13 +88,7 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool
 		asked = m.Asked
 	}
 	writeMemory(&b, m, asked)
-	if n := len(m.QA); n > 0 {
-		b.WriteString("The user asked during the meeting (do not suggest these again; build on the answers):\n")
-		for _, qa := range m.QA[max(0, n-recentQA):] {
-			fmt.Fprintf(&b, "- Q: %s → A: %s\n", qa.Question, qa.Answer)
-		}
-		b.WriteString("\n")
-	}
+	writeQA(&b, m.QA, "The user asked during the meeting (do not suggest these again; build on the answers):")
 	if n := len(m.Suggestions); n > 0 {
 		b.WriteString("Already suggested (do not repeat or rephrase):\n")
 		for _, s := range m.Suggestions[max(0, n-recentSuggest):] {
@@ -128,6 +122,7 @@ func FinalPrompt(context string, m Memory, all []Line) (instructions, transcript
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
 	writeMemory(&b, m, nil)
+	writeQA(&b, m.QA, "The user asked during the meeting:")
 	b.WriteString(finalTask)
 	window := max(finalWindow-len(context), minFinalWindow)
 	return b.String(), "<transcript>\n" + lastBytes(all, window) + "</transcript>"
@@ -156,6 +151,19 @@ func writeMemory(b *strings.Builder, m Memory, asked []string) {
 		b.WriteString("\n")
 	}
 	writeResearch(b, m.Research, asked)
+}
+
+// writeQA lists the last recentQA questions the user typed, with their
+// answers, under title.
+func writeQA(b *strings.Builder, qas []QA, title string) {
+	if len(qas) == 0 {
+		return
+	}
+	b.WriteString(title + "\n")
+	for _, qa := range qas[max(0, len(qas)-recentQA):] {
+		fmt.Fprintf(b, "- Q: %s → A: %s\n", qa.Question, qa.Answer)
+	}
+	b.WriteString("\n")
 }
 
 func writeList(b *strings.Builder, title string, items []string) {
@@ -256,13 +264,15 @@ Rules:
 The user's question: `
 
 // QuestionPrompt builds the call that answers a typed question: the rules,
-// the context and memory, and the last minutes of the transcript. The
+// the context and memory, the last questions and answers, and the last
+// minutes of the transcript. The
 // question is typed by the user, so it is part of the instructions.
 func QuestionPrompt(context string, m Memory, lines []Line, now time.Duration, question string) (instructions, transcript string) {
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
 	writeMemory(&b, m, nil)
+	writeQA(&b, m.QA, "The user asked earlier in the meeting (the new question may follow up on these):")
 	b.WriteString(questionTask + question)
 	return b.String(), "<transcript>\n" + lastBytes(recentLines(lines, now, questionWindow), freshWindow) + "</transcript>"
 }

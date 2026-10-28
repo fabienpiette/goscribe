@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -414,6 +415,38 @@ func TestQuestionPrompt(t *testing.T) {
 		if !strings.Contains(instr, want) {
 			t.Errorf("instructions miss %q:\n%s", want, instr)
 		}
+	}
+}
+
+// sixQA are typed questions; prompts keep the last recentQA (5).
+func sixQA() []QA {
+	var qas []QA
+	for i := 1; i <= 6; i++ {
+		qas = append(qas, QA{Question: fmt.Sprintf("question %d?", i), Answer: fmt.Sprintf("answer %d", i)})
+	}
+	return qas
+}
+
+func TestQuestionPromptIncludesQA(t *testing.T) {
+	instr, _ := QuestionPrompt("", Memory{QA: sixQA()}, nil, time.Minute, "and the one before?")
+	if !strings.Contains(instr, "- Q: question 6? → A: answer 6") || !strings.Contains(instr, "- Q: question 2? → A: answer 2") {
+		t.Errorf("instructions miss the last questions:\n%s", instr)
+	}
+	if strings.Contains(instr, "question 1?") {
+		t.Errorf("only the last %d questions are sent:\n%s", recentQA, instr)
+	}
+	if strings.Index(instr, "question 6?") > strings.Index(instr, "and the one before?") {
+		t.Error("the earlier questions go before the new one")
+	}
+	if instr, _ := QuestionPrompt("", Memory{}, nil, time.Minute, "q?"); strings.Contains(instr, "The user asked earlier") {
+		t.Error("no QA block without questions")
+	}
+}
+
+func TestFinalPromptIncludesQA(t *testing.T) {
+	instr, _ := FinalPrompt("", Memory{QA: sixQA()}, []Line{{Speaker: "me", Text: "hi"}})
+	if !strings.Contains(instr, "- Q: question 6? → A: answer 6") || strings.Contains(instr, "question 1?") {
+		t.Errorf("instructions must hold the last %d questions:\n%s", recentQA, instr)
 	}
 }
 

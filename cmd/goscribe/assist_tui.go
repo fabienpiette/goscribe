@@ -43,8 +43,13 @@ func startupNotices(header, notes, transcript, keys string, tooLong []string, co
 
 // printEndSummary is what stays in the terminal once the screen is gone: the
 // final summary and action items, when there are some, and the file paths.
-func printEndSummary(w io.Writer, m assistant.Memory, notes, transcript string) {
+// Without final notes (forced, failed or too short), the summary is the live
+// one and says so.
+func printEndSummary(w io.Writer, m assistant.Memory, final bool, notes, transcript string) {
 	if m.Summary != "" {
+		if !final {
+			fmt.Fprintln(w, "Live summary (final notes not written):")
+		}
 		fmt.Fprintf(w, "%s\n\n", m.Summary)
 	}
 	if len(m.ActionItems) > 0 {
@@ -130,9 +135,10 @@ func (s tuiSession) run(events <-chan assistant.Event, stdout, stderr io.Writer)
 	defer restore()
 
 	var mem assistant.Memory
+	var final bool
 	c := s.cfg
 	c.View, c.Input, c.Out, c.Interactive = tui.NewView(p.Send), inputs, io.Discard, false
-	c.Final = func(m assistant.Memory, _ string) { mem = m }
+	c.Final = func(m assistant.Memory, _ string, written bool) { mem, final = m, written }
 	done := make(chan error, 1)
 	var crash string // a panic in Run and its stack, printed once the screen is gone
 	go func() {
@@ -168,7 +174,7 @@ func (s tuiSession) run(events <-chan assistant.Event, stdout, stderr io.Writer)
 	if crash != "" {
 		fmt.Fprintln(stderr, crash)
 	}
-	printEndSummary(stdout, mem, c.Notes, c.Transcript)
+	printEndSummary(stdout, mem, final, c.Notes, c.Transcript)
 	return err
 }
 

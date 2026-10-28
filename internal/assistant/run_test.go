@@ -954,10 +954,15 @@ func TestRunFinalCallback(t *testing.T) {
 	var calls int
 	var gotMem Memory
 	var gotNotes string
+	var written bool
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, Out: &syncBuffer{}, Notes: notes,
-			Final: func(m Memory, n string) { mu.Lock(); calls, gotMem, gotNotes = calls+1, m, n; mu.Unlock() }}, events)
+			Final: func(m Memory, n string, w bool) {
+				mu.Lock()
+				calls, gotMem, gotNotes, written = calls+1, m, n, w
+				mu.Unlock()
+			}}, events)
 	}()
 	events <- line("me", twelveWords+" "+twelveWords+" "+twelveWords)
 	close(events)
@@ -966,8 +971,8 @@ func TestRunFinalCallback(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 1 || gotNotes != notes || gotMem.Summary != "Final." {
-		t.Errorf("Final calls=%d notes=%q summary=%q", calls, gotNotes, gotMem.Summary)
+	if calls != 1 || gotNotes != notes || gotMem.Summary != "Final." || !written {
+		t.Errorf("Final calls=%d notes=%q summary=%q written=%v", calls, gotNotes, gotMem.Summary, written)
 	}
 }
 
@@ -1113,6 +1118,79 @@ func TestRunQuestionAfterEndRefused(t *testing.T) {
 	if f.count() != 1 {
 		t.Errorf("model calls = %d, want only the update", f.count())
 	}
+}
+
+// A question in flight when the meeting ends is answered into the feed and
+// the notes; one still queued is counted as unanswered, never started.
+func TestRunEndWaitsForQuestionInFlight(t *testing.T) {
+	fastTimers(t)
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		func() (string, error) { <-release; return `{"answer":"Friday.","source":"general"}`, nil },
+	}}
+	v := &recordingView{}
+	notes := filepath.Join(t.TempDir(), "notes.md")
+	events, input := make(chan Event), make(chan Event)
+	var mu sync.Mutex
+	finals, written := 0, true
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, View: v, Input: input, Notes: notes,
+			Final: func(_ Memory, _ string, w bool) { mu.Lock(); finals, written = finals+1, w; mu.Unlock() }}, events)
+	}()
+	input <- Event{Kind: QuestionEvent, Text: "when do we ship?"}
+	waitUntil(t, "question call", func() bool { return f.count() == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "who owns the runbook?"}
+	close(events)
+	waitUntil(t, "ending", func() bool {
+		return hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "finishing the current answer") })
+	})
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !hasItem(v, func(it Item) bool { return it.Badge == "ANSWER" && it.Text == "Friday." }) {
+		t.Errorf("answer missing from the feed: %+v", v.Items())
+	}
+	if !hasItem(v, func(it Item) bool { return it.Kind == ItemInfo && it.Text == "1 question(s) left unanswered" }) {
+		t.Errorf("no unanswered line: %+v", v.Items())
+	}
+	b, _ := os.ReadFile(notes)
+	if !strings.Contains(string(b), "## Questions") || !strings.Contains(string(b), "Q: when do we ship? — A: Friday.") {
+		t.Errorf("notes miss the answer:\n%s", b)
+	}
+	if f.count() != 1 {
+		t.Errorf("model calls = %d, want only the first question", f.count())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if finals != 1 || written {
+		t.Errorf("Final calls=%d written=%v, want 1 call without final notes", finals, written)
+	}
+}
+
+// The status keeps ticking while the final notes are written.
+func TestRunEndRefreshesStatus(t *testing.T) {
+	fastTimers(t)
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){func() (string, error) { <-release; return `{"summary":"Final."}`, nil }}}
+	v := &recordingView{}
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, View: v}, events)
+	}()
+	events <- line("me", twelveWords+" "+twelveWords+" "+twelveWords)
+	close(events)
+	waitUntil(t, "final call", func() bool { return f.count() == 1 })
+	waitUntil(t, "a thinking status after the final call started", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		last := v.statuses[len(v.statuses)-1]
+		return last.State == "thinking" && last.Busy >= 20*time.Millisecond
+	})
+	close(release)
+	<-done
 }
 
 func TestRunWritesTranscript(t *testing.T) {

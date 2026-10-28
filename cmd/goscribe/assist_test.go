@@ -783,15 +783,20 @@ func TestStartupNotices(t *testing.T) {
 
 func TestPrintEndSummary(t *testing.T) {
 	var b bytes.Buffer
-	printEndSummary(&b, assistant.Memory{Summary: "Shipping Monday.", ActionItems: []string{"Sam: write the runbook", "Alex: review it"}}, "n.md", "n.transcript.md")
+	printEndSummary(&b, assistant.Memory{Summary: "Shipping Monday.", ActionItems: []string{"Sam: write the runbook", "Alex: review it"}}, true, "n.md", "n.transcript.md")
 	want := "Shipping Monday.\n\nAction items:\n- Sam: write the runbook\n- Alex: review it\n\nNotes: n.md\nTranscript: n.transcript.md\n"
 	if b.String() != want {
 		t.Errorf("summary:\n%q\nwant:\n%q", b.String(), want)
 	}
 	b.Reset()
-	printEndSummary(&b, assistant.Memory{}, "n.md", "n.transcript.md")
+	printEndSummary(&b, assistant.Memory{}, false, "n.md", "n.transcript.md")
 	if want := "Notes: n.md\nTranscript: n.transcript.md\n"; b.String() != want {
 		t.Errorf("empty summary:\n%q\nwant:\n%q", b.String(), want)
+	}
+	b.Reset()
+	printEndSummary(&b, assistant.Memory{Summary: "Shipping Monday."}, false, "n.md", "")
+	if want := "Live summary (final notes not written):\nShipping Monday.\n\nNotes: n.md\n"; b.String() != want {
+		t.Errorf("live summary:\n%q\nwant:\n%q", b.String(), want)
 	}
 }
 
