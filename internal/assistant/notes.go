@@ -21,8 +21,8 @@ const draftNote = "_Live draft from realtime speech-to-text: a summary made from
 
 // Render writes the notes file: the final summary and action items first when
 // the meeting is over, then the live summary, agenda items not covered,
-// decisions, open questions, the librarian's research, the typed questions and every suggestion
-// made.
+// decisions, open questions, the librarian's research, the typed questions,
+// the fixes and every suggestion made.
 func Render(m Memory, header string, final bool, updated time.Duration) string {
 	var b strings.Builder
 	b.WriteString("# Meeting notes\n\n")
@@ -51,6 +51,17 @@ func Render(m Memory, header string, final bool, updated time.Duration) string {
 			fmt.Fprintf(&b, "- [%s] Q: %s — A: %s", clock(qa.At), escapeMarkdown(qa.Question), escapeMarkdown(qa.Answer))
 			if qa.Source != "" {
 				fmt.Fprintf(&b, " _(%s)_", escapeMarkdown(qa.Source))
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(m.Fixes) > 0 {
+		b.WriteString("## Fixes\n\n")
+		for _, f := range m.Fixes {
+			b.WriteString("- " + codeSpan(f.Wrong) + " → " + codeSpan(f.Right))
+			if f.Guessed {
+				b.WriteString(" _(suggested)_")
 			}
 			b.WriteString("\n")
 		}

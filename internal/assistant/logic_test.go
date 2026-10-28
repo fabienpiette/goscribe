@@ -460,3 +460,45 @@ func TestRenderQuestionsSection(t *testing.T) {
 		t.Error("Questions goes after Research")
 	}
 }
+
+func TestPromptsIncludeFixes(t *testing.T) {
+	lines := []Line{{Speaker: "me", At: time.Minute, Text: "the cache work"}}
+	prompts := func(m Memory) map[string]string {
+		cycle, _ := CyclePrompt("", m, nil, lines, false)
+		question, _ := QuestionPrompt("", m, lines, 2*time.Minute, "why?")
+		recap, _ := RecapPrompt(m, lines, 2*time.Minute, 5*time.Minute)
+		final, _ := FinalPrompt("", m, lines)
+		return map[string]string{"cycle": cycle, "question": question, "recap": recap, "final": final}
+	}
+	m := Memory{Summary: "cache pass", Fixes: []Fix{{Wrong: "cash", Right: "cache"}}}
+	for name, instr := range prompts(m) {
+		for _, want := range []string{"The user corrected these misheard words; the transcript already uses the right ones. Use them, and fix them in your summary and lists:\n", "- cash → cache\n"} {
+			if !strings.Contains(instr, want) {
+				t.Errorf("%s prompt misses %q:\n%s", name, want, instr)
+			}
+		}
+		if strings.Index(instr, "misheard") < strings.Index(instr, "Summary: cache pass") {
+			t.Errorf("%s prompt: the fixes go after the memory", name)
+		}
+	}
+	for name, instr := range prompts(Memory{}) {
+		if strings.Contains(instr, "misheard") {
+			t.Errorf("%s prompt has a fixes block without fixes", name)
+		}
+	}
+}
+
+func TestRenderFixesSection(t *testing.T) {
+	m := Memory{QA: []QA{{Question: "q?", Answer: "a"}}, Fixes: []Fix{{Wrong: "cash", Right: "cache"}, {Wrong: "dark mod", Right: "dark-mode", Guessed: true}}}
+	out := Render(m, "h", false, time.Hour)
+	want := "## Fixes\n\n- `cash` → `cache`\n- `dark mod` → `dark-mode` _(suggested)_\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("notes miss %q:\n%s", want, out)
+	}
+	if strings.Index(out, "## Questions") > strings.Index(out, "## Fixes") {
+		t.Error("Fixes goes after Questions")
+	}
+	if strings.Contains(Render(Memory{}, "h", false, time.Hour), "## Fixes") {
+		t.Error("no Fixes section without fixes")
+	}
+}

@@ -55,6 +55,7 @@ type Memory struct {
 	Research      []Finding // the librarian's results, oldest first
 	Asked         []string  // every lookup query accepted, for dedup and the limit
 	QA            []QA      // the user's typed questions and their answers, oldest first
+	Fixes         []Fix     // the corrections in force, in the order they were made
 }
 
 // QA is a question the user typed and the answer they got.

@@ -212,6 +212,10 @@ type state struct {
 	askGen    int // abandoned question calls carry an older askGen and are ignored
 	answers   chan qaResult
 
+	// lateFixes were made while the update in flight was asked: its reply
+	// does not know them, so they are applied to it.
+	lateFixes []Fix
+
 	finalWritten bool // the final notes were written
 
 	notesErr      bool
@@ -230,10 +234,10 @@ func (s *state) handle(ev Event) {
 	}
 	switch ev.Kind {
 	case PartialEvent:
-		s.partials[ev.Speaker] = Clean(ev.Text)
+		s.partials[ev.Speaker] = ApplyFixes(Clean(ev.Text), s.mem.Fixes)
 		s.lastSpeaker = ev.Speaker
 	case LineEvent:
-		text := Clean(strings.TrimSpace(ev.Text))
+		text := ApplyFixes(Clean(strings.TrimSpace(ev.Text)), s.mem.Fixes)
 		if text == "" {
 			return
 		}
@@ -252,6 +256,8 @@ func (s *state) handle(ev Event) {
 		s.askRecap(time.Now(), ev.Window)
 	case QuestionEvent:
 		s.askQuestion(ev.Text)
+	case FixEvent:
+		s.fix(ev.Fix)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -432,7 +438,7 @@ func (s *state) call(now time.Time, upto int, recap bool, instructions, transcri
 	gen, think, results := s.gen, s.c.Think, s.results
 	s.thinking, s.recapping, s.thinkStart = true, recap, now
 	if !recap { // a recap does not delay the next update
-		s.lastStart = now
+		s.lastStart, s.lateFixes = now, nil
 	}
 	go func() {
 		answer, err := think(instructions, transcript)
@@ -468,6 +474,9 @@ func (s *state) finish(r result) {
 	s.analysed = r.upto
 	at := s.elapsed(time.Now())
 	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
+	for _, f := range s.lateFixes {
+		s.mem.ApplyFix(f)
+	}
 	s.board()
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
@@ -703,7 +712,7 @@ func (s *state) end() error {
 }
 
 // await waits for a call's result, reading Input meanwhile so that a sender
-// never blocks (a question or recap is refused, a mute is dropped). It
+// never blocks (a question, recap or fix is refused, a mute is dropped). It
 // takes the answer of the question in flight, and refreshes the status on
 // each tick. With a nil res, it returns after that answer or the question
 // watchdog. false means Force was closed first.
@@ -733,7 +742,7 @@ func (s *state) await(res <-chan result) (result, bool) {
 				input = nil
 				continue
 			}
-			if ev.Kind == QuestionEvent || ev.Kind == RecapEvent {
+			if ev.Kind == QuestionEvent || ev.Kind == RecapEvent || ev.Kind == FixEvent {
 				s.info("the meeting is over: nothing more is answered")
 			}
 		}
@@ -782,6 +791,11 @@ func (s *state) appendTranscript(l Line) {
 	} else {
 		err = AppendTranscript(s.c.Transcript, l)
 	}
+	s.transcriptFailed(err)
+}
+
+// transcriptFailed shows the first transcript write error in the feed.
+func (s *state) transcriptFailed(err error) {
 	if err != nil && !s.transcriptErr {
 		s.transcriptErr = true
 		s.notice("⚠ cannot write the transcript: " + err.Error())
@@ -820,8 +834,12 @@ func (s *state) status(now time.Time) {
 // board sends the memory to the dashboard.
 func (s *state) board() {
 	m := s.mem
+	var fixes []string
+	for _, f := range m.Fixes {
+		fixes = append(fixes, fixLabel(f))
+	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
-		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources)})
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes})
 }
 
 func (s *state) dim(text string) string {

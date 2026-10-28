@@ -88,6 +88,7 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool
 		asked = m.Asked
 	}
 	writeMemory(&b, m, asked)
+	writeFixes(&b, m.Fixes)
 	writeQA(&b, m.QA, "The user asked during the meeting (do not suggest these again; build on the answers):")
 	if n := len(m.Suggestions); n > 0 {
 		b.WriteString("Already suggested (do not repeat or rephrase):\n")
@@ -122,6 +123,7 @@ func FinalPrompt(context string, m Memory, all []Line) (instructions, transcript
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
 	writeMemory(&b, m, nil)
+	writeFixes(&b, m.Fixes)
 	writeQA(&b, m.QA, "The user asked during the meeting:")
 	b.WriteString(finalTask)
 	window := max(finalWindow-len(context), minFinalWindow)
@@ -165,6 +167,22 @@ func writeQA(b *strings.Builder, qas []QA, title string) {
 	}
 	b.WriteString("\n")
 }
+
+// writeFixes lists the corrections in force: the transcript sent already
+// has them, the memory the model wrote before may not.
+func writeFixes(b *strings.Builder, fixes []Fix) {
+	if len(fixes) == 0 {
+		return
+	}
+	b.WriteString("The user corrected these misheard words; the transcript already uses the right ones. Use them, and fix them in your summary and lists:\n")
+	for _, f := range fixes {
+		b.WriteString("- " + fixLabel(f) + "\n")
+	}
+	b.WriteString("\n")
+}
+
+// fixLabel is "cash → cache".
+func fixLabel(f Fix) string { return f.Wrong + " → " + f.Right }
 
 func writeList(b *strings.Builder, title string, items []string) {
 	if len(items) == 0 {
@@ -228,6 +246,7 @@ func RecapPrompt(m Memory, lines []Line, now, window time.Duration) (instruction
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeMemory(&b, m, nil)
+	writeFixes(&b, m.Fixes)
 	fmt.Fprintf(&b, recapTask, WindowLabel(window))
 	return b.String(), "<transcript>\n" + lastBytes(recentLines(lines, now, window), freshWindow) + "</transcript>"
 }
@@ -272,6 +291,7 @@ func QuestionPrompt(context string, m Memory, lines []Line, now time.Duration, q
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
 	writeMemory(&b, m, nil)
+	writeFixes(&b, m.Fixes)
 	writeQA(&b, m.QA, "The user asked earlier in the meeting (the new question may follow up on these):")
 	b.WriteString(questionTask + question)
 	return b.String(), "<transcript>\n" + lastBytes(recentLines(lines, now, questionWindow), freshWindow) + "</transcript>"
