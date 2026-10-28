@@ -32,9 +32,11 @@ const cycleIntro = `Your job right now: update the meeting memory with the new l
 Reply with JSON only, no code fence, in this shape:
 `
 
-// cycleShape is the reply shape; with the librarian, lookupsShape goes
-// before its closing brace.
-const cycleShape = `{"summary": "...", "decisions": ["..."], "open_questions": ["..."], "not_covered": ["..."], "suggestions": [{"type": "question|answer|missed|risk", "priority": "high|normal", "text": "...", "why": "...", "source": "..."}], "fixes": [{"wrong": "...", "right": "...", "why": "..."}]`
+// cycleShape is the reply shape; fixesShape and, with the librarian,
+// lookupsShape go before its closing brace.
+const cycleShape = `{"summary": "...", "decisions": ["..."], "open_questions": ["..."], "not_covered": ["..."], "suggestions": [{"type": "question|answer|missed|risk", "priority": "high|normal", "text": "...", "why": "...", "source": "..."}]`
+
+const fixesShape = `, "fixes": [{"wrong": "...", "right": "...", "why": "..."}]`
 
 const lookupsShape = `, "lookups": [{"query": "...", "why": "..."}]`
 
@@ -47,22 +49,27 @@ Rules:
 - "suggestions": 0 to 2 items, usually []. Suggest only what would change what the user says or decides in the next minutes, preferably something they could say as is. Skip points the new lines already raised. "text" at most 30 words, "why" at most 20 words.
 - "source": the context file used (as named in its "### file:" header), "research" for a research result, else "".
 - "priority": "high" only when the moment will soon pass (a decision about to be taken, an agenda item about to be dropped); else "normal".
-- "fixes": 0 or 1 item, usually []. Propose one only when a word in the new lines clashes with the meeting or the context and is very likely misheard (a sound-alike of a term, name or product from the context or the talk). "wrong" exactly as in the transcript, "right" as it should be written, "why" at most 12 words. Never one listed above as already fixed, suggested or rejected.
-%s- When the meeting wraps up or runs out of time ("we're out of time", "one last thing", "let's wrap up", goodbyes) and "not_covered" is not empty, suggest "missed" for the most important uncovered items, with priority "high".
+%s%s- When the meeting wraps up or runs out of time ("we're out of time", "one last thing", "let's wrap up", goodbyes) and "not_covered" is not empty, suggest "missed" for the most important uncovered items, with priority "high".
 - Never repeat or rephrase an earlier suggestion.
 - Write in the language of the meeting.`
+
+const fixesRule = `- "fixes": 0 or 1 item, usually []. Propose one only when a word in the new lines clashes with the meeting or the context and is very likely misheard (a sound-alike of a term, name or product from the context or the talk). "wrong" exactly as in the transcript, "right" as it should be written, "why" at most 12 words. Never one listed above as already fixed, suggested or rejected.
+`
 
 const lookupsRule = `- "lookups": 0 or 1 item, usually []. Ask only when the new lines refer to something specific that is not in the context, the memory or earlier research (a past meeting, decision, ticket, incident, document, someone's earlier work) and the answer would help the user now. Never for general knowledge. "query": a self-contained search question naming the subject, people and dates; "why": at most 15 words.
 `
 
-// cycleTask is the job of a cycle; librarian adds the "lookups" field and its
-// rule.
-func cycleTask(librarian bool) string {
-	shape, rule := cycleShape+"}", ""
-	if librarian {
-		shape, rule = cycleShape+lookupsShape+"}", lookupsRule
+// cycleTask is the job of a cycle; fixes adds the "fixes" field and its rule,
+// librarian the "lookups" field and its rule.
+func cycleTask(librarian, fixes bool) string {
+	shape, fixRule, lookupRule := cycleShape, "", ""
+	if fixes {
+		shape, fixRule = shape+fixesShape, fixesRule
 	}
-	return cycleIntro + shape + fmt.Sprintf(cycleRules, rule)
+	if librarian {
+		shape, lookupRule = shape+lookupsShape, lookupsRule
+	}
+	return cycleIntro + shape + "}" + fmt.Sprintf(cycleRules, fixRule, lookupRule)
 }
 
 const finalTask = `The meeting is over. Write the final notes from the whole transcript and the memory.
@@ -79,9 +86,10 @@ Rules:
 
 // CyclePrompt builds one update: the trusted instructions (rules, context,
 // memory) and the untrusted transcript part (earlier lines for continuity,
-// then the new lines). librarian lets the model ask lookups; suggested
-// are the fixes it suggested that wait for an answer or were rejected.
-func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool, suggested []Fix) (instructions, transcript string) {
+// then the new lines). librarian lets the model ask lookups; fixes lets it
+// suggest fixes (the user can answer them); suggested are the fixes it
+// suggested that wait for an answer or were rejected.
+func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian, fixes bool, suggested []Fix) (instructions, transcript string) {
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
@@ -91,7 +99,7 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool
 	}
 	writeMemory(&b, m, asked)
 	writeFixes(&b, m.Fixes)
-	if len(suggested) > 0 {
+	if fixes && len(suggested) > 0 {
 		b.WriteString("Fixes you suggested earlier (your own suggestions, not the user's corrections; never propose these again):\n")
 		for _, f := range suggested {
 			b.WriteString("- " + fixLabel(f) + "\n")
@@ -109,7 +117,7 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian bool
 	if len(fresh) > 0 {
 		fmt.Fprintf(&b, "Time into the meeting: %s.\n\n", clock(fresh[len(fresh)-1].At))
 	}
-	b.WriteString(cycleTask(librarian))
+	b.WriteString(cycleTask(librarian, fixes))
 
 	var t strings.Builder
 	t.WriteString("<transcript>\n")

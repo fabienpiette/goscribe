@@ -432,7 +432,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.unacceptedGuesses())
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, s.unacceptedGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
 
@@ -478,7 +478,11 @@ func (s *state) finish(r result) {
 	at := s.elapsed(time.Now())
 	fixReply(&parsed, s.lateFixes)
 	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
-	guess, guessed := s.takeGuess(parsed.Fixes, at)
+	var guess proposal
+	guessed := false
+	if s.c.Input != nil && !s.ending { // else nothing could answer it
+		guess, guessed = s.takeGuess(parsed.Fixes, at)
+	}
 	s.board()
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
@@ -747,8 +751,11 @@ func (s *state) await(res <-chan result) (result, bool) {
 				input = nil
 				continue
 			}
-			if ev.Kind == QuestionEvent || ev.Kind == RecapEvent || ev.Kind == FixEvent {
+			switch ev.Kind {
+			case QuestionEvent, RecapEvent:
 				s.info("the meeting is over: nothing more is answered")
+			case FixEvent:
+				s.info("the meeting is over: fixes are closed")
 			}
 		}
 	}
@@ -845,7 +852,7 @@ func (s *state) board() {
 	}
 	for _, p := range s.proposals {
 		if p.State == guessPending {
-			fixes = append(fixes, fixLabel(p.fix())+" ?")
+			fixes = append(fixes, fmt.Sprintf("%s ? (/fix yes %d)", fixLabel(p.fix()), p.N))
 		}
 	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),

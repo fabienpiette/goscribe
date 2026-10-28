@@ -28,7 +28,7 @@ func (p proposal) fix() Fix { return Fix{Wrong: p.Guess.Wrong, Right: p.Guess.Ri
 func (s *state) fix(r FixRequest) {
 	switch r.Op {
 	case "add":
-		s.addFix(r.Wrong, r.Right, false)
+		s.typedFix(r.Wrong, r.Right)
 	case "list":
 		s.listFixes()
 	case "rm":
@@ -36,6 +36,23 @@ func (s *state) fix(r FixRequest) {
 	case "yes", "no":
 		s.answerGuess(r.Op, r.N)
 	}
+}
+
+// typedFix puts a fix the user typed in force, unless it is already: applying
+// it twice would add a second rule for nothing. Typing a suggested fix that
+// waits for an answer accepts it.
+func (s *state) typedFix(wrong, right string) {
+	f := Fix{Wrong: wrong, Right: right}
+	if i := slices.IndexFunc(s.mem.Fixes, func(g Fix) bool { return sameFix(f, g) }); i >= 0 {
+		s.info(fmt.Sprintf("fix %d is already in force", i+1))
+		return
+	}
+	for i := range s.proposals {
+		if p := &s.proposals[i]; p.State == guessPending && sameFix(f, p.fix()) {
+			p.State = guessAccepted
+		}
+	}
+	s.addFix(wrong, right, false)
 }
 
 // addFix puts a fix in force: it rewrites the lines said so far, the words in
@@ -79,13 +96,21 @@ func (s *state) addFix(wrong, right string, guessed bool) {
 		Plain: fmt.Sprintf("✏️ %s Fix: %s (%s)", clock(at), label, note)})
 }
 
+// listFixes lists the fixes in force, then the suggested ones waiting for an
+// answer.
 func (s *state) listFixes() {
-	if len(s.mem.Fixes) == 0 {
-		s.info("no fixes yet")
-		return
-	}
+	listed := len(s.mem.Fixes)
 	for i, f := range s.mem.Fixes {
 		s.info(fmt.Sprintf("%d. %s", i+1, fixLabel(f)))
+	}
+	for _, p := range s.proposals {
+		if p.State == guessPending {
+			s.info(fmt.Sprintf("?%d. %s (suggested, /fix yes %d)", p.N, fixLabel(p.fix()), p.N))
+			listed++
+		}
+	}
+	if listed == 0 {
+		s.info("no fixes yet")
 	}
 }
 

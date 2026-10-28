@@ -104,3 +104,34 @@ func TestValidateFix(t *testing.T) {
 		}
 	}
 }
+
+// A fix whose right side holds the wrong one leaves text already fixed alone,
+// so applying it twice changes nothing.
+func TestReplaceWordIdempotent(t *testing.T) {
+	tests := []struct {
+		in, wrong, right, want string
+		n                      int
+	}{
+		{"the short film and the film", "film", "short film", "the short film and the short film", 1},
+		{"Acme Corp and Acme", "Acme", "Acme Corp", "Acme Corp and Acme Corp", 1},
+		{"the SHORT FILM", "film", "short film", "the SHORT FILM", 0},
+		{"a film, a film", "film", "short film", "a short film, a short film", 2},
+	}
+	for _, tt := range tests {
+		got, n := ReplaceWord(tt.in, tt.wrong, tt.right)
+		if got != tt.want || n != tt.n {
+			t.Errorf("ReplaceWord(%q, %q, %q) = %q, %d; want %q, %d", tt.in, tt.wrong, tt.right, got, n, tt.want, tt.n)
+		}
+		if again, _ := ReplaceWord(got, tt.wrong, tt.right); again != got {
+			t.Errorf("twice: %q, want %q", again, got)
+		}
+	}
+}
+
+// A combining mark belongs to its word: "the" is not a word of NFD "thé".
+func TestReplaceWordCombiningMarks(t *testing.T) {
+	got, n := ReplaceWord("the\u0301 the", "the", "a")
+	if got != "the\u0301 a" || n != 1 {
+		t.Errorf("got %q, %d; want %q, 1", got, n, "the\u0301 a")
+	}
+}
