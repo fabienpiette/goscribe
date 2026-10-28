@@ -385,7 +385,7 @@ In a terminal, `assist` takes the full screen: a top bar (meeting clock, what th
 When the speech-to-text mishears a word, `/fix <wrong> <right>` corrects it, e.g. `/fix cash cache`.
 
 - It matches whole words, ignoring case, and writes the replacement exactly as you typed it. For a phrase, quote it: `/fix "dark mood" "dark mode"`.
-- It applies from now on, and also rewrites what was already said: the feed, the summary, decisions, open questions and agenda, the transcript file and the notes. The model is told about it at the next update. The feed says how many lines changed, and each fix is listed under `## Fixes` in the notes and under `FIXES` on the dashboard.
+- It applies from now on, and also rewrites what was already said: the transcript file, the notes, the summary, decisions, open questions and agenda, and the lines the next updates see. The model is told about it at the next update. The feed shows a `FIX` line with how many past lines changed; lines already on screen keep the old word. Each fix is listed under `## Fixes` in the notes and under `FIXES` on the dashboard.
 - The model may suggest a fix itself when a word clashes with the meeting or your context: it shows as `FIX? dark mood → dark mode` and nothing changes until you answer `/fix yes` or `/fix no`. Add a number (`/fix yes 2`) to pick one; without it the latest is used. An accepted suggestion works like a typed fix, and a refused one is not proposed again.
 - `/fix` alone lists the fixes. `/fix rm n` stops fix n for new lines only: what was already rewritten stays as it is.
 - Live speech-to-text keyterms are fixed when the connection opens, so a fix does not update them mid-meeting. Add the right spelling to a `keyterms:` line in your context for the next meeting.

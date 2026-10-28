@@ -40,11 +40,11 @@ It captures the audio on its own: run it in a second terminal next to
 'goscribe record', or alone.
 
 In a terminal it takes the full screen: the live feed, a dashboard of the
-meeting (summary, decisions, open questions) and a chat input. Type a question
-about the meeting and press Enter, or a command: /help, /mute me|others,
-/recap [duration], /fix <wrong> <right>. Alt+m mutes or unmutes your mic, Alt+s the computer sound,
-Alt+w asks for a recap of the last minutes (-recap, default 5m). Tab shows the
-dashboard on a narrow window; PgUp/PgDn or the mouse wheel scroll, End goes
+meeting (summary, decisions, open questions, fixes) and a chat input. Type a
+question about the meeting and press Enter, or a command: /help,
+/mute me|others, /recap [duration], /fix <wrong> <right>. Alt+m mutes or
+unmutes your mic, Alt+s the computer sound, Alt+w asks for a recap of the last
+minutes (-recap, default 5m). Tab shows the dashboard on a narrow window; PgUp/PgDn or the mouse wheel scroll, End goes
 back to live; hold Shift and drag to select text to copy. At the end, the
 final summary and the notes and transcript paths stay in the terminal.
 
