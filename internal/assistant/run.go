@@ -3,6 +3,7 @@ package assistant
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 )
@@ -33,8 +34,9 @@ type Config struct {
 	Interval time.Duration // shortest time between two updates
 	// Think sends one prompt to the model and returns its answer.
 	Think       func(instructions, transcript string) (string, error)
-	Out         io.Writer
+	Out         io.Writer       // plain output, used when View is nil
 	Interactive bool            // Out is a terminal: status line and dim lines
+	View        View            // shows the feed, status and dashboard; nil means NewPlainView on Out
 	Force       <-chan struct{} // closed on a second Ctrl+C: stop waiting at once
 	MuteHint    string          // mute keys for the status line, e.g. "m/s"; "" when there are none
 	RecapKey    string          // the key that asks for a recap, for the status line; "" when there is none
@@ -79,6 +81,9 @@ const (
 // Force is closed first. It returns an error only if the notes can't be
 // written at the end.
 func Run(c Config, events <-chan Event) error {
+	if c.View == nil {
+		c.View = NewPlainView(c.Out, c.Interactive, c.MuteHint, c.RecapKey)
+	}
 	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16),
 		lookupResults: make(chan lookupResult, 1), partials: map[string]string{}, muted: map[string]bool{}}
 	// Suggestion times are offsets from this start; with the wall clock, they
@@ -86,6 +91,8 @@ func Run(c Config, events <-chan Event) error {
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
 	ticker := time.NewTicker(Tick)
 	defer ticker.Stop()
+	s.board()
+	s.status(time.Now())
 
 	for events != nil {
 		select {
@@ -181,12 +188,13 @@ func (s *state) handle(ev Event) {
 		l := Line{Speaker: ev.Speaker, At: s.elapsed(time.Now()), Text: text}
 		s.lines = append(s.lines, l)
 		delete(s.partials, ev.Speaker)
-		s.print(s.dim(fmt.Sprintf("  %s %-6s %s", clock(l.At), l.Speaker, l.Text)))
+		s.show(Item{Kind: ItemTranscript, At: l.At, Speaker: l.Speaker, Text: l.Text,
+			Plain: s.dim(fmt.Sprintf("  %s %-6s %s", clock(l.At), l.Speaker, l.Text))})
 		if len(s.lines) == 1 {
 			_ = s.writeNotes(false) // a failure is shown in the feed
 		}
 	case NoticeEvent:
-		s.print(Clean(ev.Text))
+		s.notice(Clean(ev.Text))
 	case RecapEvent:
 		s.askRecap(time.Now())
 	case MuteEvent:
@@ -196,7 +204,7 @@ func (s *state) handle(ev Event) {
 			icon, word = "🔇", "muted"
 			delete(s.partials, ev.Speaker) // its words in progress won't be finished
 		}
-		s.print(fmt.Sprintf("%s %s %s at %s", icon, ev.Speaker, word, clock(s.elapsed(time.Now()))))
+		s.notice(fmt.Sprintf("%s %s %s at %s", icon, ev.Speaker, word, clock(s.elapsed(time.Now()))))
 	}
 }
 
@@ -214,11 +222,11 @@ func (s *state) askRecap(now time.Time) {
 		return
 	}
 	if s.recapAsked || (s.thinking && s.recapping) {
-		s.print(s.dim("📝 a recap is already on its way"))
+		s.info("📝 a recap is already on its way")
 		return
 	}
 	if len(recentLines(s.lines, s.elapsed(now), s.recapWindow())) == 0 {
-		s.print(s.dim("📝 nothing was said in the last " + WindowLabel(s.recapWindow())))
+		s.info("📝 nothing was said in the last " + WindowLabel(s.recapWindow()))
 		return
 	}
 	s.recapAsked = true
@@ -226,7 +234,7 @@ func (s *state) askRecap(now time.Time) {
 
 func (s *state) startRecap(now time.Time) {
 	s.recapAsked = false
-	s.print(s.dim(fmt.Sprintf("📝 recapping the last %s (%s)…", WindowLabel(s.recapWindow()), s.c.Engine)))
+	s.info(fmt.Sprintf("📝 recapping the last %s (%s)…", WindowLabel(s.recapWindow()), s.c.Engine))
 	instructions, transcript := RecapPrompt(s.mem, s.lines, s.elapsed(now), s.recapWindow())
 	s.call(now, s.analysed, true, instructions, transcript)
 }
@@ -242,18 +250,18 @@ func (s *state) finishRecap(r result) {
 	}
 	if err != nil {
 		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
-		s.print("⚠ recap failed: " + oneLine(msg, 200))
+		s.notice("⚠ recap failed: " + oneLine(msg, 200))
 		return
 	}
 	at := s.elapsed(time.Now())
 	points := cleanList(recap.Recap, maxRecapPoints)
 	if len(points) == 0 {
-		s.print(s.dim(fmt.Sprintf("📝 %s nothing notable in the last %s", clock(at), WindowLabel(s.recapWindow()))))
+		s.info(fmt.Sprintf("📝 %s nothing notable in the last %s", clock(at), WindowLabel(s.recapWindow())))
 		return
 	}
-	s.print(fmt.Sprintf("📝 %s Recap of the last %s:", clock(at), WindowLabel(s.recapWindow())))
+	s.notice(fmt.Sprintf("📝 %s Recap of the last %s:", clock(at), WindowLabel(s.recapWindow())))
 	for _, p := range points {
-		s.print("  • " + Clean(p))
+		s.show(Item{Kind: ItemAssist, At: at, Badge: "RECAP", Text: Clean(p), Plain: "  • " + Clean(p)})
 	}
 }
 
@@ -317,26 +325,31 @@ func (s *state) finish(r result) {
 		s.failures++
 		// Harness errors already start with "<engine> failed: ".
 		msg := strings.TrimPrefix(err.Error(), s.c.Engine+" failed: ")
-		s.print(fmt.Sprintf("⚠ %s failed: %s; next try in %s", s.c.Engine, oneLine(msg, 200), s.interval().Round(time.Second)))
+		s.notice(fmt.Sprintf("⚠ %s failed: %s; next try in %s", s.c.Engine, oneLine(msg, 200), s.interval().Round(time.Second)))
 		return
 	}
 	s.failures = 0
 	s.analysed = r.upto
 	at := s.elapsed(time.Now())
 	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
+	s.board()
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
-		line := fmt.Sprintf("%s %s %s: %s", l.icon, clock(at), l.label, Clean(sg.Text))
-		if sg.Priority == High {
+		it := Item{Kind: ItemAssist, At: at, Badge: suggestionBadges[sg.Type], Text: Clean(sg.Text), High: sg.Priority == High}
+		line := fmt.Sprintf("%s %s %s: %s", l.icon, clock(at), l.label, it.Text)
+		if it.High {
 			line = "‼ " + line
 		}
 		if note := suggestionNote(sg); note != "" {
-			line += s.dim(" — " + Clean(note))
+			it.Note = Clean(note)
+			line += s.dim(" — " + it.Note)
 		}
-		s.print(line)
+		it.Plain = line
+		s.show(it)
 	}
 	for _, d := range decisions {
-		s.print(fmt.Sprintf("✅ %s Decision: %s", clock(at), Clean(d)))
+		s.show(Item{Kind: ItemAssist, At: at, Badge: "DECISION", Text: Clean(d),
+			Plain: fmt.Sprintf("✅ %s Decision: %s", clock(at), Clean(d))})
 	}
 	_ = s.writeNotes(false) // a failure is shown in the feed
 	s.queueLookup(parsed, at)
@@ -367,7 +380,7 @@ func (s *state) queueLookup(r Reply, at time.Duration) {
 		keepWaiting()
 		if !s.limitShown {
 			s.limitShown = true
-			s.print(s.dim(fmt.Sprintf("📚 lookup limit reached (%d)", limit)))
+			s.info(fmt.Sprintf("📚 lookup limit reached (%d)", limit))
 		}
 		return
 	}
@@ -393,7 +406,8 @@ func (s *state) maybeLookup(now time.Time) {
 		return
 	}
 	s.looking = true
-	s.print(s.dim(fmt.Sprintf("🔎 %s Looking up: %s", clock(s.elapsed(now)), l.Query)))
+	s.show(Item{Kind: ItemAssist, At: s.elapsed(now), Badge: "LOOKUP", Text: l.Query,
+		Plain: s.dim(fmt.Sprintf("🔎 %s Looking up: %s", clock(s.elapsed(now)), l.Query))})
 	prompt := LibrarianPrompt(s.c.LibrarianInstructions, s.c.LibrarianTools, l, s.mem, now)
 	research, results := s.c.Research, s.lookupResults
 	go func() {
@@ -419,7 +433,7 @@ func (s *state) showRefused(calls []string) {
 		}
 		shown = append(shown, oneLine(c, 80))
 	}
-	s.print(s.dim(fmt.Sprintf("📚 refused %d tool call(s) not in librarian.allowed_tools: %s", len(calls), strings.Join(shown, ", "))))
+	s.info(fmt.Sprintf("📚 refused %d tool call(s) not in librarian.allowed_tools: %s", len(calls), strings.Join(shown, ", ")))
 }
 
 // finishLookup merges a librarian answer into the memory, the feed and the
@@ -433,12 +447,14 @@ func (s *state) finishLookup(r lookupResult) {
 		f, err = ParseFinding(r.reply.Answer)
 	}
 	if err != nil {
-		s.print("⚠ librarian failed: " + oneLine(err.Error(), 200))
+		s.notice("⚠ librarian failed: " + oneLine(err.Error(), 200))
 		return
 	}
 	f.Query, f.At = r.lookup.Query, s.elapsed(time.Now())
 	s.mem.AddFinding(f)
+	s.board()
 	if f.Found {
+		it := Item{Kind: ItemAssist, At: f.At, Badge: "LIBRARIAN", Text: f.Answer}
 		line := fmt.Sprintf("📚 %s Librarian: %s", clock(f.At), f.Answer)
 		var titles []string
 		for _, src := range f.Sources {
@@ -447,11 +463,13 @@ func (s *state) finishLookup(r lookupResult) {
 			}
 		}
 		if len(titles) > 0 {
-			line += " — " + strings.Join(titles, ", ")
+			it.Note = strings.Join(titles, ", ")
+			line += " — " + it.Note
 		}
-		s.print(line)
+		it.Plain = line
+		s.show(it)
 	} else {
-		s.print(s.dim("📚 nothing found for " + f.Query))
+		s.info("📚 nothing found for " + f.Query)
 	}
 	_ = s.writeNotes(false) // a failure is shown in the feed
 }
@@ -464,20 +482,20 @@ func (s *state) watchdog(now time.Time) {
 	s.gen++ // its answer, if it ever comes, is ignored
 	s.thinking = false
 	if s.recapping { // a lost recap does not slow the updates down
-		s.print(fmt.Sprintf("⚠ recap failed: %s did not answer in %s", s.c.Engine, limit.Round(time.Second)))
+		s.notice(fmt.Sprintf("⚠ recap failed: %s did not answer in %s", s.c.Engine, limit.Round(time.Second)))
 		return
 	}
 	s.failures++
-	s.print(fmt.Sprintf("⚠ %s did not answer in %s; skipping this update", s.c.Engine, limit.Round(time.Second)))
+	s.notice(fmt.Sprintf("⚠ %s did not answer in %s; skipping this update", s.c.Engine, limit.Round(time.Second)))
 }
 
 // end waits for the update in progress, then writes the final notes. It
 // ignores lookups: one in flight is not waited for, and none starts.
 func (s *state) end() error {
 	s.ending = true
-	s.clearStatus()
+	s.c.View.Status(Status{}) // clears the status line
 	if s.thinking {
-		s.print(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))
+		s.notice(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))
 		select {
 		case r := <-s.waitCurrent():
 			s.finish(r)
@@ -487,12 +505,12 @@ func (s *state) end() error {
 	}
 	if wordCount(s.lines) < minFinalWords {
 		if len(s.lines) > 0 {
-			s.print("Too little was said for a final summary.")
+			s.notice("Too little was said for a final summary.")
 		}
 		return s.writeNotes(false)
 	}
 
-	s.print(fmt.Sprintf("⏳ writing the final notes (%s)…", s.c.Engine))
+	s.notice(fmt.Sprintf("⏳ writing the final notes (%s)…", s.c.Engine))
 	instructions, transcript := FinalPrompt(s.c.Context, s.mem, s.lines)
 	s.call(time.Now(), len(s.lines), false, instructions, transcript)
 	select {
@@ -504,14 +522,15 @@ func (s *state) end() error {
 			parsed, err = Parse(answer)
 		}
 		if err != nil {
-			s.print(fmt.Sprintf("⚠ final notes failed: %s; the notes keep the live summary", oneLine(err.Error(), 160)))
+			s.notice(fmt.Sprintf("⚠ final notes failed: %s; the notes keep the live summary", oneLine(err.Error(), 160)))
 			return s.writeNotes(false)
 		}
 		s.mem.ApplyFinal(parsed)
+		s.board()
 		if err := s.writeNotes(true); err != nil {
 			return err
 		}
-		s.print("✓ Final notes written to " + s.c.Notes)
+		s.notice("✓ Final notes written to " + s.c.Notes)
 		return nil
 	case <-s.c.Force:
 		return s.writeNotes(false)
@@ -541,55 +560,40 @@ func (s *state) writeNotes(final bool) error {
 	err := WriteNotes(s.c.Notes, Render(s.mem, s.header, final, s.elapsed(time.Now())))
 	if err != nil && !s.notesErr {
 		s.notesErr = true
-		s.print("⚠ cannot write the notes: " + err.Error())
+		s.notice("⚠ cannot write the notes: " + err.Error())
 	}
 	return err
 }
 
-func (s *state) print(line string) {
-	s.clearStatus()
-	fmt.Fprintln(s.c.Out, line)
-	s.status(time.Now())
-}
+// suggestionBadges are the feed badges of the suggestion types.
+var suggestionBadges = map[string]string{TypeQuestion: "ASK", TypeAnswer: "ANSWER", TypeMissed: "MISSED", TypeRisk: "RISK"}
 
-func (s *state) clearStatus() {
-	if s.c.Interactive {
-		fmt.Fprint(s.c.Out, "\r\033[K")
-	}
-}
+func (s *state) show(it Item) { s.c.View.Show(it) }
+
+// notice shows text as is, info dimmed.
+func (s *state) notice(text string) { s.show(Item{Kind: ItemNotice, Text: text, Plain: text}) }
+func (s *state) info(text string)   { s.show(Item{Kind: ItemInfo, Text: text, Plain: s.dim(text)}) }
 
 func (s *state) status(now time.Time) {
-	if !s.c.Interactive {
-		return
+	st := Status{Elapsed: s.elapsed(now), Engine: s.c.Engine, State: "listening", Looking: s.looking,
+		Muted: map[string]bool{}, PartialSpeaker: s.lastSpeaker, Partial: s.partials[s.lastSpeaker]}
+	for side, m := range s.muted {
+		st.Muted[side] = m
 	}
-	line := "● ASSIST " + clock(s.elapsed(now))
-	for _, side := range []string{"me", "others"} {
-		if s.muted[side] {
-			line += "  " + side + " (muted)"
+	if s.thinking {
+		st.State, st.Busy = "thinking", now.Sub(s.thinkStart)
+		if s.recapping {
+			st.State = "recapping"
 		}
 	}
-	if p := s.partials[s.lastSpeaker]; p != "" {
-		line += fmt.Sprintf("  %s ▸ %q", s.lastSpeaker, lastRunes(p, 60))
-	}
-	if s.thinking && s.recapping {
-		line += fmt.Sprintf("  · recapping %ds (%s)", int(now.Sub(s.thinkStart).Seconds()), s.c.Engine)
-	} else if s.thinking {
-		line += fmt.Sprintf("  · thinking %ds (%s)", int(now.Sub(s.thinkStart).Seconds()), s.c.Engine)
-	} else {
-		line += "  · listening"
-	}
-	var keys []string
-	if s.c.MuteHint != "" {
-		keys = append(keys, s.c.MuteHint+": mute")
-	}
-	if s.c.RecapKey != "" {
-		keys = append(keys, s.c.RecapKey+": recap")
-	}
-	hint := "   (Ctrl+C to stop)"
-	if len(keys) > 0 {
-		hint = "   (" + strings.Join(append(keys, "Ctrl+C: stop"), " · ") + ")"
-	}
-	fmt.Fprint(s.c.Out, "\r\033[K"+line+hint)
+	s.c.View.Status(st)
+}
+
+// board sends the memory to the dashboard.
+func (s *state) board() {
+	m := s.mem
+	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources)})
 }
 
 func (s *state) dim(text string) string {
