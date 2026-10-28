@@ -77,3 +77,37 @@ func TestWatchSignalsTwoStageCtrlC(t *testing.T) {
 		t.Error("second Ctrl+C did not force")
 	}
 }
+
+// interrupt (Ctrl+C read by the full-screen view) counts like a SIGINT.
+func TestWatchSignalsInterrupt(t *testing.T) {
+	ctx, force, interrupt, stop := watchSignalsInterruptible()
+	interrupt()
+	if !cancelled(ctx.Done()) {
+		t.Fatal("first interrupt did not stop")
+	}
+	select {
+	case <-force:
+		t.Fatal("first interrupt forced")
+	default:
+	}
+	interrupt()
+	select {
+	case <-force:
+	case <-time.After(time.Second):
+		t.Fatal("second interrupt did not force")
+	}
+	stop()
+	interrupt() // must not panic (force is already closed)
+}
+
+func TestWatchSignalsInterruptAfterStop(t *testing.T) {
+	_, force, interrupt, stop := watchSignalsInterruptible()
+	stop()
+	interrupt()
+	interrupt()
+	select {
+	case <-force:
+		t.Error("interrupt after stop forced")
+	default:
+	}
+}

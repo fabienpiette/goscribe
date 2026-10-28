@@ -39,17 +39,29 @@ after every update.
 It captures the audio on its own: run it in a second terminal next to
 'goscribe record', or alone.
 
-While it runs, press m to mute or unmute your mic and s for the computer
-sound: a muted side is not transcribed (its live session gets silence), so
-nothing from it reaches the model or the notes. Each press affects only
-assist; mute record separately in its own terminal. Press w ("what did I
-miss?") for a short recap of the last minutes (-recap, default 5m).
+In a terminal it takes the full screen: the live feed, a dashboard of the
+meeting (summary, decisions, open questions) and a chat input. Type a question
+about the meeting and press Enter, or a command: /help, /mute me|others,
+/recap [duration]. Alt+m mutes or unmutes your mic, Alt+s the computer sound,
+Alt+w asks for a recap of the last minutes (-recap, default 5m). Tab shows the
+dashboard on a narrow window; PgUp/PgDn or the mouse wheel scroll, End goes
+back to live; hold Shift and drag to select text to copy. At the end, the
+final summary and the notes and transcript paths stay in the terminal.
+
+With -plain, or when the output is not a terminal, it prints the feed as
+lines instead; there, m and s mute and w asks for the recap.
+
+A muted side is not transcribed (its live session gets silence), so nothing
+from it reaches the model or the notes. Muting affects only assist; mute
+record separately in its own terminal. The transcript is written next to the
+notes, line by line (standup.md gets standup-transcript.md).
 
 EXAMPLES:
   goscribe assist -context ~/notes/standup/
   goscribe assist -context agenda.md -provider claude -o standup-assist.md
   goscribe assist -source system -language fr
   goscribe assist -provider codex -model gpt-6-luna
+  goscribe assist -plain -source system
 
 Good to know:
   - The -context files (.md) are sent to the -provider model with every update.
@@ -97,10 +109,11 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	keyterms := fs.String("keyterms", "", "Comma-separated names/jargon to favor (default: config elevenlabs_keyterms)")
 	elevenLabsKey := fs.String("elevenlabs-key", "", "ElevenLabs API key (default: config, then $ELEVENLABS_API_KEY)")
 	interval := fs.Duration("interval", 0, "Shortest time between two updates (default: 20s, 30s with claude/codex/hermes)")
-	recap := fs.Duration("recap", 0, "How far back the recap key (w) goes (default: config assist_recap, else 5m)")
+	recap := fs.Duration("recap", 0, "How far back a recap goes (w, Alt+w, /recap without a duration; default: config assist_recap, else 5m)")
 	librarian := fs.Bool("librarian", false, "Let the model look things up in your sources (librarian in the config; Claude Code)")
 	configFile := fs.String("config", "", "Config file (default: ~/.goscribe/config.yml)")
 	listSources := fs.Bool("list-sources", false, "List inputs and computer sound sources, then exit")
+	plain := fs.Bool("plain", false, "Print the feed as plain lines instead of the full-screen view (always so when not on a terminal)")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, assistUsage)
 		fs.PrintDefaults()
@@ -257,27 +270,35 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 
 	transcript := assistant.TranscriptPath(notes)
 
-	ctx, force, stopSignals := watchSignals()
+	out, _ := stdout.(*os.File)
+	tuiMode := out != nil && useTUI(*plain, os.Stdin, out)
+	ctx, force, interrupt, stopSignals := watchSignalsInterruptible()
 	defer stopSignals()
 
-	// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
-	toggle, restoreKeys := startKeys(os.Stdin, assistKeys())
-	defer restoreKeys()
+	var toggle <-chan string
+	restoreKeys := func() {}
+	var screenKeys chan string
 	muteHint, recapHint := "", ""
-	if toggle != nil {
-		muteHint, recapHint = assistMuteHint(sides), string(recapKey)
-		fmt.Fprintf(stdout, "Assist %s → %s (%s to mute or unmute, %s for a recap of the last %s, Ctrl+C to stop)\n",
-			header, notes+", transcript "+transcript, muteHint, recapHint, assistant.WindowLabel(recapWindow))
+	var notices []string
+	if tuiMode {
+		// Bubble Tea reads the keys: Alt+m/s/w come back on screenKeys.
+		screenKeys = make(chan string, 8)
+		toggle = screenKeys
+		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, len(background))
 	} else {
-		fmt.Fprintf(stdout, "Assist %s → %s (Ctrl+C to stop)\n", header, notes+", transcript "+transcript)
+		// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
+		toggle, restoreKeys = startKeys(os.Stdin, assistKeys())
+		keys := "Ctrl+C to stop"
+		if toggle != nil {
+			muteHint, recapHint = assistMuteHint(sides), string(recapKey)
+			keys = fmt.Sprintf("%s to mute or unmute, %s for a recap of the last %s, Ctrl+C to stop",
+				muteHint, recapHint, assistant.WindowLabel(recapWindow))
+		}
+		for _, line := range startupNotices(header, notes, transcript, keys, tooLong, len(background)) {
+			fmt.Fprintln(stdout, line)
+		}
 	}
-	if len(tooLong) > 0 {
-		fmt.Fprintf(stdout, "⚠ %d keyterm(s) over %d characters left out (live speech-to-text refuses them): %s\n",
-			len(tooLong), assistant.MaxKeytermLen, strings.Join(tooLong, ", "))
-	}
-	if len(background) > assistant.WarnContextBytes {
-		fmt.Fprintf(stdout, "⚠ the context is %d KB: every update resends it, which is slower and costlier\n", len(background)>>10)
-	}
+	defer restoreKeys()
 
 	local, closeLocal := localFallback(cfg, opts.Language)
 	defer closeLocal()
@@ -307,7 +328,19 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		acfg.LibrarianTools = lib.AllowedTools
 		acfg.MaxLookups = lib.MaxLookups
 	}
-	err = assistant.Run(acfg, events)
+	if tuiMode {
+		err = tuiSession{
+			cfg:       acfg,
+			notices:   notices,
+			sides:     names,
+			toggle:    screenKeys,
+			interrupt: interrupt,
+			start:     newTeaProgram(out),
+			stdio:     captureStdio,
+		}.run(events, stdout)
+	} else {
+		err = assistant.Run(acfg, events)
+	}
 	restoreKeys()
 	stopSignals()
 	if err != nil {

@@ -222,25 +222,48 @@ func printSources(stdout, stderr io.Writer) int {
 // stop) and the second into a closed force channel (immediate kill). stop
 // restores the default signal behavior.
 func watchSignals() (ctx context.Context, force <-chan struct{}, stop func()) {
+	ctx, force, _, stop = watchSignalsInterruptible()
+	return ctx, force, stop
+}
+
+// watchSignalsInterruptible is watchSignals plus interrupt, which counts like
+// a received signal: for a Ctrl+C read as a key by the full-screen view. It
+// never blocks and does nothing after stop.
+func watchSignalsInterruptible() (ctx context.Context, force <-chan struct{}, interrupt func(), stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sigs := make(chan os.Signal, 2)
 	// SIGHUP: closing the terminal stops the recording cleanly.
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	forceCh := make(chan struct{})
-	go func() {
-		if _, ok := <-sigs; !ok {
+	var mu sync.Mutex
+	hits, stopped := 0, false
+	interrupt = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped {
 			return
 		}
-		cancel()
-		if _, ok := <-sigs; ok {
+		hits++
+		switch hits {
+		case 1:
+			cancel()
+		case 2:
 			close(forceCh)
+		}
+	}
+	go func() {
+		for range sigs {
+			interrupt()
 		}
 	}()
 	var once sync.Once
-	return ctx, forceCh, func() {
+	return ctx, forceCh, interrupt, func() {
 		once.Do(func() {
 			// Stop before close: a signal sent to a closed channel would panic.
 			signal.Stop(sigs)
+			mu.Lock()
+			stopped = true
+			mu.Unlock()
 			close(sigs)
 			cancel()
 		})
