@@ -11,7 +11,7 @@ import (
 
 // Command is one parsed line of the chat input.
 type Command struct {
-	Name   string        // "help", "mute", "recap", "fix", "brief" or "question"
+	Name   string        // "help", "mute", "recap", "fix", "brief", "add" or "question"
 	Arg    string        // "me" or "others" for mute
 	Window time.Duration // recap window, 0 means the default
 	Text   string        // the question
@@ -20,6 +20,7 @@ type Command struct {
 	Wrong, Right string // /fix add: what was misheard and what it should read
 	N            int    // /fix rm, yes, no: the fix number; 0 means the latest or none given
 	// /brief reuses Op ("add", "list" or "rm"), Text and N.
+	// /add (alias /context) uses Op ("add" or "list") and Text, the target as typed.
 }
 
 // ErrEmpty means the input was blank; callers ignore it.
@@ -38,6 +39,8 @@ var Commands = []CommandHelp{
 	{"/fix [rm n]", "list the fixes, or stop fix n for new lines"},
 	{"/brief <text>", "add a standing instruction or fact for the assistant, e.g. /brief Sam is the PM"},
 	{"/brief [rm n]", "list the briefs, or remove brief n"},
+	{"/add <path|url>", "add a file, folder or web page to the context (alias /context)"},
+	{"/add", "list the sources added"},
 	{"<text>", "ask a question about the meeting"},
 }
 
@@ -47,6 +50,8 @@ const (
 	fixUsage    = "usage: /fix <wrong> <right>"
 	fixRmUsage  = "usage: /fix rm <n>"
 	fixAnsUsage = "usage: /fix yes|no [n]"
+
+	addUsage = "usage: /add <path or http(s) url>"
 
 	briefRmUsage = "usage: /brief rm <n>"
 	maxBriefLen  = maxItem
@@ -84,6 +89,8 @@ func ParseCommand(input string) (Command, error) {
 		return parseFix(input[len(fields[0]):])
 	case "brief":
 		return parseBrief(strings.TrimSpace(input[len(fields[0]):]))
+	case "add", "context":
+		return parseAdd(strings.TrimSpace(input[len(fields[0]):]))
 	}
 	return Command{}, fmt.Errorf("unknown command /%s: type /help", name)
 }
@@ -204,4 +211,38 @@ func parseBrief(rest string) (Command, error) {
 		return Command{}, err
 	}
 	return Command{Name: "brief", Op: "add", Text: text}, nil
+}
+
+// parseAdd reads what follows /add or /context: nothing lists the sources,
+// anything else is a target kept as typed, minus one pair of surrounding
+// double quotes. A scheme other than http or https is refused.
+func parseAdd(rest string) (Command, error) {
+	if rest == "" {
+		return Command{Name: "add", Op: "list"}, nil
+	}
+	if len(rest) >= 2 && rest[0] == '"' && rest[len(rest)-1] == '"' {
+		rest = strings.TrimSpace(rest[1 : len(rest)-1])
+	}
+	if rest == "" {
+		return Command{}, errors.New(addUsage)
+	}
+	if i := strings.Index(rest, "://"); i > 0 && isScheme(rest[:i]) {
+		if l := strings.ToLower(rest[:i]); l != "http" && l != "https" {
+			return Command{}, errors.New(addUsage)
+		}
+	}
+	return Command{Name: "add", Op: "add", Text: rest}, nil
+}
+
+// isScheme reports whether s looks like a URL scheme (letters, digits, + - .).
+func isScheme(s string) bool {
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case i > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }

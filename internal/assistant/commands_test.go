@@ -83,7 +83,7 @@ func TestParseCommand(t *testing.T) {
 }
 
 func TestCommandsHelpListsEveryCommand(t *testing.T) {
-	for _, in := range []string{"/help", "/mute me", "/recap", "/fix cash cache", "/fix", "/fix yes", "/fix rm 1", "/brief x", "/brief", "hello"} {
+	for _, in := range []string{"/help", "/mute me", "/recap", "/fix cash cache", "/fix", "/fix yes", "/fix rm 1", "/brief x", "/brief", "/add x.md", "/add", "/context x.md", "hello"} {
 		cmd, err := ParseCommand(in)
 		if err != nil {
 			t.Fatalf("%q: %v", in, err)
@@ -100,6 +100,52 @@ func TestCommandsHelpListsEveryCommand(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%s accepted by ParseCommand but missing from Commands", name)
+		}
+	}
+}
+
+func TestParseAdd(t *testing.T) {
+	for _, tc := range []struct {
+		in         string
+		op, target string
+		err        string
+	}{
+		{"/add notes/a b.md", "add", "notes/a b.md", ""},
+		{`/context "x y.md"`, "add", "x y.md", ""},
+		{"/add", "list", "", ""},
+		{"/context", "list", "", ""},
+		{"/add https://example.com/a", "add", "https://example.com/a", ""},
+		{"/add ~/notes", "add", "~/notes", ""},
+		{"/add ftp://x", "", "", "usage: /add <path or http(s) url>"},
+		{"/add file:///x", "", "", "usage: /add <path or http(s) url>"},
+		{`/add ""`, "", "", "usage: /add <path or http(s) url>"},
+	} {
+		cmd, err := ParseCommand(tc.in)
+		if tc.err != "" {
+			if err == nil || err.Error() != tc.err {
+				t.Errorf("%q: err = %v, want %q", tc.in, err, tc.err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: %v", tc.in, err)
+			continue
+		}
+		if cmd.Name != "add" || cmd.Op != tc.op || cmd.Text != tc.target {
+			t.Errorf("%q = %+v, want add/%s/%q", tc.in, cmd, tc.op, tc.target)
+		}
+	}
+}
+
+func TestCommandsHelpHasAddRows(t *testing.T) {
+	var usages []string
+	for _, h := range Commands {
+		usages = append(usages, h.Usage)
+	}
+	joined := strings.Join(usages, "|")
+	for _, want := range []string{"/add <path|url>", "/add"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Commands lacks %q", want)
 		}
 	}
 }

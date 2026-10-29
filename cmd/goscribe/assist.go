@@ -20,6 +20,7 @@ import (
 	"goscribe/internal/provider"
 	"goscribe/internal/realtime"
 	"goscribe/internal/recorder"
+	"goscribe/internal/webpage"
 	"goscribe/internal/whisperlocal"
 	"goscribe/pkg/config"
 )
@@ -42,7 +43,8 @@ It captures the audio on its own: run it in a second terminal next to
 In a terminal it takes the full screen: the live feed, a dashboard of the
 meeting (summary, decisions, open questions, brief, fixes) and a chat input.
 Type a question about the meeting and press Enter, or a command: /help,
-/mute me|others, /recap [duration], /fix <wrong> <right>, /brief <text>.
+/mute me|others, /recap [duration], /fix <wrong> <right>, /brief <text>,
+/add <path|url>.
 Alt+m mutes or unmutes your mic, Alt+s the computer sound, Alt+w asks for a
 recap of the last minutes (-recap, default 5m). Tab shows the dashboard on a narrow window;
 PgUp/PgDn or the mouse wheel scroll, End goes back to live; hold Shift and
@@ -59,11 +61,29 @@ mood" "dark mode". Suggested fixes show as FIX?; answer with /fix yes|no [n],
 nothing changes until you accept. /fix lists the fixes, /fix rm n stops one for
 new lines. Live speech-to-text keyterms are not updated mid-meeting.
 
+Naming an earlier assist notes file with -context restores its fixes and
+briefs and keeps the file as untrusted reference data, not trusted context; a
+folder restores nothing and leaves out earlier notes, transcripts and page copies
+(saved pages are marked as untrusted).
+
 /brief <text> gives the model a standing instruction or fact, trusted and sent
 with every update, question, recap and the final notes: /brief focus on risks
 to the release. It starts an update at once, once something has been said. /brief lists the briefs, /brief rm
 n removes one (at most 20, 300 characters each). They show under BRIEF on the
 dashboard and ## Brief in the notes.
+
+/add <path or url> (alias /context) adds a file, folder or web page to the
+context while the meeting runs and, once something has been said, starts an
+update at once, like /brief; /add alone lists the sources. A public page is
+fetched, converted to Markdown and saved in <notes name>-sources/<slug>.md
+(e.g. assist-2026-10-29_10-00-sources/); it is untrusted data. Docs behind a
+login (Google Docs, Notion, Linear and the like, any 401 or 403, a sign-in
+redirect) go to the librarian when -librarian is on, which reads them with its
+read-only tools; without it, the feed explains how to set it up. Naming an
+earlier notes file restores its fixes and briefs and is kept as untrusted
+reference data; a folder restores nothing and leaves out earlier notes,
+transcripts and page copies, which are marked as untrusted.
+The limit is 200 KB in total, counting -context and everything added.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute
@@ -218,13 +238,26 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	var background string
-	var contextFiles []string
-	if *contextPath != "" {
-		background, contextFiles, err = assistant.LoadContext(*contextPath)
-		if err != nil {
-			return usageErr("context: %v", err)
-		}
+	background, contextFiles, contextDocs, contextSkipped, err := loadContextArg(*contextPath)
+	if err != nil {
+		return usageErr("context: %v", err)
+	}
+	ctxBytes := len(background)
+	for _, d := range contextDocs {
+		ctxBytes += len(d.Text)
+	}
+	// An earlier assist notes file named by -context gives back its fixes and
+	// briefs; a parse error is a startup notice and the file is still an untrusted
+	// notes doc.
+	restore, restoreFrom, restoredTerms, restoreErr := restoreFromContext(*contextPath)
+	var restoreNotice string
+	if restoreErr != nil {
+		restoreNotice = fmt.Sprintf("⚠ %s: %v; nothing restored", filepath.Base(*contextPath), restoreErr)
+	}
+
+	var skippedNotice string
+	if len(contextSkipped) > 0 {
+		skippedNotice = assistant.LeftOutMessage(len(contextSkipped))
 	}
 
 	notes := *output
@@ -260,6 +293,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	fromContext := assistant.MergeKeyterms(nil, rawContext)
 	tooLong := assistant.LongKeyterms(append(append([]string{}, opts.Keyterms...), rawContext...))
 	opts.Keyterms = assistant.MergeKeyterms(assistant.MergeKeyterms(nil, opts.Keyterms), fromContext)
+	opts.Keyterms = assistant.MergeKeyterms(opts.Keyterms, restoredTerms)
 
 	sides := assistSides(inputs)
 	var names []string
@@ -278,6 +312,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		header += fmt.Sprintf(" · %d keyterm(s) from the context", len(fromContext))
 	}
 
+	if restore != nil {
+		header += " · restoring from " + restoreFrom
+	}
 	if *librarian {
 		header += fmt.Sprintf(" · librarian: %s, %d tool(s)", lib.Provider, len(lib.AllowedTools))
 	}
@@ -298,7 +335,13 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		// Bubble Tea reads the keys: Alt+m/s/w come back on screenKeys.
 		screenKeys = make(chan string, 8)
 		toggle = screenKeys
-		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, len(background))
+		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, ctxBytes)
+		if restoreNotice != "" {
+			notices = append(notices, restoreNotice)
+		}
+		if skippedNotice != "" {
+			notices = append(notices, skippedNotice)
+		}
 	} else {
 		// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
 		toggle, restoreKeys = startKeys(os.Stdin, assistKeys())
@@ -308,8 +351,14 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 			keys = fmt.Sprintf("%s to mute or unmute, %s for a recap of the last %s, Ctrl+C to stop",
 				muteHint, recapHint, assistant.WindowLabel(recapWindow))
 		}
-		for _, line := range startupNotices(header, notes, transcript, keys, tooLong, len(background)) {
+		for _, line := range startupNotices(header, notes, transcript, keys, tooLong, ctxBytes) {
 			fmt.Fprintln(stdout, line)
+		}
+		if restoreNotice != "" {
+			fmt.Fprintln(stdout, restoreNotice)
+		}
+		if skippedNotice != "" {
+			fmt.Fprintln(stdout, assistant.LeftOutShort(len(contextSkipped)))
 		}
 	}
 	defer restoreKeys()
@@ -319,6 +368,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	events := streamSides(ctx, force, sides, opts, local, toggle)
 	acfg := assistant.Config{
 		Context:     background,
+		Docs:        contextDocs,
 		Notes:       notes,
 		Transcript:  transcript,
 		Header:      header,
@@ -331,6 +381,10 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		RecapKey:    recapHint,
 		RecapWindow: recapWindow,
 		Force:       force,
+		Restore:     restore,
+		RestoreFrom: restoreFrom,
+		Fetch:       webpage.Fetch,
+		SourcesDir:  assistant.SourcesDir(notes),
 	}
 	if *librarian {
 		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}
@@ -668,4 +722,58 @@ func assistantEvent(speaker string, e realtime.Event) assistant.Event {
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return line
+}
+
+// loadContextArg reads what -context names. An earlier assist notes file is
+// not trusted background: its text comes back as a doc (Via "notes"), a
+// source the model may cite but that stays in the untrusted block, and the
+// background is empty. A folder, or a file that is not assist notes, is the
+// trusted background as before, except that the earlier notes, transcripts and page copies
+// inside it are left out (skipped). A saved page copy named directly is an
+// untrusted doc (Via "web"). An empty path loads nothing.
+func loadContextArg(path string) (background string, files []string, docs []assistant.Doc, skipped []string, err error) {
+	if path == "" {
+		return "", nil, nil, nil, nil
+	}
+	text, files, skipped, err := assistant.LoadContext(path)
+	if err != nil {
+		return "", nil, nil, skipped, err
+	}
+	if info, serr := os.Stat(path); serr == nil && !info.IsDir() {
+		base := filepath.Base(path)
+		if data, rerr := os.ReadFile(path); rerr == nil && assistant.IsPageCopy(string(data)) {
+			return "", nil, []assistant.Doc{{Name: base, Title: base, Origin: path, Via: "web", Text: text}}, nil, nil
+		}
+		if data, rerr := os.ReadFile(path); rerr == nil && assistant.IsTranscript(string(data)) {
+			return "", nil, []assistant.Doc{{Name: base, Title: base, Origin: path, Via: "transcript", Text: text}}, nil, nil
+		}
+		if _, ok, _ := assistant.LoadRestore(path); ok {
+			return "", nil, []assistant.Doc{{Name: base, Title: base, Origin: path, Via: "notes", Text: text}}, nil, nil
+		}
+	}
+	return text, files, nil, skipped, nil
+}
+
+// restoreFromContext reads the fixes and briefs of an earlier assist notes
+// file named by -context. A folder, a file that is not assist notes and an
+// empty path restore nothing. It also returns the file name for the feed and
+// the right-hand words of the fixes, which join the live keyterms. An error is
+// a notes file that cannot be trusted, such as one with two "## Fixes"
+// sections.
+func restoreFromContext(path string) (*assistant.Restored, string, []string, error) {
+	if path == "" {
+		return nil, "", nil, nil
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return nil, "", nil, nil
+	}
+	r, ok, err := assistant.LoadRestore(path)
+	if err != nil || !ok {
+		return nil, "", nil, err
+	}
+	var terms []string
+	for _, f := range r.Fixes {
+		terms = append(terms, f.Right)
+	}
+	return &r, filepath.Base(path), terms, nil
 }

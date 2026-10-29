@@ -16,17 +16,39 @@ const (
 	MaxContextBytes  = 200 << 10
 )
 
+// PageCopyMarker is the first line of every saved copy of a web page or
+// librarian document: the copy is untrusted data, never trusted background.
+const PageCopyMarker = "<!-- goscribe: copy of an untrusted page or document -->"
+
+// IsPageCopy says whether text is a saved copy of a page or document.
+func IsPageCopy(text string) bool {
+	first, _, _ := strings.Cut(text, "\n")
+	return strings.TrimRight(first, "\r") == PageCopyMarker
+}
+
+// LeftOutMessage tells the user that a folder scan skipped n untrusted files.
+func LeftOutMessage(n int) string {
+	return LeftOutShort(n) + "; /add one directly to use it as reference"
+}
+
+// LeftOutShort is LeftOutMessage without the /add advice, for when nothing can
+// be typed.
+func LeftOutShort(n int) string {
+	return fmt.Sprintf("left out %d file(s): earlier notes, transcripts and page copies are not trusted background", n)
+}
+
 // LoadContext reads the meeting background: one .md file, or every .md file
 // under a folder (recursively, sorted). Each file starts with a
-// "### file: <path>" header, relative to the folder. It returns the text and
-// the files read.
-func LoadContext(path string) (string, []string, error) {
+// "### file: <path>" header, relative to the folder. It returns the text, the
+// files read and, for a folder, the files left out because they are page
+// copies, transcripts or earlier assist notes: untrusted text never joins the trusted
+// background through a folder scan.
+func LoadContext(path string) (text string, files, skipped []string, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	root := filepath.Dir(path)
-	var files []string
 	if info.IsDir() {
 		root = path
 		err := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
@@ -42,12 +64,27 @@ func LoadContext(path string) (string, []string, error) {
 			return nil
 		})
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		if len(files) == 0 {
-			return "", nil, fmt.Errorf("no .md files in %s", path)
+			return "", nil, nil, fmt.Errorf("no .md files in %s", path)
 		}
 		sort.Strings(files)
+		var trusted []string
+		for _, f := range files {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			if IsPageCopy(string(data)) || isNotesText(string(data)) || isTranscriptText(string(data)) {
+				skipped = append(skipped, f)
+			} else {
+				trusted = append(trusted, f)
+			}
+		}
+		if files = trusted; len(files) == 0 {
+			return "", nil, skipped, fmt.Errorf("no trusted .md files in %s", path)
+		}
 	} else {
 		files = []string{path}
 	}
@@ -56,7 +93,7 @@ func LoadContext(path string) (string, []string, error) {
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		rel, err := filepath.Rel(root, f)
 		if err != nil {
@@ -64,11 +101,14 @@ func LoadContext(path string) (string, []string, error) {
 		}
 		fmt.Fprintf(&b, fileHeader+"%s\n\n%s\n\n", filepath.ToSlash(rel), strings.TrimSpace(string(data)))
 		if b.Len() > MaxContextBytes {
-			return "", nil, fmt.Errorf("context is over %d KB; pass fewer or smaller files", MaxContextBytes>>10)
+			return "", nil, nil, errContextTooBig
 		}
 	}
-	return strings.TrimSpace(b.String()), files, nil
+	return strings.TrimSpace(b.String()), files, skipped, nil
 }
+
+// errContextTooBig is what LoadContext returns when the files pass the limit.
+var errContextTooBig = fmt.Errorf("context is over %d KB; pass fewer or smaller files", MaxContextBytes>>10)
 
 const fileHeader = "### file: "
 

@@ -63,6 +63,11 @@ func printEndSummary(w io.Writer, m assistant.Memory, final bool, notes, transcr
 	if transcript != "" {
 		fmt.Fprintf(w, "Transcript: %s\n", transcript)
 	}
+	if dir := assistant.SourcesDir(notes); dir != "" {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			fmt.Fprintf(w, "Sources: %s\n", dir)
+		}
+	}
 }
 
 // teaProgram is the part of tea.Program that the session uses (a fake in tests).

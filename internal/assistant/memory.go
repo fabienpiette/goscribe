@@ -57,7 +57,23 @@ type Memory struct {
 	QA            []QA      // the user's typed questions and their answers, oldest first
 	Fixes         []Fix     // the corrections in force, in the order they were made
 	Briefs        []Brief   // the user's standing instructions and facts, in order
+	Docs          []Doc     // the sources the user added during the meeting, in order
 }
+
+// Doc is a source the user added with /add: a local file or folder, a web
+// page, or a document the librarian found.
+type Doc struct {
+	Name   string // as the model cites it: the "### file:" names for files
+	Title  string // what the user sees
+	Origin string // the path or URL it came from
+	Via    string // "file", "web", "librarian", "notes" (an earlier assist notes file) or "transcript"
+	Text   string
+	At     time.Duration
+}
+
+// Trusted says whether the text goes in the trusted context: only what the
+// user pointed at on their own disk does.
+func (d Doc) Trusted() bool { return d.Via == "file" }
 
 // Brief is an instruction or fact the user typed with /brief.
 type Brief struct {

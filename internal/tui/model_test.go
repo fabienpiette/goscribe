@@ -526,6 +526,30 @@ func TestModelBriefDispatch(t *testing.T) {
 	}
 }
 
+func TestModelAddDispatch(t *testing.T) {
+	r := &recorder{}
+	m := sized(t, r, 140, 30)
+	m = send(m, typed("/add x.md"), enter, typed("/add"), enter)
+	want := []assistant.AddRequest{{Op: "add", Target: "x.md"}, {Op: "list"}}
+	if len(r.sent) != len(want) {
+		t.Fatalf("sent %d events, want %d: %+v", len(r.sent), len(want), r.sent)
+	}
+	for i, w := range want {
+		if r.sent[i].Kind != assistant.AddEvent || r.sent[i].Add != w {
+			t.Errorf("event %d = %+v, want AddEvent %+v", i, r.sent[i], w)
+		}
+	}
+
+	r.sent = nil
+	m = send(m, typed("/add ftp://x"), enter)
+	if len(r.sent) != 0 {
+		t.Errorf("a bad /add was sent: %+v", r.sent)
+	}
+	if !strings.Contains(m.View(), "usage: /add <path or http(s) url>") {
+		t.Errorf("no usage error in the feed:\n%s", m.View())
+	}
+}
+
 func TestModelBriefSection(t *testing.T) {
 	board := BoardMsg{Summary: "Design tokens v2", OpenQuestions: []string{"Who owns the rollback?"}, Sources: []string{"agenda.md"}}
 	m := send(sized(t, &recorder{}, 140, 30), board)

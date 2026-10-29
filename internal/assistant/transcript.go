@@ -16,6 +16,15 @@ func TranscriptPath(notes string) string {
 	return strings.TrimSuffix(notes, filepath.Ext(notes)) + "-transcript.md"
 }
 
+// SourcesDir is the folder next to the notes that holds what /add saves: the
+// notes name, without ".md", with "-sources". It is "" without notes.
+func SourcesDir(notes string) string {
+	if notes == "" {
+		return ""
+	}
+	return strings.TrimSuffix(notes, ".md") + "-sources"
+}
+
 func transcriptLine(l Line) string {
 	return fmt.Sprintf("[%s] %s: %s\n", clock(l.At), l.Speaker, l.Text)
 }
@@ -33,6 +42,13 @@ func AppendTranscript(path string, l Line) error {
 	return f.Close()
 }
 
+// isTranscriptText says whether text is a transcript file: raw speech, so
+// never trusted background.
+func isTranscriptText(text string) bool {
+	first, _, _ := strings.Cut(text, "\n")
+	return strings.TrimSuffix(first, "\r") == "# Transcript"
+}
+
 // WriteTranscript rewrites the whole transcript atomically: the header, then
 // every line. It starts the file and fixes lines already appended.
 func WriteTranscript(path, header string, lines []Line) error {
@@ -43,3 +59,6 @@ func WriteTranscript(path, header string, lines []Line) error {
 	}
 	return WriteNotes(path, b.String())
 }
+
+// IsTranscript says whether text is a transcript file written by assist.
+func IsTranscript(text string) bool { return isTranscriptText(text) }

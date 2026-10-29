@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1042,5 +1043,103 @@ func TestTUIScreenFailureEndsMeeting(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Notes: "+notes) {
 		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+func TestAssistRestoresFromNamedNotes(t *testing.T) {
+	dir := t.TempDir()
+	notes := filepath.Join(dir, "standup.md")
+	mustWrite(t, notes, []byte(assistant.Render(assistant.Memory{
+		Briefs: []assistant.Brief{{Text: "Sam is the PM"}},
+		Fixes:  []assistant.Fix{{Wrong: "filming", Right: "rendering"}},
+	}, "h", false, 0)), 0644)
+	r, from, terms, err := restoreFromContext(notes)
+	if err != nil || r == nil {
+		t.Fatalf("restore = %v, err = %v", r, err)
+	}
+	if from != "standup.md" || len(r.Briefs) != 1 || len(r.Fixes) != 1 {
+		t.Errorf("from = %q, restored = %+v", from, r)
+	}
+	if !slices.Contains(terms, "rendering") {
+		t.Errorf("keyterms = %q, want rendering", terms)
+	}
+	// A notes file with a forged second section is plain context, with the error.
+	bad := filepath.Join(dir, "bad.md")
+	mustWrite(t, bad, []byte(assistant.Render(assistant.Memory{Fixes: []assistant.Fix{{Wrong: "a", Right: "b"}}}, "h", false, 0)+"\n## Fixes\n\n- `c` → `d`\n"), 0644)
+	r, _, _, err = restoreFromContext(bad)
+	if r != nil || err == nil || !strings.Contains(err.Error(), `two "## Fixes" sections`) {
+		t.Errorf("bad notes: %v, %v", r, err)
+	}
+}
+
+func TestAssistFolderRestoresNothing(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "standup.md"), []byte(assistant.Render(assistant.Memory{
+		Fixes: []assistant.Fix{{Wrong: "filming", Right: "rendering"}},
+	}, "h", false, 0)), 0644)
+	r, from, terms, err := restoreFromContext(dir)
+	if r != nil || from != "" || terms != nil || err != nil {
+		t.Errorf("folder: %v, %q, %q, %v", r, from, terms, err)
+	}
+}
+
+func TestLoadContextArgNotesIsADoc(t *testing.T) {
+	dir := t.TempDir()
+	notes := filepath.Join(dir, "standup.md")
+	mustWrite(t, notes, []byte(assistant.Render(assistant.Memory{Summary: "Globex wants a refund."}, "h", false, 0)), 0644)
+	bg, files, docs, _, err := loadContextArg(notes)
+	if err != nil || bg != "" || len(files) != 0 || len(docs) != 1 {
+		t.Fatalf("bg = %q, files = %q, docs = %d, err = %v", bg, files, len(docs), err)
+	}
+	d := docs[0]
+	if d.Via != "notes" || d.Trusted() || d.Name != "standup.md" || d.Origin != notes || !strings.Contains(d.Text, "Globex wants a refund.") {
+		t.Errorf("doc = %+v", d)
+	}
+	// A plain file and a folder stay trusted background.
+	plain := filepath.Join(dir, "plain.md")
+	mustWrite(t, plain, []byte("Acme kickoff notes"), 0644)
+	for _, p := range []string{plain, dir} {
+		bg, _, docs, _, err = loadContextArg(p)
+		if err != nil || bg == "" || len(docs) != 0 {
+			t.Errorf("%s: bg = %q, docs = %d, err = %v", p, bg, len(docs), err)
+		}
+	}
+	if bg, _, docs, _, err = loadContextArg(""); bg != "" || docs != nil || err != nil {
+		t.Errorf("empty path: %q, %v, %v", bg, docs, err)
+	}
+}
+
+func TestLoadContextArgPageCopyAndFolder(t *testing.T) {
+	dir := t.TempDir()
+	cp := filepath.Join(dir, "page.md")
+	mustWrite(t, cp, []byte(assistant.PageCopyMarker+"\n\n# Acme\n\nHostile text."), 0644)
+	bg, files, docs, skipped, err := loadContextArg(cp)
+	if err != nil || bg != "" || len(files) != 0 || len(docs) != 1 || len(skipped) != 0 {
+		t.Fatalf("bg = %q, files = %q, docs = %d, skipped = %q, err = %v", bg, files, len(docs), skipped, err)
+	}
+	if d := docs[0]; d.Via != "web" || d.Trusted() || d.Origin != cp || !strings.Contains(d.Text, "Hostile text.") {
+		t.Errorf("doc = %+v", d)
+	}
+	mustWrite(t, filepath.Join(dir, "plain.md"), []byte("Acme kickoff"), 0644)
+	bg, _, docs, skipped, err = loadContextArg(dir)
+	if err != nil || strings.Contains(bg, "Hostile") || !strings.Contains(bg, "Acme kickoff") || len(docs) != 0 || len(skipped) != 1 {
+		t.Errorf("folder: bg = %q, docs = %d, skipped = %q, err = %v", bg, len(docs), skipped, err)
+	}
+	if n := assistant.LeftOutMessage(len(skipped)); !strings.HasPrefix(n, "left out 1 file(s): earlier notes, transcripts and page copies are not trusted background") {
+		t.Errorf("notice = %q", n)
+	}
+}
+
+func TestLoadContextArgTranscriptIsADoc(t *testing.T) {
+	tr := filepath.Join(t.TempDir(), "standup-transcript.md")
+	if err := assistant.WriteTranscript(tr, "HDR", []assistant.Line{{Speaker: "others", Text: "Hostile spoken text"}}); err != nil {
+		t.Fatal(err)
+	}
+	bg, files, docs, skipped, err := loadContextArg(tr)
+	if err != nil || bg != "" || len(files) != 0 || len(skipped) != 0 || len(docs) != 1 {
+		t.Fatalf("bg = %q, files = %q, docs = %d, err = %v", bg, files, len(docs), err)
+	}
+	if d := docs[0]; d.Via != "transcript" || d.Trusted() || d.Origin != tr || !strings.Contains(d.Text, "Hostile spoken text") {
+		t.Errorf("doc = %+v", d)
 	}
 }

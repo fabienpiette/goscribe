@@ -1,12 +1,15 @@
 package assistant
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
 	"time"
+
+	"goscribe/internal/webpage"
 )
 
 type EventKind int
@@ -20,6 +23,7 @@ const (
 	QuestionEvent                  // the user typed a question (Text)
 	FixEvent                       // the user typed a /fix command (Fix)
 	BriefEvent                     // the user typed a /brief command (Brief)
+	AddEvent                       // the user typed an /add command (Add)
 )
 
 // BriefRequest is a parsed /brief command: Op is "add", "list" or "rm".
@@ -28,6 +32,10 @@ type BriefRequest struct {
 	Text string // add: the brief
 	N    int    // rm: the brief number, from 1
 }
+
+// AddRequest is a parsed /add command: Op is "add" (Target is a path) or
+// "list".
+type AddRequest struct{ Op, Target string }
 
 // FixRequest is a parsed /fix command: Op is "add", "list", "rm", "yes" or
 // "no"; N is 0 for the latest or none given.
@@ -44,6 +52,7 @@ type Event struct {
 	Muted   bool         // MuteEvent: the side is now muted
 	Fix     FixRequest   // FixEvent: what the user asked
 	Brief   BriefRequest // BriefEvent: what the user asked
+	Add     AddRequest   // AddEvent: what the user asked
 	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
 	Window time.Duration
 }
@@ -76,6 +85,17 @@ type Config struct {
 	LibrarianInstructions string   // the user's sources and how to search them
 	LibrarianTools        []string // the librarian's allowed tools, listed in its prompt
 	MaxLookups            int      // lookups per meeting; 0 or less means defaultMaxLookups
+	// Restore holds the briefs and fixes of an earlier meeting, put in force
+	// at the start; RestoreFrom is the file name shown in the feed.
+	Restore     *Restored
+	RestoreFrom string
+	// Docs are sources that are there from the start and are not trusted, such
+	// as an earlier notes file named by -context. They count toward the limit.
+	Docs []Doc
+	// Fetch reads a public web page for /add; nil means pages can't be added.
+	Fetch func(ctx context.Context, url string) (webpage.Page, error)
+	// SourcesDir is where /add saves a copy of each page ("" = no copy).
+	SourcesDir string
 }
 
 // ResearchReply is the librarian's answer and the tool calls that its
@@ -114,12 +134,20 @@ func Run(c Config, events <-chan Event) error {
 		c.View = NewPlainView(c.Out, c.Interactive, c.MuteHint, c.RecapKey)
 	}
 	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16),
-		lookupResults: make(chan lookupResult, 1), answers: make(chan qaResult, 4), partials: map[string]string{}, muted: map[string]bool{}}
+		lookupResults: make(chan lookupResult, 1), answers: make(chan qaResult, 4), fetched: make(chan fetchResult, 8), partials: map[string]string{}, muted: map[string]bool{}}
 	// Suggestion times are offsets from this start; with the wall clock, they
 	// can be matched against a recording started at another moment.
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
 	ticker := time.NewTicker(Tick)
 	defer ticker.Stop()
+	for _, d := range c.Docs {
+		d.Text = CleanDoc(d.Text)
+		s.mem.Docs = append(s.mem.Docs, d)
+		s.addSource(d.Name)
+	}
+	if c.Restore != nil {
+		s.restore(*c.Restore, c.RestoreFrom)
+	}
 	s.board()
 	s.status(time.Now())
 
@@ -147,6 +175,9 @@ func Run(c Config, events <-chan Event) error {
 		case r := <-s.answers:
 			s.finishQuestion(r)
 			s.maybeAsk(time.Now())
+		case r := <-s.fetched:
+			s.finishFetch(r)
+			s.maybeStart(time.Now())
 		case now := <-ticker.C:
 			s.watchdog(now)
 			s.maybeStart(now)
@@ -179,6 +210,7 @@ type qaResult struct {
 
 type lookupResult struct {
 	lookup Lookup
+	doc    string // the URL of a document the librarian was asked to read; lookup is then empty
 	reply  ResearchReply
 	err    error
 }
@@ -210,8 +242,10 @@ type state struct {
 	looking       bool    // a librarian lookup is in flight
 	pending       *Lookup // the newest lookup waiting for it
 	pendingSince  time.Time
-	limitShown    bool // the lookup limit line was printed
-	ending        bool // the meeting is over: no new lookups
+	docQueue      []string // login-walled docs the user added, waiting for the librarian
+	docURL        string   // the doc the lookup in flight reads, if it is one
+	limitShown    bool     // the lookup limit line was printed
+	ending        bool     // the meeting is over: no new lookups
 	lookupResults chan lookupResult
 
 	// Typed questions have their own call, so they never delay the updates.
@@ -221,6 +255,12 @@ type state struct {
 	askGen    int // abandoned question calls carry an older askGen and are ignored
 	answers   chan qaResult
 
+	// Pages for /add are fetched in the background; after the end their
+	// results are no longer read.
+	fetching int // fetches in flight
+	fetched  chan fetchResult
+	copyErr  bool // the failure to save a page copy was shown
+
 	// lateFixes were made while the update in flight was asked: its reply
 	// does not know them, so they are applied to it before the memory takes
 	// it. Reset when the next update starts.
@@ -228,7 +268,8 @@ type state struct {
 
 	proposals []proposal // fixes the model suggested, numbered from 1
 
-	briefAsked bool // a brief waits for the next update to start at once
+	updateAsked bool     // a brief or a source waits for the next update to start at once
+	changes     []string // trusted lines for the next update: what the user changed
 
 	finalWritten bool // the final notes were written
 
@@ -274,6 +315,8 @@ func (s *state) handle(ev Event) {
 		s.fix(ev.Fix)
 	case BriefEvent:
 		s.brief(ev.Brief)
+	case AddEvent:
+		s.add(ev.Add)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -440,8 +483,8 @@ func (s *state) maybeStart(now time.Time) {
 	if s.thinking {
 		return
 	}
-	if s.briefAsked && len(s.lines) > 0 {
-		s.startBriefUpdate(now)
+	if s.updateAsked && len(s.lines) > 0 {
+		s.startAskedUpdate(now)
 		return
 	}
 	if s.analysed == len(s.lines) || now.Sub(s.lastStart) < s.interval() {
@@ -452,7 +495,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, false, s.unacceptedGuesses())
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, s.takeChanges(), s.unacceptedGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
 
@@ -570,7 +613,15 @@ func (s *state) queueLookup(r Reply, at time.Duration) {
 // maybeLookup drops a waiting lookup once it is too old (silently, and out of
 // Asked: it never ran), and starts it when the librarian is idle.
 func (s *state) maybeLookup(now time.Time) {
-	if s.pending == nil || s.looking {
+	if s.looking {
+		return
+	}
+	if len(s.docQueue) > 0 { // the user's own request: first, never dropped, not in Asked
+		s.startDoc(s.docQueue[0], now)
+		s.docQueue = s.docQueue[1:]
+		return
+	}
+	if s.pending == nil {
 		return
 	}
 	l := *s.pending
@@ -588,6 +639,20 @@ func (s *state) maybeLookup(now time.Time) {
 		reply, err := research(prompt)
 		select {
 		case results <- lookupResult{lookup: l, reply: reply, err: err}:
+		default: // only after the end, when nobody reads results
+		}
+	}()
+}
+
+// startDoc asks the librarian to read one document in the background.
+func (s *state) startDoc(url string, now time.Time) {
+	s.looking, s.docURL = true, url
+	prompt := LibrarianDocPrompt(s.c.LibrarianInstructions, s.c.LibrarianTools, url, now)
+	research, results := s.c.Research, s.lookupResults
+	go func() {
+		reply, err := research(prompt)
+		select {
+		case results <- lookupResult{doc: url, reply: reply, err: err}:
 		default: // only after the end, when nobody reads results
 		}
 	}()
@@ -613,8 +678,12 @@ func (s *state) showRefused(calls []string) {
 // finishLookup merges a librarian answer into the memory, the feed and the
 // notes, then starts the waiting lookup, if any.
 func (s *state) finishLookup(r lookupResult) {
-	s.looking = false
+	s.looking, s.docURL = false, ""
 	defer s.maybeLookup(time.Now())
+	if r.doc != "" {
+		s.finishDoc(r)
+		return
+	}
 	s.showRefused(r.reply.Refused)
 	f, err := Finding{}, r.err
 	if err == nil {
@@ -687,6 +756,7 @@ func (s *state) end() error {
 		}
 	}()
 	s.ending = true
+	s.docQueue = nil          // like waiting lookups, queued docs are dropped
 	s.c.View.Status(Status{}) // clears the status line
 	if s.thinking {
 		s.notice(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))
@@ -778,6 +848,8 @@ func (s *state) await(res <-chan result) (result, bool) {
 				s.info("the meeting is over: fixes are closed")
 			case BriefEvent:
 				s.info("the meeting is over: briefs are closed")
+			case AddEvent:
+				s.info("the meeting is over: sources are closed")
 			}
 		}
 	}
@@ -882,7 +954,16 @@ func (s *state) board() {
 		briefs = append(briefs, b.Text)
 	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
-		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes, Briefs: briefs})
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: s.boardSources(), Fixes: fixes, Briefs: briefs})
+}
+
+// boardSources is the context file names, then the title of each doc added.
+func (s *state) boardSources() []string {
+	names := Sources(s.c.Context)
+	for _, d := range s.mem.Docs {
+		names = append(names, d.Title)
+	}
+	return names
 }
 
 func (s *state) dim(text string) string {

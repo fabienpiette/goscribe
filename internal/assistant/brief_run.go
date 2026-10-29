@@ -47,7 +47,8 @@ func (s *state) addBrief(text string) {
 	s.board()
 	s.show(Item{Kind: ItemAssist, At: at, Badge: "BRIEF", Text: text, Note: fmt.Sprintf("brief %d", n),
 		Plain: fmt.Sprintf("📌 %s Brief %d: %s", clock(at), n, text)})
-	s.briefAsked = len(s.lines) > 0
+	s.updateAsked = len(s.lines) > 0
+	s.addChange(briefChangedLine)
 }
 
 // listBriefs lists the briefs in force.
@@ -74,13 +75,31 @@ func (s *state) removeBrief(n int) {
 	s.info(fmt.Sprintf("brief %d removed: %s", n, b.Text))
 }
 
-// startBriefUpdate starts the update a new brief asked for, over all the lines
-// so far, whether or not new ones came since the last update. Clearing
-// briefAsked here, not when the update ends, lets a failed one fall back to
-// the normal backoff.
-func (s *state) startBriefUpdate(now time.Time) {
-	s.briefAsked = false
+// briefChangedLine tells the next update that a brief changed.
+const briefChangedLine = "The brief changed since the last update: check the summary, lists and suggestions against it."
+
+// addChange notes a trusted line for the next update, once.
+func (s *state) addChange(line string) {
+	if !slices.Contains(s.changes, line) {
+		s.changes = append(s.changes, line)
+	}
+}
+
+// takeChanges returns the lines for the update that starts now, and clears
+// them: a failed update does not carry them over.
+func (s *state) takeChanges() []string {
+	c := s.changes
+	s.changes = nil
+	return c
+}
+
+// startAskedUpdate starts the update a new brief or source asked for, over all
+// the lines so far, whether or not new ones came since the last update.
+// Clearing updateAsked here, not when the update ends, lets a failed one fall
+// back to the normal backoff.
+func (s *state) startAskedUpdate(now time.Time) {
+	s.updateAsked = false
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, true, s.unacceptedGuesses())
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, s.takeChanges(), s.unacceptedGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
