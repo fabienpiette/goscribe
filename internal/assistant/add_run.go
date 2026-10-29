@@ -48,7 +48,7 @@ func (s *state) addLocal(target string) {
 		s.info("that is this meeting's own file")
 		return
 	}
-	text, files, err := LoadContext(path)
+	text, files, skipped, err := LoadContext(path)
 	if err != nil {
 		if errors.Is(err, errContextTooBig) {
 			s.refuseBig(path)
@@ -83,7 +83,13 @@ func (s *state) addLocal(target string) {
 	var restored Restored
 	notes, restoreErr := false, error(nil)
 	if !info.IsDir() {
-		restored, notes, restoreErr = LoadRestore(path)
+		if data, err := os.ReadFile(path); err == nil && IsPageCopy(string(data)) {
+			// A saved page or document: reference data, never restored from.
+			d.Via, d.Name = "web", Clean(base)
+			names = []string{d.Name}
+		} else {
+			restored, notes, restoreErr = LoadRestore(path)
+		}
 	}
 	if notes {
 		// Model-written text and answers from documents written by others:
@@ -97,6 +103,9 @@ func (s *state) addLocal(target string) {
 	}
 	for _, n := range names {
 		s.addSource(n)
+	}
+	if len(skipped) > 0 {
+		s.info(LeftOutMessage(len(skipped)))
 	}
 	switch {
 	case restoreErr != nil:
@@ -328,7 +337,7 @@ func (s *state) addFetched(via, rawTitle, origin, final, markdown string) {
 	if s.c.SourcesDir == "" {
 		return
 	}
-	body := fmt.Sprintf("# %s\n\nSource: %s\n\n%s\n", title, Clean(final), md)
+	body := fmt.Sprintf("%s\n\n# %s\n\nSource: %s\n\n%s\n", PageCopyMarker, title, Clean(final), md)
 	err := os.MkdirAll(s.c.SourcesDir, 0o755)
 	if err == nil {
 		err = os.WriteFile(filepath.Join(s.c.SourcesDir, d.Name), []byte(body), 0o644)

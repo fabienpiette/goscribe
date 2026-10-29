@@ -63,7 +63,8 @@ new lines. Live speech-to-text keyterms are not updated mid-meeting.
 
 Naming an earlier assist notes file with -context restores its fixes and
 briefs and keeps the file as untrusted reference data, not trusted context; a
-folder restores nothing.
+folder restores nothing and leaves out earlier notes and page copies (saved
+pages are marked as untrusted).
 
 /brief <text> gives the model a standing instruction or fact, trusted and sent
 with every update, question, recap and the final notes: /brief focus on risks
@@ -80,7 +81,8 @@ login (Google Docs, Notion, Linear and the like, any 401 or 403, a sign-in
 redirect) go to the librarian when -librarian is on, which reads them with its
 read-only tools; without it, the feed explains how to set it up. Naming an
 earlier notes file restores its fixes and briefs and is kept as untrusted
-reference data; a folder restores nothing.
+reference data; a folder restores nothing and leaves out earlier notes and
+page copies, which are marked as untrusted.
 The limit is 200 KB in total, counting -context and everything added.
 
 A muted side is not transcribed (its live session gets silence), so nothing
@@ -236,7 +238,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	background, contextFiles, contextDocs, err := loadContextArg(*contextPath)
+	background, contextFiles, contextDocs, contextSkipped, err := loadContextArg(*contextPath)
 	if err != nil {
 		return usageErr("context: %v", err)
 	}
@@ -250,6 +252,11 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	var restoreNotice string
 	if restoreErr != nil {
 		restoreNotice = fmt.Sprintf("⚠ %s: %v; nothing restored", filepath.Base(*contextPath), restoreErr)
+	}
+
+	var skippedNotice string
+	if len(contextSkipped) > 0 {
+		skippedNotice = assistant.LeftOutMessage(len(contextSkipped))
 	}
 
 	notes := *output
@@ -331,6 +338,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		if restoreNotice != "" {
 			notices = append(notices, restoreNotice)
 		}
+		if skippedNotice != "" {
+			notices = append(notices, skippedNotice)
+		}
 	} else {
 		// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
 		toggle, restoreKeys = startKeys(os.Stdin, assistKeys())
@@ -345,6 +355,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		}
 		if restoreNotice != "" {
 			fmt.Fprintln(stdout, restoreNotice)
+		}
+		if skippedNotice != "" {
+			fmt.Fprintln(stdout, skippedNotice)
 		}
 	}
 	defer restoreKeys()
@@ -714,22 +727,27 @@ func firstLine(s string) string {
 // not trusted background: its text comes back as a doc (Via "notes"), a
 // source the model may cite but that stays in the untrusted block, and the
 // background is empty. A folder, or a file that is not assist notes, is the
-// trusted background as before. An empty path loads nothing.
-func loadContextArg(path string) (background string, files []string, docs []assistant.Doc, err error) {
+// trusted background as before, except that the earlier notes and page copies
+// inside it are left out (skipped). A saved page copy named directly is an
+// untrusted doc (Via "web"). An empty path loads nothing.
+func loadContextArg(path string) (background string, files []string, docs []assistant.Doc, skipped []string, err error) {
 	if path == "" {
-		return "", nil, nil, nil
+		return "", nil, nil, nil, nil
 	}
-	text, files, err := assistant.LoadContext(path)
+	text, files, skipped, err := assistant.LoadContext(path)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, skipped, err
 	}
 	if info, serr := os.Stat(path); serr == nil && !info.IsDir() {
+		base := filepath.Base(path)
+		if data, rerr := os.ReadFile(path); rerr == nil && assistant.IsPageCopy(string(data)) {
+			return "", nil, []assistant.Doc{{Name: base, Title: base, Origin: path, Via: "web", Text: text}}, nil, nil
+		}
 		if _, ok, _ := assistant.LoadRestore(path); ok {
-			base := filepath.Base(path)
-			return "", nil, []assistant.Doc{{Name: base, Title: base, Origin: path, Via: "notes", Text: text}}, nil
+			return "", nil, []assistant.Doc{{Name: base, Title: base, Origin: path, Via: "notes", Text: text}}, nil, nil
 		}
 	}
-	return text, files, nil, nil
+	return text, files, nil, skipped, nil
 }
 
 // restoreFromContext reads the fixes and briefs of an earlier assist notes

@@ -30,10 +30,10 @@ func LoadRestore(path string) (Restored, bool, error) {
 // that appears twice is an error, and then nothing is restored: a model could
 // have forged the second one.
 func ParseNotes(text string) (r Restored, ok bool, err error) {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	if lines[0] != "# Meeting notes" || !slices.Contains(lines[:min(len(lines), 5)], draftNote) {
+	if IsPageCopy(text) || !isNotesText(text) {
 		return Restored{}, false, nil
 	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	section, seen := "", map[string]bool{}
 	var briefs []string
 	var fixes []Fix
@@ -68,6 +68,13 @@ func ParseNotes(text string) (r Restored, ok bool, err error) {
 		}
 	}
 	return Restored{Briefs: briefs, Fixes: fixes, Skipped: skipped}, true, nil
+}
+
+// isNotesText says whether text looks like an assist notes file: "# Meeting
+// notes" on the first line and the draft note in the first five.
+func isNotesText(text string) bool {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	return lines[0] == "# Meeting notes" && slices.Contains(lines[:min(len(lines), 5)], draftNote)
 }
 
 // parseFixLine reads "- `wrong` → `right`", with " _(suggested)_" after it for

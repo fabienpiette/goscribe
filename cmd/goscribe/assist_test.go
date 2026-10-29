@@ -1087,7 +1087,7 @@ func TestLoadContextArgNotesIsADoc(t *testing.T) {
 	dir := t.TempDir()
 	notes := filepath.Join(dir, "standup.md")
 	mustWrite(t, notes, []byte(assistant.Render(assistant.Memory{Summary: "Globex wants a refund."}, "h", false, 0)), 0644)
-	bg, files, docs, err := loadContextArg(notes)
+	bg, files, docs, _, err := loadContextArg(notes)
 	if err != nil || bg != "" || len(files) != 0 || len(docs) != 1 {
 		t.Fatalf("bg = %q, files = %q, docs = %d, err = %v", bg, files, len(docs), err)
 	}
@@ -1099,12 +1099,33 @@ func TestLoadContextArgNotesIsADoc(t *testing.T) {
 	plain := filepath.Join(dir, "plain.md")
 	mustWrite(t, plain, []byte("Acme kickoff notes"), 0644)
 	for _, p := range []string{plain, dir} {
-		bg, _, docs, err = loadContextArg(p)
+		bg, _, docs, _, err = loadContextArg(p)
 		if err != nil || bg == "" || len(docs) != 0 {
 			t.Errorf("%s: bg = %q, docs = %d, err = %v", p, bg, len(docs), err)
 		}
 	}
-	if bg, _, docs, err = loadContextArg(""); bg != "" || docs != nil || err != nil {
+	if bg, _, docs, _, err = loadContextArg(""); bg != "" || docs != nil || err != nil {
 		t.Errorf("empty path: %q, %v, %v", bg, docs, err)
+	}
+}
+
+func TestLoadContextArgPageCopyAndFolder(t *testing.T) {
+	dir := t.TempDir()
+	cp := filepath.Join(dir, "page.md")
+	mustWrite(t, cp, []byte(assistant.PageCopyMarker+"\n\n# Acme\n\nHostile text."), 0644)
+	bg, files, docs, skipped, err := loadContextArg(cp)
+	if err != nil || bg != "" || len(files) != 0 || len(docs) != 1 || len(skipped) != 0 {
+		t.Fatalf("bg = %q, files = %q, docs = %d, skipped = %q, err = %v", bg, files, len(docs), skipped, err)
+	}
+	if d := docs[0]; d.Via != "web" || d.Trusted() || d.Origin != cp || !strings.Contains(d.Text, "Hostile text.") {
+		t.Errorf("doc = %+v", d)
+	}
+	mustWrite(t, filepath.Join(dir, "plain.md"), []byte("Acme kickoff"), 0644)
+	bg, _, docs, skipped, err = loadContextArg(dir)
+	if err != nil || strings.Contains(bg, "Hostile") || !strings.Contains(bg, "Acme kickoff") || len(docs) != 0 || len(skipped) != 1 {
+		t.Errorf("folder: bg = %q, docs = %d, skipped = %q, err = %v", bg, len(docs), skipped, err)
+	}
+	if n := assistant.LeftOutMessage(len(skipped)); !strings.HasPrefix(n, "left out 1 file(s): earlier notes and page copies are not trusted background") {
+		t.Errorf("notice = %q", n)
 	}
 }
