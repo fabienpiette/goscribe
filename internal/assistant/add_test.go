@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -58,9 +59,11 @@ func TestRunAddLocalFile(t *testing.T) {
 				strings.HasPrefix(it.Plain, "📎 ") && strings.HasSuffix(it.Plain, " Added source: pricing.md (1 KB)")
 		})
 	})
-	if b := lastBoardOf(v); len(b.Sources) == 0 || b.Sources[len(b.Sources)-1] != "pricing.md" {
-		t.Errorf("board sources = %q", b.Sources)
-	}
+	// The board follows the item: wait for it instead of reading it once.
+	waitUntil(t, "board source", func() bool {
+		bs := v.Boards()
+		return len(bs) > 0 && slices.Contains(bs[len(bs)-1].Sources, "pricing.md")
+	})
 	waitUntil(t, "second update", func() bool { return f.count() == 2 })
 	instr, tr := f.call(1)
 	ctx := instr[strings.Index(instr, "<context>"):strings.Index(instr, "</context>")]
@@ -176,9 +179,10 @@ func TestRunAddRestoresNotes(t *testing.T) {
 		return hasItem(v, func(it Item) bool { return it.Badge == "SOURCE" && it.Text == "standup.md" }) &&
 			hasInfo(v, "↺ restored 1 brief from standup.md")
 	})
-	if b := lastBoardOf(v); len(b.Briefs) != 1 || b.Briefs[0] != "Sam is the PM" {
-		t.Errorf("board briefs = %q", b.Briefs)
-	}
+	waitUntil(t, "board briefs", func() bool {
+		bs := v.Boards()
+		return len(bs) > 0 && slices.Equal(bs[len(bs)-1].Briefs, []string{"Sam is the PM"})
+	})
 	// A duplicate add restores nothing more.
 	input <- addEvent("add", old)
 	waitUntil(t, "duplicate", func() bool { return hasInfo(v, "already added: standup.md") })
