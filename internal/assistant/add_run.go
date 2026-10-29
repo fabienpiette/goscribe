@@ -83,9 +83,7 @@ func (s *state) addLocal(target string) {
 		return
 	}
 	for _, n := range names {
-		if !slices.Contains(s.sources, n) {
-			s.sources = append(s.sources, n)
-		}
+		s.addSource(n)
 	}
 	if info.IsDir() {
 		return
@@ -94,6 +92,13 @@ func (s *state) addLocal(target string) {
 		s.info(fmt.Sprintf("⚠ %s: %s; nothing restored", base, err))
 	} else if ok {
 		s.restore(r, base)
+	}
+}
+
+// addSource lets an answer cite name, the way a doc is named in the prompt.
+func (s *state) addSource(name string) {
+	if !slices.Contains(s.sources, name) {
+		s.sources = append(s.sources, name)
 	}
 }
 
@@ -308,6 +313,7 @@ func (s *state) addFetched(via, rawTitle, origin, final, markdown string) {
 	if !s.addDoc(d) {
 		return
 	}
+	s.addSource(d.Name) // the model cites the page by this name, like a context file
 	if s.c.SourcesDir == "" {
 		return
 	}

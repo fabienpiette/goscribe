@@ -574,3 +574,25 @@ func TestRunDocBeforeModelLookup(t *testing.T) {
 	close(events)
 	<-done
 }
+
+func TestRunAnswerCitesAddedPage(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"s"}`),
+		answer(`{"summary":"s2","suggestions":[{"type":"answer","text":"Pro costs 20 EUR.","why":"asked","source":"acme-pricing.md"}]}`),
+	}}
+	v := &recordingView{}
+	p := &fakePages{pages: map[string]webpage.Page{"https://example.com/pricing": {
+		Title: "Acme pricing", Markdown: "Pro costs 20 EUR."}}}
+	events, input, done, _ := startPageRun(t, f, v, p, false)
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	input <- addEvent("add", "https://example.com/pricing")
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	waitUntil(t, "answer shown", func() bool {
+		return hasItem(v, func(it Item) bool {
+			return it.Badge == "ANSWER" && it.Text == "Pro costs 20 EUR." && it.Note == "asked · acme-pricing.md"
+		})
+	})
+	close(events)
+	<-done
+}
