@@ -54,7 +54,7 @@ type Memory struct {
 	ActionItems   []string  // only from the final call
 	Research      []Finding // the librarian's results, oldest first
 	Asked         []string  // every lookup query accepted, for dedup and the limit
-	Searched      []string  // the user's /search questions and the lookups the model wrote for a typed question (untrusted, only rendered in the Research block): they dedup model lookups but never count toward the limit
+	Searched      []string  // the user's /search questions (untrusted, only rendered in the Research block): they dedup model lookups but never count toward the limit
 	QA            []QA      // the user's typed questions and their answers, oldest first
 	Fixes         []Fix     // the corrections in force, in the order they were made
 	Briefs        []Brief   // the user's standing instructions and facts, in order

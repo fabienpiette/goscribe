@@ -471,10 +471,22 @@ func (s *state) finishQuestion(r qaResult) {
 	s.questionLookup(reply.Lookup, r.question)
 }
 
+// lookupLimit is the number of model lookups a meeting may run.
+func (s *state) lookupLimit() int {
+	if s.c.MaxLookups <= 0 {
+		return defaultMaxLookups
+	}
+	return s.c.MaxLookups
+}
+
 // questionLookup queues the librarian search an answer asked for. The text is
 // the model's, written from the transcript: it is cleaned like a /search and
 // never shown as typed by the user. Without the librarian it is ignored
-// silently, since the user did not ask for a search.
+// silently, since the user did not ask for a search. It counts toward the
+// lookup limit like a model lookup (it goes into Asked, and stays there: it
+// is queued for the user, so it is never dropped or replaced); past the limit
+// it is skipped, and the notice is always shown since the answer may have
+// said the librarian is looking.
 func (s *state) questionLookup(text, question string) {
 	q := cleanText(text, maxQuery)
 	if q == "" || s.c.Research == nil || s.ending {
@@ -485,7 +497,11 @@ func (s *state) questionLookup(text, question string) {
 		s.info(fmt.Sprintf("📚 not looking up %q: already asked", q))
 		return
 	}
-	s.mem.Searched = append(s.mem.Searched, q)
+	if limit := s.lookupLimit(); len(s.mem.Asked) >= limit {
+		s.info(fmt.Sprintf("📚 lookup limit reached (%d)", limit))
+		return
+	}
+	s.mem.Asked = append(s.mem.Asked, q)
 	s.queueUser(userAsk{Search: Lookup{Query: q, Why: "to answer the user's question: " + question, At: s.elapsed(time.Now()), Asker: "question"}})
 }
 
@@ -604,10 +620,7 @@ func (s *state) queueLookup(r Reply, at time.Duration) {
 	if s.c.Research == nil || s.ending || len(r.Lookups) == 0 {
 		return
 	}
-	limit := s.c.MaxLookups
-	if limit <= 0 {
-		limit = defaultMaxLookups
-	}
+	limit := s.lookupLimit()
 	waiting := s.pending
 	if waiting != nil {
 		s.mem.forgetAsked(waiting.Query)
@@ -640,7 +653,7 @@ func (s *state) maybeLookup(now time.Time) {
 	if s.looking {
 		return
 	}
-	if len(s.userQueue) > 0 { // the user's own request: first, never dropped, not in Asked
+	if len(s.userQueue) > 0 { // a user request or an answer's lookup: first, never dropped (only the latter is in Asked)
 		a := s.userQueue[0]
 		s.userQueue = s.userQueue[1:]
 		if a.Doc != "" {

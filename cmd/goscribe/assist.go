@@ -89,7 +89,8 @@ The limit is 200 KB in total, counting -context and everything added.
 now. It is unlimited, runs before the model's own lookups and a second one
 waits its turn; the answer shows as a Librarian line, feeds the updates and
 goes to ## Research in the notes. Without the librarian, the feed says why.
-A question the context can't answer may start a lookup the same way.
+A question the context can't answer may start a lookup too, but that one
+counts toward max_lookups like the model's own.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute

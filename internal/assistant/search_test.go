@@ -382,11 +382,11 @@ func TestQuestionStartsLookup(t *testing.T) {
 	}
 	close(events)
 	<-done
-	if len(mem.Searched) != 1 || mem.Searched[0] != "when did PROJ-123 ship" {
-		t.Errorf("Searched = %q", mem.Searched)
+	if len(mem.Asked) != 1 || mem.Asked[0] != "when did PROJ-123 ship" {
+		t.Errorf("Asked = %q, want the question's lookup (it counts)", mem.Asked)
 	}
-	if len(mem.Asked) != 0 {
-		t.Errorf("Asked = %q, want none", mem.Asked)
+	if len(mem.Searched) != 0 {
+		t.Errorf("Searched = %q, want only the user's /search", mem.Searched)
 	}
 }
 
@@ -423,7 +423,10 @@ func TestQuestionLookupQueuesBeforeModelLookup(t *testing.T) {
 	<-done
 }
 
-func TestQuestionLookupIgnoresLimit(t *testing.T) {
+// A question's lookup is model-written, so it counts toward the limit: with
+// the limit used by a model lookup it is skipped, with the notice, and the
+// librarian is not called for it.
+func TestQuestionLookupSkippedAtLimit(t *testing.T) {
 	f := &fakeThink{replies: []func() (string, error){
 		lookupReply("When was the Globex contract signed?"),
 		answer(lookupAnswer),
@@ -434,11 +437,31 @@ func TestQuestionLookupIgnoresLimit(t *testing.T) {
 	events <- line("me", twelveWords)
 	waitUntil(t, "limit used", func() bool { return r.count() == 1 })
 	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
-	waitUntil(t, "question lookup ran", func() bool { return r.count() == 2 })
+	waitUntil(t, "limit notice", func() bool { return hasInfo(v, "📚 lookup limit reached (1)") })
 	close(events)
 	<-done
-	if hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "lookup limit reached") }) {
-		t.Error("a question's lookup must not hit the lookup limit")
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1 (the question lookup must be skipped)", n)
+	}
+}
+
+// A question's lookup that ran takes a slot: a later model lookup is blocked.
+func TestQuestionLookupBlocksModelLookup(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		answer(lookupAnswer),
+		lookupReply("When was the Globex contract signed?"),
+		answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 1, nil)
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "question lookup ran", func() bool { return r.count() == 1 })
+	events <- line("me", twelveWords)
+	waitUntil(t, "limit notice", func() bool { return hasInfo(v, "📚 lookup limit reached (1)") })
+	close(events)
+	<-done
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1 (the model lookup must be blocked)", n)
 	}
 }
 
