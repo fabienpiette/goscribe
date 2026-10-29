@@ -767,23 +767,31 @@ func TestRunAddTranscriptIsUntrusted(t *testing.T) {
 	}
 }
 
-// A login doc already added is reported before the librarian is asked, also
-// when there is no librarian.
-func TestAddLoginDocAlreadyAddedNoLibrarian(t *testing.T) {
-	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
-	r := &fakeResearch{reply: answer(`{"found":false,"reason":"x"}`)}
-	v := &recordingView{}
-	events, input, done := startSearchRun(t, f, v, nil, 3, func(c *Config) {
-		c.Docs = []Doc{{Name: "acme-roadmap.md", Title: "Acme roadmap", Origin: loginDocURL, Via: "librarian", Text: "Dark-mode ships in Q3."}}
-	})
-	input <- addEvent("add", loginDocURL)
-	waitUntil(t, "already added", func() bool { return hasInfo(v, "already added: Acme roadmap") })
-	close(events)
-	<-done
-	if hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "needs a login") }) {
-		t.Error("the librarian-off advice must not show for a doc already added")
-	}
-	if r.count() != 0 {
-		t.Errorf("research calls = %d", r.count())
+// A login doc already added is reported before the librarian is asked, with
+// the librarian off and on.
+func TestAddLoginDocAlreadyAdded(t *testing.T) {
+	for _, withLibrarian := range []bool{false, true} {
+		f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+		r := &fakeResearch{reply: answer(`{"found":false,"reason":"x"}`)}
+		v := &recordingView{}
+		lib := r
+		if !withLibrarian {
+			lib = nil
+		}
+		events, input, done := startSearchRun(t, f, v, lib, 3, func(c *Config) {
+			c.Docs = []Doc{{Name: "acme-roadmap.md", Title: "Acme roadmap", Origin: loginDocURL, Via: "librarian", Text: "Dark-mode ships in Q3."}}
+		})
+		input <- addEvent("add", loginDocURL)
+		waitUntil(t, "already added", func() bool { return hasInfo(v, "already added: Acme roadmap") })
+		close(events)
+		<-done
+		if hasItem(v, func(it Item) bool {
+			return strings.Contains(it.Text, "needs a login") || strings.Contains(it.Text, "asking the librarian")
+		}) {
+			t.Errorf("librarian=%v: a doc already added must not be asked for", withLibrarian)
+		}
+		if r.count() != 0 {
+			t.Errorf("librarian=%v: research calls = %d", withLibrarian, r.count())
+		}
 	}
 }
