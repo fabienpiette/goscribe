@@ -40,11 +40,11 @@ It captures the audio on its own: run it in a second terminal next to
 'goscribe record', or alone.
 
 In a terminal it takes the full screen: the live feed, a dashboard of the
-meeting (summary, decisions, open questions, fixes) and a chat input. Type a
-question about the meeting and press Enter, or a command: /help,
-/mute me|others, /recap [duration], /fix <wrong> <right>. Alt+m mutes or
-unmutes your mic, Alt+s the computer sound, Alt+w asks for a recap of the last
-minutes (-recap, default 5m). Tab shows the dashboard on a narrow window;
+meeting (summary, decisions, open questions, brief, fixes) and a chat input.
+Type a question about the meeting and press Enter, or a command: /help,
+/mute me|others, /recap [duration], /fix <wrong> <right>, /brief <text>.
+Alt+m mutes or unmutes your mic, Alt+s the computer sound, Alt+w asks for a
+recap of the last minutes (-recap, default 5m). Tab shows the dashboard on a narrow window;
 PgUp/PgDn or the mouse wheel scroll, End goes back to live; hold Shift and
 drag to select text to copy. At the end, the final summary and the notes and
 transcript paths stay in the terminal.
@@ -58,6 +58,12 @@ lists, the transcript file and the notes (## Fixes). Quote phrases: /fix "dark
 mood" "dark mode". Suggested fixes show as FIX?; answer with /fix yes|no [n],
 nothing changes until you accept. /fix lists the fixes, /fix rm n stops one for
 new lines. Live speech-to-text keyterms are not updated mid-meeting.
+
+/brief <text> gives the model a standing instruction or fact, trusted and sent
+with every update, question, recap and the final notes: /brief focus on risks
+to the release. It starts an update at once. /brief lists the briefs, /brief rm
+n removes one (at most 20, 300 characters each). They show under BRIEF on the
+dashboard and ## Brief in the notes.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute
