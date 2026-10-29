@@ -49,7 +49,7 @@ const (
 	fixAnsUsage = "usage: /fix yes|no [n]"
 
 	briefRmUsage = "usage: /brief rm <n>"
-	maxBriefLen  = 300
+	maxBriefLen  = maxItem
 )
 
 // ParseCommand reads a chat line: plain text is a question, a leading / starts a command.

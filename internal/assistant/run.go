@@ -452,7 +452,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, s.unacceptedGuesses())
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, false, s.unacceptedGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
 

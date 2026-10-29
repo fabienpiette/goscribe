@@ -224,7 +224,7 @@ func WriteNotes(path, content string) error {
 // or make a line read as something else.
 func Clean(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' {
+		if r == '\n' || r == '\t' || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			return ' '
 		}
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {

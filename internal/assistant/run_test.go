@@ -1809,8 +1809,15 @@ func TestRunBriefDuringUpdate(t *testing.T) {
 	})
 	waitUntil(t, "second update", func() bool { return f.count() == 2 })
 	instr, transcript := f.call(1)
-	if !strings.Contains(transcript, "(nothing new: the user changed the brief)") {
+	if !strings.Contains(transcript, "(nothing new since the last update)") || strings.Contains(transcript, "changed the brief") {
 		t.Errorf("transcript:\n%s", transcript)
+	}
+	const changed = "The brief changed since the last update"
+	if !strings.Contains(instr, changed) {
+		t.Errorf("brief-started update lacks the changed line:\n%s", instr)
+	}
+	if first, _ := f.call(0); strings.Contains(first, changed) {
+		t.Errorf("a normal update has the changed line:\n%s", first)
 	}
 	if !strings.Contains(instr, "1. focus on risks to the release") {
 		t.Errorf("instructions lack the brief:\n%s", instr)
@@ -1830,7 +1837,7 @@ func TestRunBriefCleaned(t *testing.T) {
 	waitUntil(t, "brief update", func() bool { return f.count() == 2 })
 	bad := func(s string) bool { return strings.ContainsAny(s, "\x1b\a\r") }
 	for _, it := range v.Items() {
-		if it.Badge == "BRIEF" && (bad(it.Text) || bad(it.Plain) || strings.Contains(it.Text, "\n")) {
+		if it.Badge == "BRIEF" && (bad(it.Text) || bad(it.Plain) || strings.Contains(it.Text, "\n") || strings.Contains(it.Plain, "\n")) {
 			t.Errorf("item not clean: %q", it.Text)
 		}
 	}
@@ -1845,10 +1852,17 @@ func TestRunBriefCleaned(t *testing.T) {
 		t.Errorf("instructions brief line = %q", first)
 	}
 	nb, _ := os.ReadFile(notes)
+	found := false
 	for _, l := range strings.Split(string(nb), "\n") {
-		if strings.Contains(l, "Sam") && (bad(l) || !strings.Contains(l, "the PM")) {
-			t.Errorf("notes line not clean: %q", l)
+		if strings.Contains(l, "Sam") {
+			found = true
+			if bad(l) || !strings.Contains(l, "the PM") {
+				t.Errorf("notes line not clean: %q", l)
+			}
 		}
+	}
+	if !found {
+		t.Errorf("the brief did not reach the notes:\n%s", nb)
 	}
 	close(events)
 	<-done

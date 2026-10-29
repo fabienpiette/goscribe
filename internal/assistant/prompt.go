@@ -87,13 +87,17 @@ Rules:
 // CyclePrompt builds one update: the trusted instructions (rules, context,
 // memory) and the untrusted transcript part (earlier lines for continuity,
 // then the new lines). librarian lets the model ask lookups; fixes lets it
-// suggest fixes (the user can answer them); suggested are the fixes it
+// suggest fixes (the user can answer them); briefChanged says the update was
+// started by a new brief; suggested are the fixes it
 // suggested that wait for an answer or were rejected.
-func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian, fixes bool, suggested []Fix) (instructions, transcript string) {
+func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian, fixes, briefChanged bool, suggested []Fix) (instructions, transcript string) {
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
 	writeBrief(&b, m.Briefs)
+	if briefChanged {
+		b.WriteString("The brief changed since the last update: check the summary, lists and suggestions against it.\n\n")
+	}
 	var asked []string
 	if librarian {
 		asked = m.Asked
@@ -129,7 +133,7 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian, fix
 	}
 	t.WriteString("New since the last update:\n")
 	if len(fresh) == 0 { // a new brief asked for this update
-		t.WriteString("(nothing new: the user changed the brief)\n")
+		t.WriteString("(nothing new since the last update)\n")
 	}
 	t.WriteString(lastBytes(fresh, freshWindow))
 	t.WriteString("</transcript>")

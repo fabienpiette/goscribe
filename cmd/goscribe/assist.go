@@ -61,7 +61,7 @@ new lines. Live speech-to-text keyterms are not updated mid-meeting.
 
 /brief <text> gives the model a standing instruction or fact, trusted and sent
 with every update, question, recap and the final notes: /brief focus on risks
-to the release. It starts an update at once. /brief lists the briefs, /brief rm
+to the release. It starts an update at once, once something has been said. /brief lists the briefs, /brief rm
 n removes one (at most 20, 300 characters each). They show under BRIEF on the
 dashboard and ## Brief in the notes.
 

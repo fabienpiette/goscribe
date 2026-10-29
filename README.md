@@ -392,10 +392,10 @@ When the speech-to-text mishears a word, `/fix <wrong> <right>` corrects it, e.g
 
 #### Brief
 
-`/brief <text>` gives the model something to keep in mind for the whole meeting: an instruction, e.g. `/brief focus on risks to the release`, or a fact, e.g. `/brief Sam is the PM, Alex is the customer`.
+Typed in the full-screen view's input, `/brief <text>` gives the model something to keep in mind for the whole meeting: an instruction, e.g. `/brief focus on risks to the release`, or a fact, e.g. `/brief Sam is the PM, Alex is the customer`.
 
 - A brief is yours, so the model trusts it, unlike the transcript. It is sent with every update, question and recap, and with the final notes.
-- Adding one starts an update at once, or right after the one running, so the next suggestions already follow it.
+- Adding one starts an update at once (once something has been said), or right after the one running, so the next suggestions already follow it.
 - `/brief` alone lists the briefs, numbered. `/brief rm n` removes brief n.
 - There can be at most 20 briefs of 300 characters each.
 - The briefs show under `BRIEF` on the dashboard and under `## Brief` in the notes.
