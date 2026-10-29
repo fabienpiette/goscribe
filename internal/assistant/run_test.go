@@ -3,6 +3,7 @@ package assistant
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1691,4 +1692,238 @@ func TestRunTypedFixAcceptsPendingGuess(t *testing.T) {
 	waitUntil(t, "none pending", func() bool { return hasInfo(v, "no suggested fix to reject") })
 	close(events)
 	<-done
+}
+
+func briefEvent(op, text string, n int) Event {
+	return Event{Kind: BriefEvent, Brief: BriefRequest{Op: op, Text: text, N: n}}
+}
+
+// startBriefRun is startFixRun with the update interval chosen by the test.
+func startBriefRun(t *testing.T, f *fakeThink, v *recordingView, interval time.Duration) (events, input chan Event, done chan error, notes string) {
+	t.Helper()
+	fastTimers(t)
+	notes = filepath.Join(t.TempDir(), "notes.md")
+	events, input = make(chan Event), make(chan Event)
+	done = make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: interval, Think: f.think, View: v, Input: input, Notes: notes}, events)
+	}()
+	return events, input, done, notes
+}
+
+func lastBoardOf(v *recordingView) Board { b := v.Boards(); return b[len(b)-1] }
+
+func TestRunBriefAddsListsRemoves(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	v := &recordingView{}
+	events, input, done, notes := startBriefRun(t, f, v, time.Hour)
+	input <- briefEvent("add", "Sam is the PM", 0)
+	waitUntil(t, "brief item", func() bool {
+		return hasItem(v, func(it Item) bool {
+			return it.Badge == "BRIEF" && it.Text == "Sam is the PM" && it.Note == "brief 1" &&
+				strings.HasPrefix(it.Plain, "📌 ") && strings.HasSuffix(it.Plain, " Brief 1: Sam is the PM")
+		})
+	})
+	if b := lastBoardOf(v); !slices.Equal(b.Briefs, []string{"Sam is the PM"}) {
+		t.Errorf("board briefs = %q", b.Briefs)
+	}
+	nb, _ := os.ReadFile(notes)
+	if !strings.Contains(string(nb), "## Brief") || !strings.Contains(string(nb), "- Sam is the PM") {
+		t.Errorf("notes:\n%s", nb)
+	}
+	input <- briefEvent("list", "", 0)
+	waitUntil(t, "list", func() bool { return hasInfo(v, "1. Sam is the PM") })
+	input <- briefEvent("add", "sam is the pm", 0)
+	waitUntil(t, "duplicate", func() bool { return hasInfo(v, "brief 1 says that already") })
+	if b := lastBoardOf(v); len(b.Briefs) != 1 {
+		t.Errorf("briefs after duplicate = %q", b.Briefs)
+	}
+	input <- briefEvent("rm", "", 1)
+	waitUntil(t, "removed", func() bool { return hasInfo(v, "brief 1 removed: Sam is the PM") })
+	if b := lastBoardOf(v); len(b.Briefs) != 0 {
+		t.Errorf("briefs after rm = %q", b.Briefs)
+	}
+	input <- briefEvent("rm", "", 4)
+	waitUntil(t, "bad rm", func() bool { return hasInfo(v, "no brief 4: type /brief to list them") })
+	input <- briefEvent("list", "", 0)
+	waitUntil(t, "empty list", func() bool { return hasInfo(v, "no briefs yet: /brief <text> adds one") })
+	close(events)
+	<-done
+}
+
+func TestRunBriefStartsUpdateAtOnce(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"one"}`), answer(`{"summary":"two"}`)}}
+	v := &recordingView{}
+	events, input, done, _ := startBriefRun(t, f, v, time.Hour)
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return lastBoardOf(v).Summary == "one" })
+	events <- line("others", "short line")
+	input <- briefEvent("add", "focus on risks to the release", 0)
+	waitUntil(t, "brief update", func() bool { return f.count() == 2 })
+	if instr, _ := f.call(1); !strings.Contains(instr, "1. focus on risks to the release") {
+		t.Errorf("instructions lack the brief:\n%s", instr)
+	}
+	close(events)
+	<-done
+}
+
+func TestRunBriefBeforeAnyLine(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"one"}`)}}
+	v := &recordingView{}
+	events, input, done, _ := startBriefRun(t, f, v, time.Hour)
+	input <- briefEvent("add", "focus on risks to the release", 0)
+	waitUntil(t, "brief item", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "BRIEF" }) })
+	// A negative check cannot wait on a condition: give a few ticks to a call
+	// that must not happen.
+	time.Sleep(10 * Tick)
+	if f.count() != 0 {
+		t.Fatalf("model calls with no line = %d, want 0", f.count())
+	}
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	if instr, _ := f.call(0); !strings.Contains(instr, "1. focus on risks to the release") {
+		t.Errorf("instructions lack the brief:\n%s", instr)
+	}
+	close(events)
+	<-done
+}
+
+func TestRunBriefDuringUpdate(t *testing.T) {
+	rel := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		func() (string, error) { <-rel; return `{"summary":"first reply"}`, nil },
+		answer(`{"summary":"second reply"}`),
+	}}
+	v := &recordingView{}
+	events, input, done, _ := startBriefRun(t, f, v, time.Hour)
+	events <- line("others", twelveWords)
+	waitUntil(t, "update in flight", func() bool { return f.count() == 1 })
+	input <- briefEvent("add", "focus on risks to the release", 0)
+	waitUntil(t, "brief item", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "BRIEF" }) })
+	if f.count() != 1 {
+		t.Fatalf("a second call started while one was in flight")
+	}
+	close(rel)
+	waitUntil(t, "first reply taken", func() bool {
+		return slices.ContainsFunc(v.Boards(), func(b Board) bool { return b.Summary == "first reply" })
+	})
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	instr, transcript := f.call(1)
+	if !strings.Contains(transcript, "(nothing new since the last update)") || strings.Contains(transcript, "changed the brief") {
+		t.Errorf("transcript:\n%s", transcript)
+	}
+	const changed = "The brief changed since the last update"
+	if !strings.Contains(instr, changed) {
+		t.Errorf("brief-started update lacks the changed line:\n%s", instr)
+	}
+	if first, _ := f.call(0); strings.Contains(first, changed) {
+		t.Errorf("a normal update has the changed line:\n%s", first)
+	}
+	if !strings.Contains(instr, "1. focus on risks to the release") {
+		t.Errorf("instructions lack the brief:\n%s", instr)
+	}
+	close(events)
+	<-done
+}
+
+func TestRunBriefCleaned(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	v := &recordingView{}
+	events, input, done, notes := startBriefRun(t, f, v, time.Hour)
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	input <- briefEvent("add", "Sam\x1b]52;c;eA==\a is\r\nthe PM\x1b[2J", 0)
+	waitUntil(t, "brief item", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "BRIEF" }) })
+	waitUntil(t, "brief update", func() bool { return f.count() == 2 })
+	bad := func(s string) bool { return strings.ContainsAny(s, "\x1b\a\r") }
+	for _, it := range v.Items() {
+		if it.Badge == "BRIEF" && (bad(it.Text) || bad(it.Plain) || strings.Contains(it.Text, "\n") || strings.Contains(it.Plain, "\n")) {
+			t.Errorf("item not clean: %q", it.Text)
+		}
+	}
+	b := lastBoardOf(v)
+	if len(b.Briefs) != 1 || bad(b.Briefs[0]) || strings.Contains(b.Briefs[0], "\n") {
+		t.Errorf("board briefs = %q", b.Briefs)
+	}
+	instr, _ := f.call(1)
+	_, after, _ := strings.Cut(instr, "1. ")
+	first, _, _ := strings.Cut(after, "\n")
+	if bad(instr) || strings.Contains(first, "\r") || !strings.Contains(first, "Sam") || !strings.Contains(first, "the PM") {
+		t.Errorf("instructions brief line = %q", first)
+	}
+	nb, _ := os.ReadFile(notes)
+	found := false
+	for _, l := range strings.Split(string(nb), "\n") {
+		if strings.Contains(l, "Sam") {
+			found = true
+			if bad(l) || !strings.Contains(l, "the PM") {
+				t.Errorf("notes line not clean: %q", l)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the brief did not reach the notes:\n%s", nb)
+	}
+	close(events)
+	<-done
+}
+
+func TestRunBriefLimit(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	v := &recordingView{}
+	events, input, done, _ := startBriefRun(t, f, v, time.Hour)
+	for i := 1; i <= 21; i++ {
+		input <- briefEvent("add", fmt.Sprintf("fact number %d", i), 0)
+	}
+	waitUntil(t, "limit", func() bool { return hasInfo(v, "at most 20 briefs: remove one with /brief rm <n>") })
+	if b := lastBoardOf(v); len(b.Briefs) != 20 {
+		t.Errorf("briefs = %d, want 20", len(b.Briefs))
+	}
+	close(events)
+	<-done
+}
+
+func TestRunBriefAfterEndRefused(t *testing.T) {
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){func() (string, error) { <-release; return `{"summary":"s"}`, nil }}}
+	v := &recordingView{}
+	events, input, done, notes := startBriefRun(t, f, v, time.Hour)
+	events <- line("others", twelveWords)
+	waitUntil(t, "update in flight", func() bool { return f.count() == 1 })
+	close(events)
+	waitUntil(t, "ending", func() bool {
+		return hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "finishing the current update") })
+	})
+	input <- briefEvent("add", "too late", 0)
+	close(release)
+	<-done
+	if !hasInfo(v, "the meeting is over: briefs are closed") {
+		t.Errorf("no refusal:\n%+v", v.Items())
+	}
+	if nb, _ := os.ReadFile(notes); strings.Contains(string(nb), "## Brief") {
+		t.Errorf("final notes have a brief:\n%s", nb)
+	}
+}
+
+func TestRunFinalNotesKeepBrief(t *testing.T) {
+	long := strings.Repeat(twelveWords+" ", 3)
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"s"}`), answer(`{"summary":"s"}`), answer(`{"summary":"final"}`)}}
+	v := &recordingView{}
+	events, input, done, notes := startBriefRun(t, f, v, time.Hour)
+	events <- line("others", long)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	input <- briefEvent("add", "focus on risks to the release", 0)
+	waitUntil(t, "brief update", func() bool { return f.count() == 2 })
+	close(events)
+	<-done
+	if f.count() != 3 {
+		t.Fatalf("calls = %d, want 3", f.count())
+	}
+	if instr, _ := f.call(2); !strings.Contains(instr, "1. focus on risks to the release") {
+		t.Errorf("final instructions lack the brief:\n%s", instr)
+	}
+	if nb, _ := os.ReadFile(notes); !strings.Contains(string(nb), "## Brief\n\n- focus on risks to the release") {
+		t.Errorf("final notes:\n%s", nb)
+	}
 }

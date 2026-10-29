@@ -197,6 +197,10 @@ func (m *model) submit() {
 		m.opts.Send(assistant.Event{Kind: assistant.FixEvent, Fix: assistant.FixRequest{
 			Op: cmd.Op, Wrong: cmd.Wrong, Right: cmd.Right, N: cmd.N,
 		}})
+	case cmd.Name == "brief":
+		m.opts.Send(assistant.Event{Kind: assistant.BriefEvent, Brief: assistant.BriefRequest{
+			Op: cmd.Op, Text: cmd.Text, N: cmd.N,
+		}})
 	case cmd.Name == "question":
 		m.opts.Send(assistant.Event{Kind: assistant.QuestionEvent, Text: cmd.Text})
 	}
@@ -376,6 +380,7 @@ func dashboard(b assistant.Board, width, height int) string {
 	add("AGENDA LEFT", bullets(b.NotCovered)...)
 	add("DECISIONS", bullets(b.Decisions)...)
 	add("OPEN QUESTIONS", bullets(b.OpenQuestions)...)
+	add("BRIEF", numbered(b.Briefs)...)
 	add("SOURCES", bullets(b.Sources)...)
 	add("FIXES", bullets(b.Fixes)...)
 
@@ -423,6 +428,14 @@ func bullets(items []string) []string {
 	out := make([]string, len(items))
 	for i, it := range items {
 		out[i] = "• " + clean(it)
+	}
+	return out
+}
+
+func numbered(items []string) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = fmt.Sprintf("%d. %s", i+1, clean(it))
 	}
 	return out
 }

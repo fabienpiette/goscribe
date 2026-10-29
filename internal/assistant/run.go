@@ -19,7 +19,15 @@ const (
 	RecapEvent                     // the user asked for a recap of the last minutes
 	QuestionEvent                  // the user typed a question (Text)
 	FixEvent                       // the user typed a /fix command (Fix)
+	BriefEvent                     // the user typed a /brief command (Brief)
 )
+
+// BriefRequest is a parsed /brief command: Op is "add", "list" or "rm".
+type BriefRequest struct {
+	Op   string // "add", "list" or "rm"
+	Text string // add: the brief
+	N    int    // rm: the brief number, from 1
+}
 
 // FixRequest is a parsed /fix command: Op is "add", "list", "rm", "yes" or
 // "no"; N is 0 for the latest or none given.
@@ -33,8 +41,9 @@ type Event struct {
 	Kind    EventKind
 	Speaker string // "me" or "others"
 	Text    string
-	Muted   bool       // MuteEvent: the side is now muted
-	Fix     FixRequest // FixEvent: what the user asked
+	Muted   bool         // MuteEvent: the side is now muted
+	Fix     FixRequest   // FixEvent: what the user asked
+	Brief   BriefRequest // BriefEvent: what the user asked
 	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
 	Window time.Duration
 }
@@ -219,6 +228,8 @@ type state struct {
 
 	proposals []proposal // fixes the model suggested, numbered from 1
 
+	briefAsked bool // a brief waits for the next update to start at once
+
 	finalWritten bool // the final notes were written
 
 	notesErr      bool
@@ -261,6 +272,8 @@ func (s *state) handle(ev Event) {
 		s.askQuestion(ev.Text)
 	case FixEvent:
 		s.fix(ev.Fix)
+	case BriefEvent:
+		s.brief(ev.Brief)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -424,7 +437,14 @@ func (s *state) maybeStart(now time.Time) {
 		s.startRecap(now)
 		return
 	}
-	if s.thinking || s.analysed == len(s.lines) || now.Sub(s.lastStart) < s.interval() {
+	if s.thinking {
+		return
+	}
+	if s.briefAsked && len(s.lines) > 0 {
+		s.startBriefUpdate(now)
+		return
+	}
+	if s.analysed == len(s.lines) || now.Sub(s.lastStart) < s.interval() {
 		return
 	}
 	fresh := s.lines[s.analysed:]
@@ -432,7 +452,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, s.unacceptedGuesses())
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, false, s.unacceptedGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
 
@@ -721,7 +741,7 @@ func (s *state) end() error {
 }
 
 // await waits for a call's result, reading Input meanwhile so that a sender
-// never blocks (a question, recap or fix is refused, a mute is dropped). It
+// never blocks (a question, recap, fix or brief is refused, a mute is dropped). It
 // takes the answer of the question in flight, and refreshes the status on
 // each tick. With a nil res, it returns after that answer or the question
 // watchdog. false means Force was closed first.
@@ -756,6 +776,8 @@ func (s *state) await(res <-chan result) (result, bool) {
 				s.info("the meeting is over: nothing more is answered")
 			case FixEvent:
 				s.info("the meeting is over: fixes are closed")
+			case BriefEvent:
+				s.info("the meeting is over: briefs are closed")
 			}
 		}
 	}
@@ -855,8 +877,12 @@ func (s *state) board() {
 			fixes = append(fixes, fmt.Sprintf("%s ? (/fix yes %d)", fixLabel(p.fix()), p.N))
 		}
 	}
+	var briefs []string
+	for _, b := range m.Briefs {
+		briefs = append(briefs, b.Text)
+	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
-		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes})
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes, Briefs: briefs})
 }
 
 func (s *state) dim(text string) string {

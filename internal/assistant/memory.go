@@ -56,6 +56,13 @@ type Memory struct {
 	Asked         []string  // every lookup query accepted, for dedup and the limit
 	QA            []QA      // the user's typed questions and their answers, oldest first
 	Fixes         []Fix     // the corrections in force, in the order they were made
+	Briefs        []Brief   // the user's standing instructions and facts, in order
+}
+
+// Brief is an instruction or fact the user typed with /brief.
+type Brief struct {
+	Text string
+	At   time.Duration
 }
 
 // QA is a question the user typed and the answer they got.

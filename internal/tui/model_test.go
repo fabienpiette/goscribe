@@ -499,6 +499,52 @@ func TestModelFixesSection(t *testing.T) {
 	}
 }
 
+func TestModelBriefDispatch(t *testing.T) {
+	r := &recorder{}
+	m := sized(t, r, 140, 30)
+	m = send(m, typed("/brief Sam is the PM"), enter, typed("/brief rm 2"), enter)
+	want := []assistant.BriefRequest{
+		{Op: "add", Text: "Sam is the PM"},
+		{Op: "rm", N: 2},
+	}
+	if len(r.sent) != len(want) {
+		t.Fatalf("sent %d events, want %d: %+v", len(r.sent), len(want), r.sent)
+	}
+	for i, w := range want {
+		if r.sent[i].Kind != assistant.BriefEvent || r.sent[i].Brief != w {
+			t.Errorf("event %d = %+v, want BriefEvent %+v", i, r.sent[i], w)
+		}
+	}
+
+	r.sent = nil
+	m = send(m, typed("/brief rm"), enter)
+	if len(r.sent) != 0 {
+		t.Errorf("a bad /brief was sent: %+v", r.sent)
+	}
+	if !strings.Contains(m.View(), "usage: /brief rm <n>") {
+		t.Errorf("no usage error in the feed:\n%s", m.View())
+	}
+}
+
+func TestModelBriefSection(t *testing.T) {
+	board := BoardMsg{Summary: "Design tokens v2", OpenQuestions: []string{"Who owns the rollback?"}, Sources: []string{"agenda.md"}}
+	m := send(sized(t, &recorder{}, 140, 30), board)
+	if strings.Contains(m.View(), "BRIEF") {
+		t.Errorf("BRIEF shown with no briefs:\n%s", m.View())
+	}
+	board.Briefs = []string{"Sam is the PM", "focus on risks to the release"}
+	v := send(m, board).View()
+	for _, want := range []string{"BRIEF", "1. Sam is the PM", "2. focus on risks"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("view lacks %q:\n%s", want, v)
+		}
+	}
+	q, b, s := strings.Index(v, "OPEN QUESTIONS"), strings.Index(v, "BRIEF"), strings.Index(v, "SOURCES")
+	if !(q < b && b < s) {
+		t.Errorf("section order: OPEN QUESTIONS %d, BRIEF %d, SOURCES %d", q, b, s)
+	}
+}
+
 // The /help summaries line up after the longest usage.
 func TestModelHelpAligned(t *testing.T) {
 	m := send(sized(t, &recorder{}, 400, 60), typed("/help"), enter)
@@ -507,6 +553,11 @@ func TestModelHelpAligned(t *testing.T) {
 		longest = max(longest, utf8.RuneCountInString(c.Usage))
 	}
 	v := m.View()
+	for _, usage := range []string{"/brief <text>", "/brief [rm n]"} {
+		if !strings.Contains(v, usage) {
+			t.Errorf("help lacks %q:\n%s", usage, v)
+		}
+	}
 	for _, c := range assistant.Commands {
 		want := fmt.Sprintf("%-*s %s", longest, c.Usage, strings.Fields(c.Summary)[0])
 		if !strings.Contains(v, want) {

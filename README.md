@@ -347,10 +347,10 @@ goscribe assist -provider codex -model gpt-6-luna             # pick the model (
 goscribe assist -plain                                         # lines instead of the full-screen view
 ```
 
-In a terminal, `assist` takes the full screen: a top bar (meeting clock, what the model is doing, `me`/`others` live or muted), the feed of transcript lines and suggestions with colored badges (`ASK`, `ANSWER`, `MISSED`, `RISK`, `DECISION`, `RECAP`, `LIBRARIAN`, `FIX`, `FIX?`), a dashboard of the meeting (summary, agenda items not covered yet, decisions, open questions, sources, fixes) and a chat input at the bottom.
+In a terminal, `assist` takes the full screen: a top bar (meeting clock, what the model is doing, `me`/`others` live or muted), the feed of transcript lines and suggestions with colored badges (`ASK`, `ANSWER`, `MISSED`, `RISK`, `DECISION`, `RECAP`, `LIBRARIAN`, `FIX`, `FIX?`, `BRIEF`), a dashboard of the meeting (summary, agenda items not covered yet, decisions, open questions, brief, sources, fixes) and a chat input at the bottom.
 
 - Type a question about the meeting and press Enter: `you` asks it, and the answer comes from the meeting so far and your context, without waiting for the next update. Plain text is always a question; an empty line does nothing.
-- Commands: `/help` lists the commands and keys, `/mute me` or `/mute others` mutes or unmutes a side (a side that is not captured only says so), `/recap` asks for a recap of the last minutes (`/recap 10m` to go further back), `/fix` corrects a misheard word (see Corrections below).
+- Commands: `/help` lists the commands and keys, `/mute me` or `/mute others` mutes or unmutes a side (a side that is not captured only says so), `/recap` asks for a recap of the last minutes (`/recap 10m` to go further back), `/fix` corrects a misheard word (see Corrections below), `/brief` gives the model standing instructions and facts (see Brief below).
 - Keys: `Alt+m` mutes or unmutes your mic, `Alt+s` the computer sound, `Alt+w` asks for a recap. `Tab` shows or hides the dashboard when the window is narrower than 120 columns (it sits next to the feed on wider ones). `PgUp`/`PgDn` and the mouse wheel scroll the feed; new lines are counted while you read, and `End` goes back to live.
 - Copying: the mouse scrolls the feed, so hold `Shift` while you drag to select text the usual way.
 - Ctrl+C ends the meeting and writes the final notes (the screen stays until they are written); a second Ctrl+C quits at once and keeps the live notes. Once the screen is gone, the terminal shows the final summary, the action items and the paths of the notes and the transcript. A question already being answered at the first Ctrl+C is still answered, into the feed and the notes; questions still waiting are left unanswered, and a question or `/recap` typed after the first Ctrl+C is refused. When the final notes were not written (second Ctrl+C, a failed final call, too little said), the summary shown is the live one and is labelled so.
@@ -389,6 +389,17 @@ When the speech-to-text mishears a word, `/fix <wrong> <right>` corrects it, e.g
 - The model may suggest a fix itself when a word clashes with the meeting or your context: it shows as `FIX? dark mood → dark mode` and nothing changes until you answer `/fix yes` or `/fix no`. Add a number (`/fix yes 2`) to pick one; without it the latest is used. An accepted suggestion works like a typed fix, and a refused one is not proposed again.
 - `/fix` alone lists the fixes. `/fix rm n` stops fix n for new lines only: what was already rewritten stays as it is.
 - Live speech-to-text keyterms are fixed when the connection opens, so a fix does not update them mid-meeting. Add the right spelling to a `keyterms:` line in your context for the next meeting.
+
+#### Brief
+
+Typed in the full-screen view's input, `/brief <text>` gives the model something to keep in mind for the whole meeting: an instruction, e.g. `/brief focus on risks to the release`, or a fact, e.g. `/brief Sam is the PM, Alex is the customer`.
+
+- A brief is yours, so the model trusts it, unlike the transcript. It is sent with every update, question and recap, and with the final notes.
+- Adding one starts an update at once (once something has been said), or right after the one running, so the next suggestions already follow it.
+- `/brief` alone lists the briefs, numbered. `/brief rm n` removes brief n.
+- There can be at most 20 briefs of 300 characters each.
+- The briefs show under `BRIEF` on the dashboard and under `## Brief` in the notes.
+- Plain text is still a question: only a line that starts with `/brief` is a brief. One typed while the final notes are being written is refused.
 
 #### Librarian
 

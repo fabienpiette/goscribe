@@ -22,7 +22,7 @@ const draftNote = "_Live draft from realtime speech-to-text: a summary made from
 // Render writes the notes file: the final summary and action items first when
 // the meeting is over, then the live summary, agenda items not covered,
 // decisions, open questions, the librarian's research, the typed questions,
-// the fixes and every suggestion made.
+// the brief, the fixes and every suggestion made.
 func Render(m Memory, header string, final bool, updated time.Duration) string {
 	var b strings.Builder
 	b.WriteString("# Meeting notes\n\n")
@@ -53,6 +53,14 @@ func Render(m Memory, header string, final bool, updated time.Duration) string {
 				fmt.Fprintf(&b, " _(%s)_", escapeMarkdown(qa.Source))
 			}
 			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(m.Briefs) > 0 {
+		// Written raw: the user typed it, it is not model text.
+		b.WriteString("## Brief\n\n")
+		for _, br := range m.Briefs {
+			b.WriteString("- " + br.Text + "\n")
 		}
 		b.WriteString("\n")
 	}
@@ -216,7 +224,7 @@ func WriteNotes(path, content string) error {
 // or make a line read as something else.
 func Clean(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' {
+		if r == '\n' || r == '\t' || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			return ' '
 		}
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
