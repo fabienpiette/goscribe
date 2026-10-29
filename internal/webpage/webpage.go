@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"golang.org/x/net/html"
@@ -35,12 +38,81 @@ func (e LoginError) Error() string { return "needs a login: " + e.Reason }
 // ErrNoText means the page has nothing readable once converted.
 var ErrNoText = errors.New("the page has no readable text (it may need JavaScript or a login)")
 
+var errPrivate = errors.New("redirected to a private address")
+
+// isPrivate reports addresses a redirect from a public page must not reach.
+// It is a variable so tests can choose which addresses count as private.
+var isPrivate = func(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast()
+}
+
+type guardKey struct{}
+
+// guard is stored in the request context: once a redirect was followed,
+// dials to private addresses are refused unless the typed URL was private itself.
+type guard struct {
+	originPrivate bool
+	redirected    atomic.Bool
+}
+
+func guardedDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	g, _ := ctx.Value(guardKey{}).(*guard)
+	if g == nil || !g.redirected.Load() || g.originPrivate {
+		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if isPrivate(ip.IP) {
+			return nil, errPrivate
+		}
+	}
+	return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
+// hostIsPrivate reports whether the typed host is, or resolves to, a private address.
+func hostIsPrivate(ctx context.Context, host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return isPrivate(ip)
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if isPrivate(ip.IP) {
+			return true
+		}
+	}
+	return false
+}
+
+func newTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = guardedDial
+	return t
+}
+
 // client is swapped out in tests.
 var client = &http.Client{
-	Timeout: 20 * time.Second,
-	CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+	Timeout:   20 * time.Second,
+	Transport: newTransport(),
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > maxRedirects {
 			return errors.New("stopped after 5 redirects")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirected to unsupported scheme %q", req.URL.Scheme)
+		}
+		if g, _ := req.Context().Value(guardKey{}).(*guard); g != nil {
+			g.redirected.Store(true)
 		}
 		return nil
 	},
@@ -81,6 +153,8 @@ func Fetch(ctx context.Context, rawURL string) (Page, error) {
 	if LoginHost(u.Hostname()) {
 		return Page{}, &LoginError{Reason: u.Hostname() + " needs a login"}
 	}
+	g := &guard{originPrivate: hostIsPrivate(ctx, u.Hostname())}
+	ctx = context.WithValue(ctx, guardKey{}, g)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return Page{}, err
@@ -88,6 +162,9 @@ func Fetch(ctx context.Context, rawURL string) (Page, error) {
 	req.Header.Set("User-Agent", "goscribe")
 	resp, err := client.Do(req)
 	if err != nil {
+		if errors.Is(err, errPrivate) {
+			return Page{}, errPrivate
+		}
 		return Page{}, err
 	}
 	defer resp.Body.Close()
@@ -139,12 +216,15 @@ func Fetch(ctx context.Context, rawURL string) (Page, error) {
 		if title == "" {
 			segs := strings.Split(strings.Trim(final.Path, "/"), "/")
 			title = segs[len(segs)-1]
+			if title == "" {
+				title = final.Host
+			}
 		}
 	default:
 		return Page{}, fmt.Errorf("unsupported content type %s", ctype)
 	}
 
-	if len(strings.TrimSpace(md)) < minTextLen {
+	if utf8.RuneCountInString(strings.TrimSpace(md)) < minTextLen {
 		return Page{}, ErrNoText
 	}
 	return Page{Title: title, URL: final.String(), Markdown: md}, nil

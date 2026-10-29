@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -170,5 +171,76 @@ func TestLoginHost(t *testing.T) {
 		if LoginHost(h) {
 			t.Errorf("LoginHost(%q) = true", h)
 		}
+	}
+}
+
+func TestFetchRedirectToPrivateRefused(t *testing.T) {
+	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("private target must not be reached")
+	}))
+	l, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skip("cannot listen on 127.0.0.2:", err)
+	}
+	target.Listener = l
+	target.Start()
+	t.Cleanup(target.Close)
+
+	origin := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/secret", http.StatusFound)
+	})
+	old := isPrivate
+	isPrivate = func(ip net.IP) bool { return ip.Equal(net.ParseIP("127.0.0.2")) }
+	t.Cleanup(func() { isPrivate = old })
+
+	_, err = Fetch(context.Background(), origin.URL)
+	if err == nil || err.Error() != "redirected to a private address" {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestFetchTypedLocalhostAllowed(t *testing.T) {
+	final := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, long())
+	})
+	origin := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL+"/x", http.StatusFound)
+	})
+	if _, err := Fetch(context.Background(), origin.URL); err != nil {
+		t.Errorf("typed loopback URL should be allowed: %v", err)
+	}
+}
+
+func TestFetchRedirectBadScheme(t *testing.T) {
+	origin := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "ftp://example.com/x", http.StatusFound)
+	})
+	if _, err := Fetch(context.Background(), origin.URL); err == nil {
+		t.Error("expected an error")
+	}
+}
+
+func TestFetchRootPathTitleIsHost(t *testing.T) {
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, long())
+	})
+	p, err := Fetch(context.Background(), srv.URL+"/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.TrimPrefix(srv.URL, "http://"); p.Title != want {
+		t.Errorf("title = %q, want %q", p.Title, want)
+	}
+}
+
+func TestFetchNoTextCountsRunes(t *testing.T) {
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, strings.Repeat("é", 150)) // 300 bytes, 150 runes
+	})
+	if _, err := Fetch(context.Background(), srv.URL); !errors.Is(err, ErrNoText) {
+		t.Errorf("err = %v", err)
 	}
 }
