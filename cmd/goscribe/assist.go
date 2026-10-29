@@ -430,9 +430,10 @@ func resolveLibrarian(explicit, flagOn bool, l config.Librarian, check func(conf
 	case explicit:
 		lib, err = check(l)
 		return lib, err == nil, "", false, err
-	case len(l.AllowedTools) == 0:
-		return l, false, "add read-only tools to librarian.allowed_tools in the config to use the librarian (see goscribe assist -h)", false, nil
-	case l.Enabled != nil && !*l.Enabled:
+	case !l.Wanted():
+		if len(l.AllowedTools) == 0 {
+			return l, false, "add read-only tools to librarian.allowed_tools in the config to use the librarian (see goscribe assist -h)", false, nil
+		}
 		return l, false, "the librarian is off (librarian.enabled: false in the config)", false, nil
 	}
 	lib, err = check(l)
