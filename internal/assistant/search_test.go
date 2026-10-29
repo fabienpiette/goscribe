@@ -739,3 +739,79 @@ func TestFailedQuestionLookupStaysCounted(t *testing.T) {
 		t.Errorf("Asked = %q, want the failed question lookup still counted", mem.Asked)
 	}
 }
+
+// A question lookup skipped for the limit says so every time: unlike the
+// model's lookups, the notice is not shown once.
+func TestQuestionLookupLimitNoticeEveryTime(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		answer(lookupAnswer),
+		answer(`{"answer":"Not in the notes.","source":"general","lookup":"who approved the budget"}`),
+		answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 1, nil)
+	events <- line("me", twelveWords)
+	waitUntil(t, "limit used", func() bool { return r.count() == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "when did the first release ship?"}
+	input <- Event{Kind: QuestionEvent, Text: "who approved the budget?"}
+	const notice = "📚 lookup limit reached (1)"
+	waitUntil(t, "two notices", func() bool {
+		n := 0
+		for _, it := range v.Items() {
+			if it.Kind == ItemInfo && it.Text == notice {
+				n++
+			}
+		}
+		return n == 2
+	})
+	close(events)
+	<-done
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1", n)
+	}
+}
+
+// An exact repeat is matched against every search typed, not only the last
+// maxSearchedShown that the prompt lists.
+func TestSearchRepeatMatchesFullList(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	total := maxSearchedShown + 3
+	for i := 1; i <= total; i++ {
+		input <- searchEvent(fmt.Sprintf("topic%02d", i))
+	}
+	waitUntil(t, "all lookups", func() bool { return r.count() == total })
+	input <- searchEvent("topic01")
+	waitUntil(t, "repeat notice", func() bool { return hasInfo(v, "📚 not looking up \"topic01\": already asked") })
+	close(events)
+	<-done
+	if n := r.count(); n != total {
+		t.Errorf("research calls = %d, want %d (the repeat must not run)", n, total)
+	}
+}
+
+// Only an exact repeat is refused: a search that is merely similar to an
+// earlier one (askedSimilar would drop it as a model lookup) still runs.
+func TestSearchSimilarStillRuns(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+	var m Memory
+	m.Searched = []string{"when did the launch ship?"}
+	if !m.askedSimilar("when did the launch ship late") {
+		t.Fatal("the second search must be similar enough to trip askedSimilar")
+	}
+	input <- searchEvent("when did the launch ship late")
+	waitUntil(t, "second lookup", func() bool { return r.count() == 2 })
+	close(events)
+	<-done
+	if hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "already asked") }) {
+		t.Error("a similar search must not be reported as already asked")
+	}
+}
