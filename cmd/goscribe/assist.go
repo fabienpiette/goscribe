@@ -42,7 +42,8 @@ It captures the audio on its own: run it in a second terminal next to
 In a terminal it takes the full screen: the live feed, a dashboard of the
 meeting (summary, decisions, open questions, brief, fixes) and a chat input.
 Type a question about the meeting and press Enter, or a command: /help,
-/mute me|others, /recap [duration], /fix <wrong> <right>, /brief <text>.
+/mute me|others, /recap [duration], /fix <wrong> <right>, /brief <text>,
+/add <path|url>.
 Alt+m mutes or unmutes your mic, Alt+s the computer sound, Alt+w asks for a
 recap of the last minutes (-recap, default 5m). Tab shows the dashboard on a narrow window;
 PgUp/PgDn or the mouse wheel scroll, End goes back to live; hold Shift and
@@ -67,6 +68,16 @@ with every update, question, recap and the final notes: /brief focus on risks
 to the release. It starts an update at once, once something has been said. /brief lists the briefs, /brief rm
 n removes one (at most 20, 300 characters each). They show under BRIEF on the
 dashboard and ## Brief in the notes.
+
+/add <path or url> (alias /context) adds a file, folder or web page to the
+context while the meeting runs; /add alone lists the sources. A public page is
+fetched, converted to Markdown and saved in <notes name>-sources/<slug>.md
+(e.g. assist-2026-10-29_10-00-sources/); it is untrusted data. Docs behind a
+login (Google Docs, Notion, Linear and the like, any 401 or 403, a sign-in
+redirect) go to the librarian when -librarian is on, which reads them with its
+read-only tools; without it, the feed explains how to set it up. Naming an
+earlier notes file restores its fixes and briefs, a folder restores nothing.
+The limit is 200 KB in total, counting -context and everything added.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute

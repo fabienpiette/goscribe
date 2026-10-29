@@ -347,10 +347,10 @@ goscribe assist -provider codex -model gpt-6-luna             # pick the model (
 goscribe assist -plain                                         # lines instead of the full-screen view
 ```
 
-In a terminal, `assist` takes the full screen: a top bar (meeting clock, what the model is doing, `me`/`others` live or muted), the feed of transcript lines and suggestions with colored badges (`ASK`, `ANSWER`, `MISSED`, `RISK`, `DECISION`, `RECAP`, `LIBRARIAN`, `FIX`, `FIX?`, `BRIEF`), a dashboard of the meeting (summary, agenda items not covered yet, decisions, open questions, brief, sources, fixes) and a chat input at the bottom.
+In a terminal, `assist` takes the full screen: a top bar (meeting clock, what the model is doing, `me`/`others` live or muted), the feed of transcript lines and suggestions with colored badges (`ASK`, `ANSWER`, `MISSED`, `RISK`, `DECISION`, `RECAP`, `LIBRARIAN`, `FIX`, `FIX?`, `BRIEF`, `SOURCE`), a dashboard of the meeting (summary, agenda items not covered yet, decisions, open questions, brief, sources, fixes) and a chat input at the bottom.
 
 - Type a question about the meeting and press Enter: `you` asks it, and the answer comes from the meeting so far and your context, without waiting for the next update. Plain text is always a question; an empty line does nothing.
-- Commands: `/help` lists the commands and keys, `/mute me` or `/mute others` mutes or unmutes a side (a side that is not captured only says so), `/recap` asks for a recap of the last minutes (`/recap 10m` to go further back), `/fix` corrects a misheard word (see Corrections below), `/brief` gives the model standing instructions and facts (see Brief below).
+- Commands: `/help` lists the commands and keys, `/mute me` or `/mute others` mutes or unmutes a side (a side that is not captured only says so), `/recap` asks for a recap of the last minutes (`/recap 10m` to go further back), `/fix` corrects a misheard word (see Corrections below), `/brief` gives the model standing instructions and facts (see Brief below), `/add` (alias `/context`) adds a file, folder or web page to the context (see Adding sources below).
 - Keys: `Alt+m` mutes or unmutes your mic, `Alt+s` the computer sound, `Alt+w` asks for a recap. `Tab` shows or hides the dashboard when the window is narrower than 120 columns (it sits next to the feed on wider ones). `PgUp`/`PgDn` and the mouse wheel scroll the feed; new lines are counted while you read, and `End` goes back to live.
 - Copying: the mouse scrolls the feed, so hold `Shift` while you drag to select text the usual way.
 - Ctrl+C ends the meeting and writes the final notes (the screen stays until they are written); a second Ctrl+C quits at once and keeps the live notes. Once the screen is gone, the terminal shows the final summary, the action items and the paths of the notes and the transcript. A question already being answered at the first Ctrl+C is still answered, into the feed and the notes; questions still waiting are left unanswered, and a question or `/recap` typed after the first Ctrl+C is refused. When the final notes were not written (second Ctrl+C, a failed final call, too little said), the summary shown is the live one and is labelled so.
@@ -401,6 +401,19 @@ Typed in the full-screen view's input, `/brief <text>` gives the model something
 - There can be at most 20 briefs of 300 characters each.
 - The briefs show under `BRIEF` on the dashboard and under `## Brief` in the notes.
 - Plain text is still a question: only a line that starts with `/brief` is a brief. One typed while the final notes are being written is refused.
+
+#### Adding sources
+
+Typed in the full-screen view's input, `/add <path or url>` (alias `/context`) puts more background in front of the model while the meeting runs, like `-context` does at the start.
+
+- A file or a folder: `/add notes/spec.md`, `/add ~/notes/acme/`. Quote a path with spaces: `/add "my notes.md"`.
+- A web page: `/add https://example.com/roadmap`. A public page is fetched and converted to Markdown, and a copy is saved in the sources folder next to the notes, `<notes name>-sources/<slug>.md` (e.g. `assist-2026-10-29_10-00-sources/`). The page is untrusted data: the model reads it as context, never as instructions.
+- A doc behind a login (Google Docs, Notion, Linear and the like, any 401 or 403, or a redirect to a sign-in page): with `-librarian`, the page is handed to the librarian, which reads the doc with its read-only tools. Without the librarian, the feed explains how to set it up.
+- `/add` alone lists the sources added.
+- Each source shows in the feed with a `SOURCE` badge, and in the notes.
+- The limit is 200 KB in total, counting `-context` and everything added; a source that would go over is refused. The meeting's own notes, transcript and sources folder cannot be added.
+- Restoring: naming an earlier assist notes file restores its fixes and briefs, as with `-context`; a folder restores nothing.
+- Only a line that starts with `/add` or `/context` adds a source. Schemes other than `http` and `https` (`ftp://`, `file://`) are refused.
 
 #### Librarian
 
