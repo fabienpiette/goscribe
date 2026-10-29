@@ -1,11 +1,17 @@
 package assistant
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"goscribe/internal/webpage"
 )
 
 func addEvent(op, target string) Event {
@@ -204,4 +210,190 @@ func TestRunAddAfterEnd(t *testing.T) {
 	waitUntil(t, "refusal", func() bool { return hasInfo(v, "the meeting is over: sources are closed") })
 	close(rel)
 	<-done
+}
+
+func TestRunAddTooBigFile(t *testing.T) {
+	f := &fakeThink{}
+	v := &recordingView{}
+	events, input, done, _ := startAddRun(t, f, v, time.Hour, "")
+	dir := t.TempDir()
+	file := filepath.Join(dir, "huge.md")
+	mustWrite(t, file, []byte(strings.Repeat("h", 250<<10)), 0644)
+	input <- addEvent("add", file)
+	waitUntil(t, "refusal", func() bool {
+		return hasInfo(v, "too big: huge.md is 250 KB and the context would be 250 KB (limit 200 KB)")
+	})
+	// A folder sums its .md files only.
+	mustWrite(t, filepath.Join(dir, "other.txt"), []byte(strings.Repeat("t", 100<<10)), 0644)
+	input <- addEvent("add", dir)
+	waitUntil(t, "folder refusal", func() bool {
+		return hasInfo(v, "too big: "+filepath.Base(dir)+" is 250 KB and the context would be 250 KB (limit 200 KB)")
+	})
+	close(events)
+	<-done
+}
+
+// fakePages answers Fetch from a table; a page whose url is in block waits
+// for release.
+type fakePages struct {
+	mu      sync.Mutex
+	pages   map[string]webpage.Page
+	errs    map[string]error
+	block   map[string]chan struct{}
+	started int
+}
+
+func (p *fakePages) fetch(ctx context.Context, u string) (webpage.Page, error) {
+	p.mu.Lock()
+	p.started++
+	ch := p.block[u]
+	p.mu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+	if err := p.errs[u]; err != nil {
+		return webpage.Page{}, err
+	}
+	return p.pages[u], nil
+}
+
+func startPageRun(t *testing.T, f *fakeThink, v *recordingView, p *fakePages, withSources bool) (events, input chan Event, done chan error, notes string) {
+	t.Helper()
+	fastTimers(t)
+	notes = filepath.Join(t.TempDir(), "notes.md")
+	events, input = make(chan Event), make(chan Event)
+	done = make(chan error, 1)
+	c := Config{Engine: "fake", Interval: time.Hour, Think: f.think, View: v, Input: input, Notes: notes,
+		Transcript: TranscriptPath(notes), Fetch: p.fetch}
+	if withSources {
+		c.SourcesDir = SourcesDir(notes)
+	}
+	go func() { done <- Run(c, events) }()
+	return events, input, done, notes
+}
+
+func TestRunAddPage(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`), answer(`{"summary":"s2"}`)}}
+	v := &recordingView{}
+	p := &fakePages{pages: map[string]webpage.Page{"https://example.com/pricing": {
+		Title: "Acme pricing", URL: "https://www.example.com/pricing/", Markdown: "Pro costs 20 EUR."}}}
+	events, input, done, notes := startPageRun(t, f, v, p, true)
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	input <- addEvent("add", "https://example.com/pricing")
+	waitUntil(t, "fetching info", func() bool { return hasInfo(v, "📎 fetching https://example.com/pricing…") })
+	waitUntil(t, "source item", func() bool {
+		return hasItem(v, func(it Item) bool { return it.Badge == "SOURCE" && it.Text == "Acme pricing" })
+	})
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	instr, _ := f.call(1)
+	un := instr[strings.Index(instr, "<untrusted_sources>"):strings.Index(instr, "</untrusted_sources>")]
+	if !strings.Contains(un, "Pro costs 20 EUR.") {
+		t.Errorf("untrusted block:\n%s", un)
+	}
+	if !strings.Contains(instr, "The user added a source since the last update (https://example.com/pricing)") {
+		t.Errorf("change line missing:\n%s", instr)
+	}
+	copyText, err := os.ReadFile(filepath.Join(SourcesDir(notes), "acme-pricing.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "# Acme pricing\n\nSource: https://www.example.com/pricing/\n\nPro costs 20 EUR.\n"; string(copyText) != want {
+		t.Errorf("copy = %q", copyText)
+	}
+	close(events)
+	<-done
+}
+
+func TestRunAddPageLoginWithoutLibrarian(t *testing.T) {
+	f := &fakeThink{}
+	v := &recordingView{}
+	u := "https://docs.example.com/d/1"
+	p := &fakePages{errs: map[string]error{u: &webpage.LoginError{Reason: "redirected to a sign-in page"}}}
+	events, input, done, _ := startPageRun(t, f, v, p, false)
+	input <- addEvent("add", u)
+	waitUntil(t, "login message", func() bool {
+		return hasInfo(v, u+" needs a login (redirected to a sign-in page): goscribe can't read it. Start assist with -librarian and a read-only tool for docs.example.com in librarian.allowed_tools")
+	})
+	close(events)
+	<-done
+}
+
+func TestRunAddPageError(t *testing.T) {
+	f := &fakeThink{}
+	v := &recordingView{}
+	u := "https://example.com/gone"
+	p := &fakePages{errs: map[string]error{u: errors.New("HTTP 404")}}
+	events, input, done, _ := startPageRun(t, f, v, p, false)
+	input <- addEvent("add", u)
+	waitUntil(t, "error", func() bool { return hasInfo(v, "⚠ cannot add "+u+": HTTP 404") })
+	close(events)
+	<-done
+}
+
+func TestRunAddPageSlugCollision(t *testing.T) {
+	f := &fakeThink{}
+	v := &recordingView{}
+	a, b := "https://example.com/a", "https://example.com/b"
+	p := &fakePages{pages: map[string]webpage.Page{
+		a: {Title: "Acme pricing", URL: a, Markdown: "one"},
+		b: {Title: "Acme   Pricing!", URL: b, Markdown: "two"},
+	}}
+	events, input, done, notes := startPageRun(t, f, v, p, true)
+	input <- addEvent("add", a)
+	waitUntil(t, "first", func() bool { return len(lastBoardOf(v).Sources) == 1 })
+	input <- addEvent("add", b)
+	waitUntil(t, "second", func() bool { return len(lastBoardOf(v).Sources) == 2 })
+	for _, n := range []string{"acme-pricing.md", "acme-pricing-2.md"} {
+		data, err := os.ReadFile(filepath.Join(SourcesDir(notes), n))
+		if err != nil {
+			t.Error(err)
+		} else if want := map[string]string{"acme-pricing.md": "one", "acme-pricing-2.md": "two"}[n]; !strings.Contains(string(data), want) {
+			t.Errorf("%s = %q", n, data)
+		}
+	}
+	close(events)
+	<-done
+}
+
+func TestRunAddPageLimitOfThree(t *testing.T) {
+	f := &fakeThink{}
+	v := &recordingView{}
+	p := &fakePages{block: map[string]chan struct{}{}}
+	rel := make(chan struct{})
+	for i := 1; i <= 4; i++ {
+		p.block[fmt.Sprintf("https://example.com/%d", i)] = rel
+	}
+	events, input, done, _ := startPageRun(t, f, v, p, false)
+	for i := 1; i <= 4; i++ {
+		input <- addEvent("add", fmt.Sprintf("https://example.com/%d", i))
+	}
+	waitUntil(t, "limit", func() bool { return hasInfo(v, "3 pages are already being fetched; wait for one") })
+	p.mu.Lock()
+	n := p.started
+	p.mu.Unlock()
+	if n > 3 {
+		t.Errorf("%d fetches started", n)
+	}
+	close(rel)
+	close(events)
+	<-done
+}
+
+func TestRunAddPageAfterEndDropped(t *testing.T) {
+	f := &fakeThink{}
+	v := &recordingView{}
+	u := "https://example.com/slow"
+	rel := make(chan struct{})
+	p := &fakePages{block: map[string]chan struct{}{u: rel}, pages: map[string]webpage.Page{u: {Title: "Slow", URL: u, Markdown: "x"}}}
+	events, input, done, _ := startPageRun(t, f, v, p, false)
+	input <- addEvent("add", u)
+	waitUntil(t, "fetching", func() bool { return hasInfo(v, "📎 fetching "+u+"…") })
+	close(events)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run waited for the fetch")
+	}
+	close(rel) // the goroutine finishes into the buffer and is dropped
 }

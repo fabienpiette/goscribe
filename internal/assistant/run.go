@@ -1,12 +1,15 @@
 package assistant
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"slices"
 	"strings"
 	"time"
+
+	"goscribe/internal/webpage"
 )
 
 type EventKind int
@@ -86,6 +89,10 @@ type Config struct {
 	// at the start; RestoreFrom is the file name shown in the feed.
 	Restore     *Restored
 	RestoreFrom string
+	// Fetch reads a public web page for /add; nil means pages can't be added.
+	Fetch func(ctx context.Context, url string) (webpage.Page, error)
+	// SourcesDir is where /add saves a copy of each page ("" = no copy).
+	SourcesDir string
 }
 
 // ResearchReply is the librarian's answer and the tool calls that its
@@ -124,7 +131,7 @@ func Run(c Config, events <-chan Event) error {
 		c.View = NewPlainView(c.Out, c.Interactive, c.MuteHint, c.RecapKey)
 	}
 	s := &state{c: c, start: time.Now(), sources: Sources(c.Context), results: make(chan result, 16),
-		lookupResults: make(chan lookupResult, 1), answers: make(chan qaResult, 4), partials: map[string]string{}, muted: map[string]bool{}}
+		lookupResults: make(chan lookupResult, 1), answers: make(chan qaResult, 4), fetched: make(chan fetchResult, 8), partials: map[string]string{}, muted: map[string]bool{}}
 	// Suggestion times are offsets from this start; with the wall clock, they
 	// can be matched against a recording started at another moment.
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
@@ -160,6 +167,9 @@ func Run(c Config, events <-chan Event) error {
 		case r := <-s.answers:
 			s.finishQuestion(r)
 			s.maybeAsk(time.Now())
+		case r := <-s.fetched:
+			s.finishFetch(r)
+			s.maybeStart(time.Now())
 		case now := <-ticker.C:
 			s.watchdog(now)
 			s.maybeStart(now)
@@ -233,6 +243,12 @@ type state struct {
 	askStart  time.Time
 	askGen    int // abandoned question calls carry an older askGen and are ignored
 	answers   chan qaResult
+
+	// Pages for /add are fetched in the background; after the end their
+	// results are no longer read.
+	fetching int // fetches in flight
+	fetched  chan fetchResult
+	copyErr  bool // the failure to save a page copy was shown
 
 	// lateFixes were made while the update in flight was asked: its reply
 	// does not know them, so they are applied to it before the memory takes

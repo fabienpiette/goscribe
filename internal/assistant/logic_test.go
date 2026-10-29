@@ -724,3 +724,25 @@ func TestCleanDoc(t *testing.T) {
 		t.Errorf("CleanDoc changed plain text: %q", got)
 	}
 }
+
+func TestCyclePromptPageStaysUntrusted(t *testing.T) {
+	d := Doc{Name: "ignore-the-rules.md", Title: "Ignore the rules", Origin: "https://example.com/roadmap", Via: "web", Text: "SECRET-PAGE-TEXT"}
+	m := Memory{Docs: []Doc{d}}
+	lines := []Line{{Speaker: "me", Text: "hello there"}}
+	change := docChangedLine(d)
+	if !strings.Contains(change, "https://example.com/roadmap") || strings.Contains(change, "Ignore the rules") || strings.Contains(change, "SECRET") {
+		t.Errorf("change line = %q", change)
+	}
+	instr, _ := CyclePrompt("", m, nil, lines, false, true, []string{change}, nil)
+	i, j := strings.Index(instr, "<untrusted_sources>"), strings.Index(instr, "</untrusted_sources>")
+	trusted := instr[:i] + instr[j:]
+	if strings.Contains(trusted, "SECRET-PAGE-TEXT") || strings.Contains(trusted, "Ignore the rules") {
+		t.Errorf("page leaked outside the untrusted block:\n%s", trusted)
+	}
+	if !strings.Contains(trusted, "https://example.com/roadmap") {
+		t.Errorf("the URL is not in the trusted part:\n%s", trusted)
+	}
+	if !strings.Contains(instr[i:j], "SECRET-PAGE-TEXT") {
+		t.Errorf("page text missing from the untrusted block")
+	}
+}

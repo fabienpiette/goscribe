@@ -1,19 +1,29 @@
 package assistant
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"goscribe/internal/webpage"
 )
 
 // add runs an /add command the user typed.
 func (s *state) add(r AddRequest) {
 	switch r.Op {
 	case "add":
+		if t := strings.TrimSpace(r.Target); isWebURL(t) {
+			s.addPage(t)
+			return
+		}
 		s.addLocal(r.Target)
 	case "list":
 		s.listDocs()
@@ -39,6 +49,10 @@ func (s *state) addLocal(target string) {
 	}
 	text, files, err := LoadContext(path)
 	if err != nil {
+		if errors.Is(err, errContextTooBig) {
+			s.refuseBig(path)
+			return
+		}
 		s.info(fmt.Sprintf("cannot add %s: %s", path, err))
 		return
 	}
@@ -183,16 +197,9 @@ func (s *state) addDoc(d Doc) bool {
 }
 
 // docChangedLine tells the next update about a source. It is a trusted line,
-// so only a path the user typed is named in it.
+// so it names only the path or URL the user typed, never the title or text.
 func docChangedLine(d Doc) string {
-	what := "a web page"
-	switch {
-	case d.Trusted():
-		what = Clean(d.Origin)
-	case d.Via == "librarian":
-		what = "a document from the librarian"
-	}
-	return fmt.Sprintf("The user added a source since the last update (%s): use it in the summary, lists and suggestions.", what)
+	return fmt.Sprintf("The user added a source since the last update (%s): use it in the summary, lists and suggestions.", Clean(d.Origin))
 }
 
 // listDocs lists the sources added.
@@ -203,4 +210,166 @@ func (s *state) listDocs() {
 	if len(s.mem.Docs) == 0 {
 		s.info("no sources added yet: /add <path or url> adds one")
 	}
+}
+
+// refuseBig says that a file or folder passes the context limit, in the
+// words addDoc uses, with the size of the .md files on disk.
+func (s *state) refuseBig(path string) {
+	size := 0
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != path && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if p == path || strings.EqualFold(filepath.Ext(p), ".md") {
+			if info, err := d.Info(); err == nil {
+				size += int(info.Size())
+			}
+		}
+		return nil
+	})
+	total := s.contextBytes() + size
+	s.info(fmt.Sprintf("too big: %s is %d KB and the context would be %d KB (limit %d KB)",
+		Clean(filepath.Base(path)), (size+1023)>>10, (total+1023)>>10, MaxContextBytes>>10))
+}
+
+const (
+	maxFetches   = 3                // pages fetched at the same time
+	fetchTimeout = 30 * time.Second // one fetch
+)
+
+// fetchResult is what a fetch goroutine hands back to the run loop.
+type fetchResult struct {
+	url  string
+	page webpage.Page
+	err  error
+}
+
+func isWebURL(t string) bool {
+	l := strings.ToLower(t)
+	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
+}
+
+// addPage fetches a public page in the background; finishFetch adds it.
+func (s *state) addPage(target string) {
+	if s.c.Fetch == nil {
+		s.info("pages cannot be added here")
+		return
+	}
+	if s.fetching >= maxFetches {
+		s.info(fmt.Sprintf("%d pages are already being fetched; wait for one", maxFetches))
+		return
+	}
+	s.fetching++
+	s.info("📎 fetching " + target + "…")
+	fetch, out := s.c.Fetch, s.fetched
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+		defer cancel()
+		p, err := fetch(ctx, target)
+		out <- fetchResult{url: target, page: p, err: err} // at most maxFetches are in flight, the buffer is bigger
+	}()
+}
+
+// finishFetch adds the page a fetch returned, or says why it could not be.
+func (s *state) finishFetch(r fetchResult) {
+	s.fetching--
+	if r.err != nil {
+		var le *webpage.LoginError
+		if errors.As(r.err, &le) {
+			s.askLibrarianDoc(r.url, le.Reason)
+			return
+		}
+		s.info(fmt.Sprintf("⚠ cannot add %s: %s", r.url, Clean(r.err.Error())))
+		return
+	}
+	host := hostOf(r.url)
+	title := cleanText(r.page.Title, maxItem)
+	if title == "" {
+		title = cleanText(host, maxItem)
+	}
+	md := CleanDoc(r.page.Markdown)
+	d := Doc{Name: s.pageName(r.page.Title, host) + ".md", Title: title, Origin: r.url, Via: "web", Text: md}
+	if !s.addDoc(d) {
+		return
+	}
+	if s.c.SourcesDir == "" {
+		return
+	}
+	final := r.page.URL
+	if final == "" {
+		final = r.url
+	}
+	body := fmt.Sprintf("# %s\n\nSource: %s\n\n%s\n", title, Clean(final), md)
+	err := os.MkdirAll(s.c.SourcesDir, 0o755)
+	if err == nil {
+		err = os.WriteFile(filepath.Join(s.c.SourcesDir, d.Name), []byte(body), 0o644)
+	}
+	if err != nil && !s.copyErr {
+		s.copyErr = true
+		s.info(fmt.Sprintf("⚠ cannot save a copy of %s: %s", d.Name, err))
+	}
+}
+
+// askLibrarianDoc is a stub until the librarian reads login-walled pages: it
+// only shows the no-librarian message, even when Research is set.
+func (s *state) askLibrarianDoc(target, reason string) {
+	s.info(fmt.Sprintf("%s needs a login (%s): goscribe can't read it. Start assist with -librarian and a read-only tool for %s in librarian.allowed_tools",
+		target, Clean(reason), hostOf(target)))
+}
+
+func hostOf(target string) string {
+	if u, err := url.Parse(target); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return target
+}
+
+// pageName is a file-name slug (without ".md") from the title, or the host,
+// that no doc or context file already uses.
+func (s *state) pageName(title, host string) string {
+	slug := slugify(title)
+	if slug == "" {
+		slug = slugify(host)
+	}
+	if slug == "" {
+		slug = "page"
+	}
+	taken := func(n string) bool {
+		n += ".md"
+		return slices.Contains(s.sources, n) || slices.ContainsFunc(s.mem.Docs, func(d Doc) bool { return d.Name == n })
+	}
+	name := slug
+	for i := 2; taken(name); i++ {
+		name = fmt.Sprintf("%s-%d", slug, i)
+	}
+	return name
+}
+
+// slugify keeps lowercase ASCII letters and digits, turns other runs into
+// one "-", trims them and keeps at most 50 characters.
+func slugify(s string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(s) {
+		if r < 128 && (r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			if dash && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			dash = false
+			b.WriteRune(r)
+		} else {
+			dash = true
+		}
+	}
+	out := b.String()
+	if len(out) > 50 {
+		out = strings.Trim(out[:50], "-")
+	}
+	return out
 }

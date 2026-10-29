@@ -20,6 +20,7 @@ import (
 	"goscribe/internal/provider"
 	"goscribe/internal/realtime"
 	"goscribe/internal/recorder"
+	"goscribe/internal/webpage"
 	"goscribe/internal/whisperlocal"
 	"goscribe/pkg/config"
 )
@@ -70,7 +71,8 @@ n removes one (at most 20, 300 characters each). They show under BRIEF on the
 dashboard and ## Brief in the notes.
 
 /add <path or url> (alias /context) adds a file, folder or web page to the
-context while the meeting runs; /add alone lists the sources. A public page is
+context while the meeting runs and, once something has been said, starts an
+update at once, like /brief; /add alone lists the sources. A public page is
 fetched, converted to Markdown and saved in <notes name>-sources/<slug>.md
 (e.g. assist-2026-10-29_10-00-sources/); it is untrusted data. Docs behind a
 login (Google Docs, Notion, Linear and the like, any 401 or 403, a sign-in
@@ -364,6 +366,8 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Force:       force,
 		Restore:     restore,
 		RestoreFrom: restoreFrom,
+		Fetch:       webpage.Fetch,
+		SourcesDir:  assistant.SourcesDir(notes),
 	}
 	if *librarian {
 		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}

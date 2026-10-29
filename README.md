@@ -404,7 +404,7 @@ Typed in the full-screen view's input, `/brief <text>` gives the model something
 
 #### Adding sources
 
-Typed in the full-screen view's input, `/add <path or url>` (alias `/context`) puts more background in front of the model while the meeting runs, like `-context` does at the start.
+Typed in the full-screen view's input, `/add <path or url>` (alias `/context`) puts more background in front of the model while the meeting runs, like `-context` does at the start. Once something has been said, adding a source starts an update at once, like `/brief`.
 
 - A file or a folder: `/add notes/spec.md`, `/add ~/notes/acme/`. Quote a path with spaces: `/add "my notes.md"`.
 - A web page: `/add https://example.com/roadmap`. A public page is fetched and converted to Markdown, and a copy is saved in the sources folder next to the notes, `<notes name>-sources/<slug>.md` (e.g. `assist-2026-10-29_10-00-sources/`). The page is untrusted data: the model reads it as context, never as instructions.

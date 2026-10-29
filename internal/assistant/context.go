@@ -64,11 +64,14 @@ func LoadContext(path string) (string, []string, error) {
 		}
 		fmt.Fprintf(&b, fileHeader+"%s\n\n%s\n\n", filepath.ToSlash(rel), strings.TrimSpace(string(data)))
 		if b.Len() > MaxContextBytes {
-			return "", nil, fmt.Errorf("context is over %d KB; pass fewer or smaller files", MaxContextBytes>>10)
+			return "", nil, errContextTooBig
 		}
 	}
 	return strings.TrimSpace(b.String()), files, nil
 }
+
+// errContextTooBig is what LoadContext returns when the files pass the limit.
+var errContextTooBig = fmt.Errorf("context is over %d KB; pass fewer or smaller files", MaxContextBytes>>10)
 
 const fileHeader = "### file: "
 
