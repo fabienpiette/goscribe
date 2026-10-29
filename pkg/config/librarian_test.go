@@ -85,6 +85,25 @@ func TestLibrarianValidate(t *testing.T) {
 	}
 }
 
+func TestLibrarianWanted(t *testing.T) {
+	yes, no := true, false
+	tools := []string{"Read(~/notes/**)"}
+	for name, tc := range map[string]struct {
+		l    Librarian
+		want bool
+	}{
+		"no tools":     {Librarian{}, false},
+		"tools":        {Librarian{AllowedTools: tools}, true},
+		"tools, off":   {Librarian{AllowedTools: tools, Enabled: &no}, false},
+		"tools, on":    {Librarian{AllowedTools: tools, Enabled: &yes}, true},
+		"no tools, on": {Librarian{Enabled: &yes}, false},
+	} {
+		if got := tc.l.Wanted(); got != tc.want {
+			t.Errorf("%s: Wanted() = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
 func TestLibrarianYAML(t *testing.T) {
 	var cfg Config
 	src := "librarian:\n  allowed_tools: [Read(~/notes/**)]\n  use_claude_settings: true\n  timeout: 90s\n  max_lookups: 3\n"
@@ -99,6 +118,16 @@ func TestLibrarianYAML(t *testing.T) {
 	}
 	if cfg.Librarian.MaxLookups != 3 {
 		t.Errorf("MaxLookups = %d, want 3", cfg.Librarian.MaxLookups)
+	}
+	if cfg.Librarian.Enabled != nil {
+		t.Errorf("Enabled = %v, want nil when unset", *cfg.Librarian.Enabled)
+	}
+	var off Config
+	if err := yaml.Unmarshal([]byte("librarian:\n  enabled: false\n"), &off); err != nil {
+		t.Fatal(err)
+	}
+	if off.Librarian.Enabled == nil || *off.Librarian.Enabled {
+		t.Errorf("Enabled = %v, want false", off.Librarian.Enabled)
 	}
 }
 

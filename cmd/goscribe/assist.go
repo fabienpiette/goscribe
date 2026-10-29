@@ -44,7 +44,7 @@ In a terminal it takes the full screen: the live feed, a dashboard of the
 meeting (summary, decisions, open questions, brief, fixes) and a chat input.
 Type a question about the meeting and press Enter, or a command: /help,
 /mute me|others, /recap [duration], /fix <wrong> <right>, /brief <text>,
-/add <path|url>.
+/add <path|url>, /search <question>.
 Alt+m mutes or unmutes your mic, Alt+s the computer sound, Alt+w asks for a
 recap of the last minutes (-recap, default 5m). Tab shows the dashboard on a narrow window;
 PgUp/PgDn or the mouse wheel scroll, End goes back to live; hold Shift and
@@ -78,12 +78,18 @@ update at once, like /brief; /add alone lists the sources. A public page is
 fetched, converted to Markdown and saved in <notes name>-sources/<slug>.md
 (e.g. assist-2026-10-29_10-00-sources/); it is untrusted data. Docs behind a
 login (Google Docs, Notion, Linear and the like, any 401 or 403, a sign-in
-redirect) go to the librarian when -librarian is on, which reads them with its
+redirect) go to the librarian when it is on, which reads them with its
 read-only tools; without it, the feed explains how to set it up. Naming an
 earlier notes file restores its fixes and briefs and is kept as untrusted
 reference data; a folder restores nothing and leaves out earlier notes,
 transcripts and page copies, which are marked as untrusted.
 The limit is 200 KB in total, counting -context and everything added.
+
+/search <question> asks the librarian to look something up in your sources
+now. It is unlimited, runs before the model's own lookups and a second one
+waits its turn; the answer shows as a Librarian line, feeds the updates and
+goes to ## Research in the notes. Without the librarian, the feed says why.
+A question the context can't answer may start a lookup the same way.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute
@@ -106,9 +112,12 @@ Good to know:
     Out of quota, it switches to local transcription (faster-whisper, slower
     and less accurate) when that is installed.
     Live transcription is billed per stream: two with -source both.
-  - -librarian lets the model look things up in your own sources (past
+  - The librarian lets the model look things up in your own sources (past
     decisions, tickets, documents) through a read-only Claude Code session.
-    It needs librarian.allowed_tools in the config; only list read-only tools.
+    It is on by default when librarian.allowed_tools is set in the config (only
+    list read-only tools); a failed startup check then prints a warning and
+    assist runs without it. -librarian=false or librarian.enabled: false turns
+    it off; an explicit -librarian makes a failed check an error.
     Each lookup takes 30-120 s on your Claude plan, and its answer goes to the
     -provider model.
   - Use headphones. With speakers, the mic also hears the others, and their
@@ -144,7 +153,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	elevenLabsKey := fs.String("elevenlabs-key", "", "ElevenLabs API key (default: config, then $ELEVENLABS_API_KEY)")
 	interval := fs.Duration("interval", 0, "Shortest time between two updates (default: 20s, 30s with claude/codex/hermes)")
 	recap := fs.Duration("recap", 0, "How far back a recap goes (w, Alt+w, /recap without a duration; default: config assist_recap, else 5m)")
-	librarian := fs.Bool("librarian", false, "Let the model look things up in your sources (librarian in the config; Claude Code)")
+	librarian := fs.Bool("librarian", false, "Use the librarian (default: on when librarian.allowed_tools is set; -librarian=false turns it off)")
 	configFile := fs.String("config", "", "Config file (default: ~/.goscribe/config.yml)")
 	listSources := fs.Bool("list-sources", false, "List inputs and computer sound sources, then exit")
 	plain := fs.Bool("plain", false, "Print the feed as plain lines instead of the full-screen view (always so when not on a terminal)")
@@ -188,30 +197,14 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	if *modelFlag != "" && harness.IsHarness(prov) {
 		harness.Models[prov] = *modelFlag
 	}
-	lib := cfg.Librarian.WithDefaults()
-	if *librarian {
-		if err := lib.Validate(); err != nil {
-			return usageErr("librarian: %v", err)
-		}
-		if lib.MCPConfig != "" {
-			p, err := resolveMCPConfig(lib.MCPConfig)
-			if err != nil {
-				return usageErr("librarian: %v", err)
-			}
-			lib.MCPConfig = p
-		}
-		if lib.UseClaudeSettings {
-			sp, err := claudeSettingsPath()
-			if err == nil {
-				err = checkClaudeSettings(sp)
-			}
-			if err != nil {
-				return usageErr("librarian: %v", err)
-			}
-		}
-		if _, err := exec.LookPath(harness.ClaudeBinary); err != nil {
-			return usageErr("librarian: needs the %s CLI on PATH", harness.ClaudeBinary)
-		}
+	lib, libOn, libOff, libWarn, err := resolveLibrarian(isSet(fs, "librarian"), *librarian, cfg.Librarian.WithDefaults(), checkLibrarian)
+	if err != nil {
+		return usageErr("librarian: %v", err)
+	}
+	// A failed check is only a warning when -librarian was not passed.
+	var librarianNotice string
+	if libWarn {
+		librarianNotice = "⚠ librarian off: " + libOff
 	}
 	elKey := pick(*elevenLabsKey, cfg.ElevenLabsAPIKey, os.Getenv("ELEVENLABS_API_KEY"))
 	if elKey == "" {
@@ -315,8 +308,11 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	if restore != nil {
 		header += " · restoring from " + restoreFrom
 	}
-	if *librarian {
+	if libOn {
 		header += fmt.Sprintf(" · librarian: %s, %d tool(s)", lib.Provider, len(lib.AllowedTools))
+		if !isSet(fs, "librarian") {
+			header += " (on by default; -librarian=false turns it off)"
+		}
 	}
 
 	transcript := assistant.TranscriptPath(notes)
@@ -335,13 +331,8 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		// Bubble Tea reads the keys: Alt+m/s/w come back on screenKeys.
 		screenKeys = make(chan string, 8)
 		toggle = screenKeys
-		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, ctxBytes)
-		if restoreNotice != "" {
-			notices = append(notices, restoreNotice)
-		}
-		if skippedNotice != "" {
-			notices = append(notices, skippedNotice)
-		}
+		notices = withNotices(startupNotices(header, notes, transcript, tuiHint, tooLong, ctxBytes),
+			restoreNotice, skippedNotice, librarianNotice)
 	} else {
 		// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
 		toggle, restoreKeys = startKeys(os.Stdin, assistKeys())
@@ -359,6 +350,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		}
 		if skippedNotice != "" {
 			fmt.Fprintln(stdout, assistant.LeftOutShort(len(contextSkipped)))
+		}
+		if librarianNotice != "" {
+			fmt.Fprintln(stdout, librarianNotice)
 		}
 	}
 	defer restoreKeys()
@@ -386,7 +380,12 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		Fetch:       webpage.Fetch,
 		SourcesDir:  assistant.SourcesDir(notes),
 	}
-	if *librarian {
+	if !libOn {
+		acfg.LibrarianOff = libOff
+		if libWarn {
+			acfg.LibrarianOff = "the librarian is off: " + libOff
+		}
+	} else {
 		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}
 		acfg.Research = func(prompt string) (assistant.ResearchReply, error) {
 			r, err := harness.Research(prompt, ro)
@@ -416,6 +415,57 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveLibrarian decides whether the librarian runs. Only an explicit
+// -librarian makes a failed check an error; by default the librarian is on
+// when allowed_tools is set, and a failed check turns it off with a reason; warn
+// is true only then, so the reason is shown as a warning.
+func resolveLibrarian(explicit, flagOn bool, l config.Librarian, check func(config.Librarian) (config.Librarian, error)) (lib config.Librarian, on bool, off string, warn bool, err error) {
+	switch {
+	case explicit && !flagOn:
+		return l, false, "the librarian is off (-librarian=false)", false, nil
+	case explicit:
+		lib, err = check(l)
+		return lib, err == nil, "", false, err
+	case len(l.AllowedTools) == 0:
+		return l, false, "add read-only tools to librarian.allowed_tools in the config to use the librarian (see goscribe assist -h)", false, nil
+	case l.Enabled != nil && !*l.Enabled:
+		return l, false, "the librarian is off (librarian.enabled: false in the config)", false, nil
+	}
+	lib, err = check(l)
+	if err != nil {
+		return l, false, err.Error(), true, nil
+	}
+	return lib, true, "", false, nil
+}
+
+// checkLibrarian runs the read-only checks on the librarian config and returns
+// it with mcp_config resolved.
+func checkLibrarian(l config.Librarian) (config.Librarian, error) {
+	if err := l.Validate(); err != nil {
+		return l, err
+	}
+	if l.MCPConfig != "" {
+		p, err := resolveMCPConfig(l.MCPConfig)
+		if err != nil {
+			return l, err
+		}
+		l.MCPConfig = p
+	}
+	if l.UseClaudeSettings {
+		sp, err := claudeSettingsPath()
+		if err == nil {
+			err = checkClaudeSettings(sp)
+		}
+		if err != nil {
+			return l, err
+		}
+	}
+	if _, err := exec.LookPath(harness.ClaudeBinary); err != nil {
+		return l, fmt.Errorf("needs the %s CLI on PATH", harness.ClaudeBinary)
+	}
+	return l, nil
 }
 
 // resolveMCPConfig expands a leading ~ and makes path absolute: the librarian

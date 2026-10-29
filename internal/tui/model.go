@@ -205,6 +205,8 @@ func (m *model) submit() {
 		m.opts.Send(assistant.Event{Kind: assistant.AddEvent, Add: assistant.AddRequest{
 			Op: cmd.Op, Target: cmd.Text,
 		}})
+	case cmd.Name == "search":
+		m.opts.Send(assistant.Event{Kind: assistant.SearchEvent, Text: cmd.Text})
 	case cmd.Name == "question":
 		m.opts.Send(assistant.Event{Kind: assistant.QuestionEvent, Text: cmd.Text})
 	}

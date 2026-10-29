@@ -550,6 +550,20 @@ func TestModelAddDispatch(t *testing.T) {
 	}
 }
 
+func TestModelSearchDispatch(t *testing.T) {
+	r := &recorder{}
+	m := sized(t, r, 140, 30)
+	m = send(m, typed("/search x"), enter)
+	if len(r.sent) != 1 || r.sent[0] != (assistant.Event{Kind: assistant.SearchEvent, Text: "x"}) {
+		t.Fatalf("sent %+v", r.sent)
+	}
+	r.sent = nil
+	m = send(m, typed("/search"), enter)
+	if len(r.sent) != 0 || !strings.Contains(m.View(), "usage: /search <question>") {
+		t.Errorf("a bare /search must show the usage: %+v\n%s", r.sent, m.View())
+	}
+}
+
 func TestModelBriefSection(t *testing.T) {
 	board := BoardMsg{Summary: "Design tokens v2", OpenQuestions: []string{"Who owns the rollback?"}, Sources: []string{"agenda.md"}}
 	m := send(sized(t, &recorder{}, 140, 30), board)

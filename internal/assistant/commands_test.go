@@ -24,6 +24,9 @@ func TestParseCommand(t *testing.T) {
 		{in: "/recap 10m", want: Command{Name: "recap", Window: 10 * time.Minute}},
 		{in: "/recap -1m", wantErr: "usage: /recap [duration], e.g. /recap 10m"},
 		{in: "/recap soon", wantErr: "usage: /recap [duration], e.g. /recap 10m"},
+		{in: "/search when did PROJ-123 ship?", want: Command{Name: "search", Text: "when did PROJ-123 ship?"}},
+		{in: "/search", wantErr: "usage: /search <question>"},
+		{in: "/search   ", wantErr: "usage: /search <question>"},
 		{in: "/fix", want: Command{Name: "fix", Op: "list"}},
 		{in: "/fix cash cache", want: Command{Name: "fix", Op: "add", Wrong: "cash", Right: "cache"}},
 		{in: `/fix "dark mood" "dark mode"`, want: Command{Name: "fix", Op: "add", Wrong: "dark mood", Right: "dark mode"}},
@@ -148,4 +151,13 @@ func TestCommandsHelpHasAddRows(t *testing.T) {
 			t.Errorf("Commands lacks %q", want)
 		}
 	}
+}
+
+func TestCommandsHelpHasSearchRow(t *testing.T) {
+	for _, h := range Commands {
+		if h.Usage == "/search <question>" {
+			return
+		}
+	}
+	t.Error(`Commands lacks the row "/search <question>"`)
 }

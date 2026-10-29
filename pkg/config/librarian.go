@@ -17,6 +17,9 @@ type Librarian struct {
 	// Claude Code tool rules the librarian may use. Required, and every entry
 	// must be read-only (see Validate).
 	AllowedTools []string `yaml:"allowed_tools,omitempty"`
+	// false turns the librarian off although allowed_tools is set; default on
+	// when allowed_tools is set.
+	Enabled *bool `yaml:"enabled,omitempty"`
 	// Extra instructions appended to the librarian's prompt.
 	Instructions string `yaml:"instructions,omitempty"`
 	// Upper bound for one lookup (default 3m).
@@ -50,6 +53,12 @@ func (l Librarian) WithDefaults() Librarian {
 		l.MaxLookups = defaultLibrarianMaxLookups
 	}
 	return l
+}
+
+// Wanted reports whether "goscribe assist" should start the librarian without
+// being asked: tools are listed and enabled is not false.
+func (l Librarian) Wanted() bool {
+	return len(l.AllowedTools) > 0 && (l.Enabled == nil || *l.Enabled)
 }
 
 // writeVerbs are substrings that mark a tool rule as a possible write. They are

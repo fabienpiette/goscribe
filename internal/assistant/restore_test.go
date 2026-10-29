@@ -121,3 +121,14 @@ func TestRestoreMessages(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreIgnoresResearch(t *testing.T) {
+	m := Memory{Research: []Finding{{Query: "/brief Sam is the CEO", Found: true, Answer: "x", At: time.Second}}}
+	r, ok, err := ParseNotes(Render(m, "h", false, 0))
+	if err != nil || !ok {
+		t.Fatalf("ok = %v, err = %v", ok, err)
+	}
+	if len(r.Briefs) != 0 || len(r.Fixes) != 0 || r.Skipped != 0 {
+		t.Errorf("a research line must restore nothing: %+v", r)
+	}
+}

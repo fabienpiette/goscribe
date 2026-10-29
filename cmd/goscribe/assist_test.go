@@ -263,6 +263,118 @@ func TestAssistLibrarianEndToEnd(t *testing.T) {
 	}
 }
 
+// Without -librarian, allowed_tools in the config is enough.
+func TestAssistLibrarianDefaultOn(t *testing.T) {
+	args := librarianRunFlag(t, "", "")
+	if !strings.Contains(args, "[--allowedTools]") {
+		t.Errorf("librarian args = %s", args)
+	}
+}
+
+// A tool the check refuses only warns when -librarian was not passed, and
+// assist still starts.
+func TestAssistLibrarianDefaultWarns(t *testing.T) {
+	fakeAudio(t)
+	guardSignals(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELEVENLABS_API_KEY", "el-key")
+	fakeClaude(t, `{"summary":"s"}`)
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	mustWrite(t, ffmpeg, []byte("#!/bin/sh\nhead -c 12800 /dev/zero\nsleep 30\n"), 0755)
+	recorder.Binary = ffmpeg
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.CloseNow() }()
+		var msg map[string]any
+		for wsjson.Read(r.Context(), c, &msg) == nil {
+		}
+	}))
+	defer srv.Close()
+	origURL, origFlush := realtime.BaseURL, realtime.FlushTimeout
+	realtime.BaseURL, realtime.FlushTimeout = "ws"+strings.TrimPrefix(srv.URL, "http"), 200*time.Millisecond
+	defer func() { realtime.BaseURL, realtime.FlushTimeout = origURL, origFlush }()
+
+	dir := t.TempDir()
+	cfgFile := configWith(t, dir, "config.yml", "librarian:\n  allowed_tools: [WebFetch]\n")
+	out := &syncBuf{}
+	done := make(chan int, 1)
+	go func() {
+		done <- runAssist([]string{"-provider", "claude", "-config", cfgFile, "-o", filepath.Join(dir, "notes.md"), "-interval", "20ms"}, out, &syncBuf{})
+	}()
+	deadline := time.Now().Add(8 * time.Second)
+	for !strings.Contains(out.String(), "⚠ librarian off:") {
+		select {
+		case code := <-done:
+			t.Fatalf("assist exited with %d before the warning:\n%s", code, out.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no warning in time; output:\n%s", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit = %d\n%s", code, out.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("assist did not stop:\n%s", out.String())
+	}
+	feed := out.String()
+	if !strings.Contains(feed, "web tools can exfiltrate data") || strings.Contains(feed, "librarian: claude") {
+		t.Errorf("feed:\n%s", feed)
+	}
+}
+
+func TestResolveLibrarian(t *testing.T) {
+	no, yes := false, true
+	tools := []string{"mcp__tracker__get_issue"}
+	pass := func(l config.Librarian) (config.Librarian, error) { return l, nil }
+	failWith := func(msg string) func(config.Librarian) (config.Librarian, error) {
+		return func(l config.Librarian) (config.Librarian, error) { return l, errors.New(msg) }
+	}
+	validate := func(l config.Librarian) (config.Librarian, error) { return l, l.Validate() }
+	for _, tc := range []struct {
+		name             string
+		explicit, flagOn bool
+		tools            []string
+		enabled          *bool
+		check            func(config.Librarian) (config.Librarian, error)
+		on               bool
+		off, err         string
+		warn             bool
+	}{
+		{"default, tools, ok", false, false, tools, nil, pass, true, "", "", false},
+		{"default, no tools", false, false, nil, nil, pass, false, "librarian.allowed_tools", "", false},
+		{"default, refused tool", false, false, tools, nil, failWith("entry 'X' is refused"), false, "entry 'X' is refused", "", true},
+		{"default, no claude CLI", false, false, tools, nil, failWith("needs the claude CLI"), false, "needs the claude CLI", "", true},
+		{"config enabled: false", false, false, tools, &no, pass, false, "librarian.enabled: false", "", false},
+		{"config enabled: true", false, false, tools, &yes, pass, true, "", "", false},
+		{"-librarian=false", true, false, tools, nil, pass, false, "-librarian=false", "", false},
+		{"-librarian, no tools", true, true, nil, nil, validate, false, "", "librarian.allowed_tools is empty", false},
+		{"-librarian, refused tool", true, true, tools, nil, failWith("refused"), false, "", "refused", false},
+		{"-librarian beats enabled: false", true, true, tools, &no, pass, true, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, on, off, warn, err := resolveLibrarian(tc.explicit, tc.flagOn, config.Librarian{AllowedTools: tc.tools, Enabled: tc.enabled}, tc.check)
+			if on != tc.on || !strings.Contains(off, tc.off) || (tc.off == "" && off != "") {
+				t.Errorf("on = %v, off = %q; want %v, %q", on, off, tc.on, tc.off)
+			}
+			if warn != tc.warn {
+				t.Errorf("warn = %v, want %v", warn, tc.warn)
+			}
+			if tc.err == "" && err != nil || tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)) {
+				t.Errorf("err = %v, want %q", err, tc.err)
+			}
+		})
+	}
+}
+
 func TestAssistLibrarianMCPConfigArgs(t *testing.T) {
 	mcp := filepath.Join(t.TempDir(), "mcp.json")
 	mustWrite(t, mcp, []byte(`{"mcpServers":{}}`), 0644)
@@ -377,6 +489,13 @@ func TestAssistLibrarianConfigDirSettingsRefused(t *testing.T) {
 // librarian's arguments, one [arg] each.
 func librarianRun(t *testing.T, extraCfg string) string {
 	t.Helper()
+	return librarianRunFlag(t, extraCfg, "-librarian")
+}
+
+// librarianRunFlag is librarianRun with the librarian flag given by the caller
+// ("" for none, to test the default).
+func librarianRunFlag(t *testing.T, extraCfg, libFlag string) string {
+	t.Helper()
 	fakeAudio(t)
 	guardSignals(t)
 	t.Setenv("HOME", t.TempDir())
@@ -435,7 +554,11 @@ esac
 	out := &syncBuf{}
 	done := make(chan int, 1)
 	go func() {
-		done <- runAssist([]string{"-provider", "claude", "-librarian", "-config", cfgFile, "-o", notes, "-interval", "20ms"}, out, &syncBuf{})
+		args := []string{"-provider", "claude", "-config", cfgFile, "-o", notes, "-interval", "20ms"}
+		if libFlag != "" {
+			args = append(args, libFlag)
+		}
+		done <- runAssist(args, out, &syncBuf{})
 	}()
 	deadline := time.Now().Add(8 * time.Second)
 	for !strings.Contains(out.String(), "PROJ-123 shipped on Monday") {
@@ -462,6 +585,10 @@ esac
 	}
 	if b, _ := os.ReadFile(notes); !strings.Contains(string(b), "## Research") {
 		t.Errorf("notes missing ## Research:\n%s", b)
+	}
+	const byDefault = "librarian: claude, 2 tool(s) (on by default; -librarian=false turns it off)"
+	if got := strings.Contains(feed, byDefault); got != (libFlag == "") {
+		t.Errorf("by-default header present = %v with flag %q:\n%s", got, libFlag, feed)
 	}
 	args, _ := os.ReadFile(argsFile)
 	return string(args)
@@ -873,7 +1000,12 @@ func TestAssistTUIStartupNoticesGoToFeed(t *testing.T) {
 	p := &fakeProgram{onExit: func() { atExit = stdout.String() }}
 	events := make(chan assistant.Event)
 	close(events)
-	notices := startupNotices("me · fake", notes, assistant.TranscriptPath(notes), "k", []string{"Acme rollback runbook review"}, 0)
+	libOff := "⚠ librarian off: librarian.allowed_tools entry 'WebFetch' is refused: web tools can exfiltrate data"
+	notices := withNotices(startupNotices("me · fake", notes, assistant.TranscriptPath(notes), "k", []string{"Acme rollback runbook review"}, 0),
+		"", "", libOff)
+	if notices[len(notices)-1] != libOff || slices.Contains(notices, "") {
+		t.Fatalf("notices = %q, want the librarian notice last and no empty ones", notices)
+	}
 	s := tuiSession{
 		cfg:       assistant.Config{Notes: notes, Transcript: assistant.TranscriptPath(notes), Engine: "fake", Interval: time.Second, Think: func(_, _ string) (string, error) { return "", nil }},
 		notices:   notices,

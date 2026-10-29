@@ -41,6 +41,17 @@ func startupNotices(header, notes, transcript, keys string, tooLong []string, co
 	return lines
 }
 
+// withNotices appends the startup notices that are set (restore, left-out
+// files, librarian off) to lines, in that order.
+func withNotices(lines []string, notices ...string) []string {
+	for _, n := range notices {
+		if n != "" {
+			lines = append(lines, n)
+		}
+	}
+	return lines
+}
+
 // printEndSummary is what stays in the terminal once the screen is gone: the
 // final summary and action items, when there are some, and the file paths.
 // Without final notes (forced, failed or too short), the summary is the live
