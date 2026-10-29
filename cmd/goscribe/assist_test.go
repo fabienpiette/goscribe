@@ -347,22 +347,26 @@ func TestResolveLibrarian(t *testing.T) {
 		check            func(config.Librarian) (config.Librarian, error)
 		on               bool
 		off, err         string
+		warn             bool
 	}{
-		{"default, tools, ok", false, false, tools, nil, pass, true, "", ""},
-		{"default, no tools", false, false, nil, nil, pass, false, "librarian.allowed_tools", ""},
-		{"default, refused tool", false, false, tools, nil, failWith("entry 'X' is refused"), false, "entry 'X' is refused", ""},
-		{"default, no claude CLI", false, false, tools, nil, failWith("needs the claude CLI"), false, "needs the claude CLI", ""},
-		{"config enabled: false", false, false, tools, &no, pass, false, "librarian.enabled: false", ""},
-		{"config enabled: true", false, false, tools, &yes, pass, true, "", ""},
-		{"-librarian=false", true, false, tools, nil, pass, false, "-librarian=false", ""},
-		{"-librarian, no tools", true, true, nil, nil, validate, false, "", "librarian.allowed_tools is empty"},
-		{"-librarian, refused tool", true, true, tools, nil, failWith("refused"), false, "", "refused"},
-		{"-librarian beats enabled: false", true, true, tools, &no, pass, true, "", ""},
+		{"default, tools, ok", false, false, tools, nil, pass, true, "", "", false},
+		{"default, no tools", false, false, nil, nil, pass, false, "librarian.allowed_tools", "", false},
+		{"default, refused tool", false, false, tools, nil, failWith("entry 'X' is refused"), false, "entry 'X' is refused", "", true},
+		{"default, no claude CLI", false, false, tools, nil, failWith("needs the claude CLI"), false, "needs the claude CLI", "", true},
+		{"config enabled: false", false, false, tools, &no, pass, false, "librarian.enabled: false", "", false},
+		{"config enabled: true", false, false, tools, &yes, pass, true, "", "", false},
+		{"-librarian=false", true, false, tools, nil, pass, false, "-librarian=false", "", false},
+		{"-librarian, no tools", true, true, nil, nil, validate, false, "", "librarian.allowed_tools is empty", false},
+		{"-librarian, refused tool", true, true, tools, nil, failWith("refused"), false, "", "refused", false},
+		{"-librarian beats enabled: false", true, true, tools, &no, pass, true, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, on, off, err := resolveLibrarian(tc.explicit, tc.flagOn, config.Librarian{AllowedTools: tc.tools, Enabled: tc.enabled}, tc.check)
+			_, on, off, warn, err := resolveLibrarian(tc.explicit, tc.flagOn, config.Librarian{AllowedTools: tc.tools, Enabled: tc.enabled}, tc.check)
 			if on != tc.on || !strings.Contains(off, tc.off) || (tc.off == "" && off != "") {
 				t.Errorf("on = %v, off = %q; want %v, %q", on, off, tc.on, tc.off)
+			}
+			if warn != tc.warn {
+				t.Errorf("warn = %v, want %v", warn, tc.warn)
 			}
 			if tc.err == "" && err != nil || tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)) {
 				t.Errorf("err = %v, want %q", err, tc.err)
@@ -581,6 +585,10 @@ esac
 	}
 	if b, _ := os.ReadFile(notes); !strings.Contains(string(b), "## Research") {
 		t.Errorf("notes missing ## Research:\n%s", b)
+	}
+	const byDefault = "librarian: claude, 2 tool(s) (on by default; -librarian=false turns it off)"
+	if got := strings.Contains(feed, byDefault); got != (libFlag == "") {
+		t.Errorf("by-default header present = %v with flag %q:\n%s", got, libFlag, feed)
 	}
 	args, _ := os.ReadFile(argsFile)
 	return string(args)

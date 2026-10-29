@@ -197,14 +197,14 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	if *modelFlag != "" && harness.IsHarness(prov) {
 		harness.Models[prov] = *modelFlag
 	}
-	lib, libOn, libOff, err := resolveLibrarian(isSet(fs, "librarian"), *librarian, cfg.Librarian.WithDefaults(), checkLibrarian)
+	lib, libOn, libOff, libWarn, err := resolveLibrarian(isSet(fs, "librarian"), *librarian, cfg.Librarian.WithDefaults(), checkLibrarian)
 	if err != nil {
 		return usageErr("librarian: %v", err)
 	}
 	// A failed check is only a warning when -librarian was not passed.
 	var librarianNotice string
-	if strings.HasPrefix(libOff, librarianFailedPrefix) {
-		librarianNotice = "⚠ librarian off: " + strings.TrimPrefix(libOff, librarianFailedPrefix)
+	if libWarn {
+		librarianNotice = "⚠ librarian off: " + libOff
 	}
 	elKey := pick(*elevenLabsKey, cfg.ElevenLabsAPIKey, os.Getenv("ELEVENLABS_API_KEY"))
 	if elKey == "" {
@@ -310,6 +310,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	if libOn {
 		header += fmt.Sprintf(" · librarian: %s, %d tool(s)", lib.Provider, len(lib.AllowedTools))
+		if !isSet(fs, "librarian") {
+			header += " (on by default; -librarian=false turns it off)"
+		}
 	}
 
 	transcript := assistant.TranscriptPath(notes)
@@ -387,6 +390,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	}
 	if !libOn {
 		acfg.LibrarianOff = libOff
+		if libWarn {
+			acfg.LibrarianOff = "the librarian is off: " + libOff
+		}
 	} else {
 		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}
 		acfg.Research = func(prompt string) (assistant.ResearchReply, error) {
@@ -419,30 +425,27 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// librarianFailedPrefix starts the off reason when the librarian was wanted
-// but its startup check failed: that one is shown as a warning.
-const librarianFailedPrefix = "the librarian is off: "
-
 // resolveLibrarian decides whether the librarian runs. Only an explicit
 // -librarian makes a failed check an error; by default the librarian is on
-// when allowed_tools is set, and a failed check turns it off with a reason.
-func resolveLibrarian(explicit, flagOn bool, l config.Librarian, check func(config.Librarian) (config.Librarian, error)) (lib config.Librarian, on bool, off string, err error) {
+// when allowed_tools is set, and a failed check turns it off with a reason; warn
+// is true only then, so the reason is shown as a warning.
+func resolveLibrarian(explicit, flagOn bool, l config.Librarian, check func(config.Librarian) (config.Librarian, error)) (lib config.Librarian, on bool, off string, warn bool, err error) {
 	switch {
 	case explicit && !flagOn:
-		return l, false, "the librarian is off (-librarian=false)", nil
+		return l, false, "the librarian is off (-librarian=false)", false, nil
 	case explicit:
 		lib, err = check(l)
-		return lib, err == nil, "", err
+		return lib, err == nil, "", false, err
 	case len(l.AllowedTools) == 0:
-		return l, false, "add read-only tools to librarian.allowed_tools in the config to use the librarian (see goscribe assist -h)", nil
+		return l, false, "add read-only tools to librarian.allowed_tools in the config to use the librarian (see goscribe assist -h)", false, nil
 	case l.Enabled != nil && !*l.Enabled:
-		return l, false, "the librarian is off (librarian.enabled: false in the config)", nil
+		return l, false, "the librarian is off (librarian.enabled: false in the config)", false, nil
 	}
 	lib, err = check(l)
 	if err != nil {
-		return l, false, librarianFailedPrefix + err.Error(), nil
+		return l, false, err.Error(), true, nil
 	}
-	return lib, true, "", nil
+	return lib, true, "", false, nil
 }
 
 // checkLibrarian runs the read-only checks on the librarian config and returns

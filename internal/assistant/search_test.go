@@ -511,6 +511,11 @@ func TestQuestionLookupSimilarSkipped(t *testing.T) {
 	if r.count() != 2 {
 		t.Errorf("research calls = %d, want 2: a similar lookup must not be queued", r.count())
 	}
+	for _, q := range []string{"when did PROJ-123 ship", "when did proj-124 ship"} {
+		if !hasInfo(v, "📚 not looking up \""+q+"\": already asked") {
+			t.Errorf("no skip line for %q:\n%+v", q, v.Items())
+		}
+	}
 }
 
 func TestQuestionLookupCleanedAndCapped(t *testing.T) {

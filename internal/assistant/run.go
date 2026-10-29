@@ -477,7 +477,12 @@ func (s *state) finishQuestion(r qaResult) {
 // silently, since the user did not ask for a search.
 func (s *state) questionLookup(text, question string) {
 	q := cleanText(text, maxQuery)
-	if q == "" || s.c.Research == nil || s.ending || s.mem.askedSimilar(q) {
+	if q == "" || s.c.Research == nil || s.ending {
+		return
+	}
+	if s.mem.askedSimilar(q) {
+		// The answer may say the librarian is looking: say it is not.
+		s.info(fmt.Sprintf("📚 not looking up %q: already asked", q))
 		return
 	}
 	s.mem.Searched = append(s.mem.Searched, q)
