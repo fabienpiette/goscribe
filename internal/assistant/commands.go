@@ -11,10 +11,10 @@ import (
 
 // Command is one parsed line of the chat input.
 type Command struct {
-	Name   string        // "help", "mute", "recap", "fix", "brief", "add" or "question"
+	Name   string        // "help", "mute", "recap", "fix", "brief", "add", "search" or "question"
 	Arg    string        // "me" or "others" for mute
 	Window time.Duration // recap window, 0 means the default
-	Text   string        // the question
+	Text   string        // the question, or the /search question
 	// Op is the /fix operation: "add", "list", "rm", "yes" or "no".
 	Op           string
 	Wrong, Right string // /fix add: what was misheard and what it should read
@@ -41,6 +41,7 @@ var Commands = []CommandHelp{
 	{"/brief [rm n]", "list the briefs, or remove brief n"},
 	{"/add <path|url>", "add a file, folder or web page to the context (alias /context)"},
 	{"/add", "list the sources added"},
+	{"/search <question>", "ask the librarian to look something up in your sources"},
 	{"<text>", "ask a question about the meeting"},
 }
 
@@ -52,6 +53,8 @@ const (
 	fixAnsUsage = "usage: /fix yes|no [n]"
 
 	addUsage = "usage: /add <path or http(s) url>"
+
+	searchUsage = "usage: /search <question>"
 
 	briefRmUsage = "usage: /brief rm <n>"
 	maxBriefLen  = maxItem
@@ -89,6 +92,12 @@ func ParseCommand(input string) (Command, error) {
 		return parseFix(input[len(fields[0]):])
 	case "brief":
 		return parseBrief(strings.TrimSpace(input[len(fields[0]):]))
+	case "search":
+		q := strings.TrimSpace(input[len(fields[0]):])
+		if q == "" {
+			return Command{}, errors.New(searchUsage)
+		}
+		return Command{Name: "search", Text: q}, nil
 	case "add", "context":
 		return parseAdd(strings.TrimSpace(input[len(fields[0]):]))
 	}

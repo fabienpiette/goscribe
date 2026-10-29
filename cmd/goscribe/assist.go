@@ -44,7 +44,7 @@ In a terminal it takes the full screen: the live feed, a dashboard of the
 meeting (summary, decisions, open questions, brief, fixes) and a chat input.
 Type a question about the meeting and press Enter, or a command: /help,
 /mute me|others, /recap [duration], /fix <wrong> <right>, /brief <text>,
-/add <path|url>.
+/add <path|url>, /search <question>.
 Alt+m mutes or unmutes your mic, Alt+s the computer sound, Alt+w asks for a
 recap of the last minutes (-recap, default 5m). Tab shows the dashboard on a narrow window;
 PgUp/PgDn or the mouse wheel scroll, End goes back to live; hold Shift and
@@ -84,6 +84,11 @@ earlier notes file restores its fixes and briefs and is kept as untrusted
 reference data; a folder restores nothing and leaves out earlier notes,
 transcripts and page copies, which are marked as untrusted.
 The limit is 200 KB in total, counting -context and everything added.
+
+/search <question> asks the librarian to look something up in your sources
+now. It is unlimited, runs before the model's own lookups and a second one
+waits its turn; the answer shows as a Librarian line, feeds the updates and
+goes to ## Research in the notes. Without the librarian, the feed says why.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute

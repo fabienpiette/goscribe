@@ -17,6 +17,9 @@ type Lookup struct {
 	Query string        `json:"query"`
 	Why   string        `json:"why"`
 	At    time.Duration `json:"-"`
+	// Asker is who asked: "you" for /search, "question" for a typed
+	// question, "" for the assist model's own lookups.
+	Asker string `json:"-"`
 }
 
 // Source is where the librarian found an answer: a title and a link or path.
@@ -122,8 +125,13 @@ func (m *Memory) forgetAsked(q string) {
 	}
 }
 
+// lookupsAsked is every query asked so far, the model's and the user's.
+func (m Memory) lookupsAsked() []string {
+	return append(slices.Clone(m.Asked), m.Searched...)
+}
+
 func (m *Memory) askedSimilar(query string) bool {
-	for _, a := range m.Asked {
+	for _, a := range m.lookupsAsked() {
 		if jaccard(a, query) >= similarQuery {
 			return true
 		}

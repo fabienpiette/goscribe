@@ -354,26 +354,29 @@ func (s *state) addFetched(via, rawTitle, origin, final, markdown string) {
 	}
 }
 
-// askLibrarianDoc handles a page that needs a login. Without the librarian it
-// says how to set it up; with it, the URL joins the doc queue and maybeLookup
-// starts it before any model lookup. It is the user's own request: it is not
-// in Asked and does not count toward MaxLookups.
+// askLibrarianDoc handles a page that needs a login. A doc already added is
+// said so first. Without the librarian it says why it is off; with it, the
+// URL joins the user queue and maybeLookup starts it before any model
+// lookup. It is the user's own request: it is not in Asked and does not
+// count toward MaxLookups.
 func (s *state) askLibrarianDoc(target, reason string) {
+	if i := slices.IndexFunc(s.mem.Docs, func(d Doc) bool { return d.Origin == target }); i >= 0 {
+		s.info("already added: " + s.mem.Docs[i].Title)
+		return
+	}
 	if s.c.Research == nil {
-		s.info(fmt.Sprintf("%s needs a login (%s): goscribe can't read it. Start assist with -librarian and a read-only tool for %s in librarian.allowed_tools",
-			target, Clean(reason), hostOf(target)))
+		s.info(fmt.Sprintf("%s needs a login (%s): goscribe can't read it. %s", target, Clean(reason), s.librarianOff(hostOf(target))))
 		return
 	}
 	if s.ending {
 		return
 	}
-	if s.docURL == target || slices.Contains(s.docQueue, target) {
+	if s.docURL == target || slices.ContainsFunc(s.userQueue, func(a userAsk) bool { return a.Doc == target }) {
 		s.info("already fetching " + target)
 		return
 	}
-	s.docQueue = append(s.docQueue, target)
 	s.info("📚 asking the librarian for " + target + "…")
-	s.maybeLookup(time.Now())
+	s.queueUser(userAsk{Doc: target})
 }
 
 // finishDoc adds the document the librarian read, or says why it could not.

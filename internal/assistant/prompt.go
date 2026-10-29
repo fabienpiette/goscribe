@@ -105,7 +105,7 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian, fix
 	}
 	var asked []string
 	if librarian {
-		asked = m.Asked
+		asked = m.lookupsAsked()
 	}
 	writeMemory(&b, m, asked)
 	writeDocs(&b, m.Docs)

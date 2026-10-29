@@ -24,6 +24,7 @@ const (
 	FixEvent                       // the user typed a /fix command (Fix)
 	BriefEvent                     // the user typed a /brief command (Brief)
 	AddEvent                       // the user typed an /add command (Add)
+	SearchEvent                    // the user typed a /search command (Text is the question)
 )
 
 // BriefRequest is a parsed /brief command: Op is "add", "list" or "rm".
@@ -243,10 +244,10 @@ type state struct {
 	looking       bool    // a librarian lookup is in flight
 	pending       *Lookup // the newest lookup waiting for it
 	pendingSince  time.Time
-	docQueue      []string // login-walled docs the user added, waiting for the librarian
-	docURL        string   // the doc the lookup in flight reads, if it is one
-	limitShown    bool     // the lookup limit line was printed
-	ending        bool     // the meeting is over: no new lookups
+	userQueue     []userAsk // the user's own librarian requests, FIFO, served before the model's
+	docURL        string    // the doc the lookup in flight reads, if it is one
+	limitShown    bool      // the lookup limit line was printed
+	ending        bool      // the meeting is over: no new lookups
 	lookupResults chan lookupResult
 
 	// Typed questions have their own call, so they never delay the updates.
@@ -318,6 +319,8 @@ func (s *state) handle(ev Event) {
 		s.brief(ev.Brief)
 	case AddEvent:
 		s.add(ev.Add)
+	case SearchEvent:
+		s.search(ev.Text)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -617,9 +620,14 @@ func (s *state) maybeLookup(now time.Time) {
 	if s.looking {
 		return
 	}
-	if len(s.docQueue) > 0 { // the user's own request: first, never dropped, not in Asked
-		s.startDoc(s.docQueue[0], now)
-		s.docQueue = s.docQueue[1:]
+	if len(s.userQueue) > 0 { // the user's own request: first, never dropped, not in Asked
+		a := s.userQueue[0]
+		s.userQueue = s.userQueue[1:]
+		if a.Doc != "" {
+			s.startDoc(a.Doc, now)
+		} else {
+			s.startLookup(a.Search, now)
+		}
 		return
 	}
 	if s.pending == nil {
@@ -631,9 +639,30 @@ func (s *state) maybeLookup(now time.Time) {
 		s.mem.forgetAsked(l.Query)
 		return
 	}
+	s.startLookup(l, now)
+}
+
+// lookupNote says who a lookup is for, "" for the assist model's own.
+func lookupNote(asker string) string {
+	switch asker {
+	case "you":
+		return "you asked"
+	case "question":
+		return "for your question"
+	}
+	return ""
+}
+
+// startLookup shows the lookup and asks the librarian in the background.
+func (s *state) startLookup(l Lookup, now time.Time) {
 	s.looking = true
-	s.show(Item{Kind: ItemAssist, At: s.elapsed(now), Badge: "LOOKUP", Text: l.Query,
-		Plain: s.dim(fmt.Sprintf("🔎 %s Looking up: %s", clock(s.elapsed(now)), l.Query))})
+	it := Item{Kind: ItemAssist, At: s.elapsed(now), Badge: "LOOKUP", Text: l.Query, Note: lookupNote(l.Asker)}
+	what := "Looking up"
+	if it.Note != "" {
+		what += " (" + it.Note + ")"
+	}
+	it.Plain = s.dim(fmt.Sprintf("🔎 %s %s: %s", clock(it.At), what, l.Query))
+	s.show(it)
 	prompt := LibrarianPrompt(s.c.LibrarianInstructions, s.c.LibrarianTools, l, s.mem, now)
 	research, results := s.c.Research, s.lookupResults
 	go func() {
@@ -712,6 +741,8 @@ func (s *state) finishLookup(r lookupResult) {
 		}
 		it.Plain = line
 		s.show(it)
+	} else if r.lookup.Asker != "" { // the user waits for this one: not dimmed
+		s.notice("📚 nothing found for " + f.Query)
 	} else {
 		s.info("📚 nothing found for " + f.Query)
 	}
@@ -757,7 +788,7 @@ func (s *state) end() error {
 		}
 	}()
 	s.ending = true
-	s.docQueue = nil          // like waiting lookups, queued docs are dropped
+	s.userQueue = nil         // like waiting lookups, queued docs and searches are dropped
 	s.c.View.Status(Status{}) // clears the status line
 	if s.thinking {
 		s.notice(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))
@@ -851,6 +882,8 @@ func (s *state) await(res <-chan result) (result, bool) {
 				s.info("the meeting is over: briefs are closed")
 			case AddEvent:
 				s.info("the meeting is over: sources are closed")
+			case SearchEvent:
+				s.info("the meeting is over: searches are closed")
 			}
 		}
 	}

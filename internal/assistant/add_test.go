@@ -328,7 +328,7 @@ func TestRunAddPageLoginWithoutLibrarian(t *testing.T) {
 	events, input, done, _ := startPageRun(t, f, v, p, false)
 	input <- addEvent("add", u)
 	waitUntil(t, "login message", func() bool {
-		return hasInfo(v, u+" needs a login (redirected to a sign-in page): goscribe can't read it. Start assist with -librarian and a read-only tool for docs.example.com in librarian.allowed_tools")
+		return hasInfo(v, u+" needs a login (redirected to a sign-in page): goscribe can't read it. add a read-only tool for docs.example.com to librarian.allowed_tools in the config")
 	})
 	close(events)
 	<-done
@@ -764,5 +764,26 @@ func TestRunAddTranscriptIsUntrusted(t *testing.T) {
 	}
 	if !strings.Contains(string(data), ", earlier transcript") {
 		t.Errorf("notes sources line missing the suffix:\n%s", data)
+	}
+}
+
+// A login doc already added is reported before the librarian is asked, also
+// when there is no librarian.
+func TestAddLoginDocAlreadyAddedNoLibrarian(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(`{"found":false,"reason":"x"}`)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, nil, 3, func(c *Config) {
+		c.Docs = []Doc{{Name: "acme-roadmap.md", Title: "Acme roadmap", Origin: loginDocURL, Via: "librarian", Text: "Dark-mode ships in Q3."}}
+	})
+	input <- addEvent("add", loginDocURL)
+	waitUntil(t, "already added", func() bool { return hasInfo(v, "already added: Acme roadmap") })
+	close(events)
+	<-done
+	if hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "needs a login") }) {
+		t.Error("the librarian-off advice must not show for a doc already added")
+	}
+	if r.count() != 0 {
+		t.Errorf("research calls = %d", r.count())
 	}
 }
