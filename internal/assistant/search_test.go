@@ -358,8 +358,7 @@ func TestQuestionStartsLookup(t *testing.T) {
 	r := &fakeResearch{reply: answer(foundT1)}
 	v := &recordingView{}
 	var mem Memory
-	// MaxLookups 0: a question's lookup is the user's, so no limit applies.
-	events, input, done := startSearchRun(t, f, v, r, 0, func(c *Config) {
+	events, input, done := startSearchRun(t, f, v, r, 5, func(c *Config) {
 		c.Final = func(m Memory, _ string, _ bool) { mem = m }
 	})
 	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
@@ -393,23 +392,53 @@ func TestQuestionStartsLookup(t *testing.T) {
 func TestQuestionLookupQueuesBeforeModelLookup(t *testing.T) {
 	f := &fakeThink{replies: []func() (string, error){
 		lookupReply("When was the Globex contract signed?"),
+		answer(`{"summary":"s","decisions":["second applied"],"lookups":[{"query":"Who owns the billing migration ticket?","why":"asked now"}]}`),
 		answer(lookupAnswer),
 		answer(`{"summary":"s"}`)}}
 	release := make(chan struct{})
 	r := &fakeResearch{reply: func() (string, error) { <-release; return foundT1, nil }}
 	v := &recordingView{}
 	events, input, done := startSearchRun(t, f, v, r, 5, nil)
-	events <- line("me", twelveWords)
-	waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+	for i := 1; i <= 2; i++ {
+		events <- line("me", twelveWords)
+		waitUntil(t, "cycle", func() bool { return f.count() == i })
+		if i == 1 {
+			waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+		}
+	}
+	waitUntil(t, "second reply applied (its lookup waits)", func() bool {
+		return hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "second applied") })
+	})
 	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
 	waitUntil(t, "question lookup waits", func() bool { return hasInfo(v, "🔎 waiting for the librarian: when did PROJ-123 ship") })
 	close(release)
-	waitUntil(t, "second lookup", func() bool { return r.count() == 2 })
-	if p := r.prompt(1); !strings.Contains(p, "Question: when did PROJ-123 ship\n") {
-		t.Errorf("the question's lookup should run second:\n%s", p)
+	waitUntil(t, "three research calls", func() bool { return r.count() == 3 })
+	for i, want := range []string{"Question: When was the Globex contract signed?", "Question: when did PROJ-123 ship\n", "Question: Who owns the billing migration ticket?"} {
+		if p := r.prompt(i); !strings.Contains(p, want) {
+			t.Errorf("call %d should hold %q:\n%s", i, want, p)
+		}
 	}
 	close(events)
 	<-done
+}
+
+func TestQuestionLookupIgnoresLimit(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		answer(lookupAnswer),
+		answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 1, nil)
+	events <- line("me", twelveWords)
+	waitUntil(t, "limit used", func() bool { return r.count() == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "question lookup ran", func() bool { return r.count() == 2 })
+	close(events)
+	<-done
+	if hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "lookup limit reached") }) {
+		t.Error("a question's lookup must not hit the lookup limit")
+	}
 }
 
 func TestQuestionLookupNotMarkedAsUser(t *testing.T) {
