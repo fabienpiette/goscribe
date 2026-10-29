@@ -18,14 +18,23 @@ const (
 	MuteEvent                      // a side was muted or unmuted (Muted)
 	RecapEvent                     // the user asked for a recap of the last minutes
 	QuestionEvent                  // the user typed a question (Text)
+	FixEvent                       // the user typed a /fix command (Fix)
 )
+
+// FixRequest is a parsed /fix command: Op is "add", "list", "rm", "yes" or
+// "no"; N is 0 for the latest or none given.
+type FixRequest struct {
+	Op, Wrong, Right string
+	N                int
+}
 
 // Event is what the transcription side sends to Run.
 type Event struct {
 	Kind    EventKind
 	Speaker string // "me" or "others"
 	Text    string
-	Muted   bool // MuteEvent: the side is now muted
+	Muted   bool       // MuteEvent: the side is now muted
+	Fix     FixRequest // FixEvent: what the user asked
 	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
 	Window time.Duration
 }
@@ -203,6 +212,13 @@ type state struct {
 	askGen    int // abandoned question calls carry an older askGen and are ignored
 	answers   chan qaResult
 
+	// lateFixes were made while the update in flight was asked: its reply
+	// does not know them, so they are applied to it before the memory takes
+	// it. Reset when the next update starts.
+	lateFixes []Fix
+
+	proposals []proposal // fixes the model suggested, numbered from 1
+
 	finalWritten bool // the final notes were written
 
 	notesErr      bool
@@ -221,10 +237,10 @@ func (s *state) handle(ev Event) {
 	}
 	switch ev.Kind {
 	case PartialEvent:
-		s.partials[ev.Speaker] = Clean(ev.Text)
+		s.partials[ev.Speaker] = ApplyFixes(Clean(ev.Text), s.mem.Fixes)
 		s.lastSpeaker = ev.Speaker
 	case LineEvent:
-		text := Clean(strings.TrimSpace(ev.Text))
+		text := ApplyFixes(Clean(strings.TrimSpace(ev.Text)), s.mem.Fixes)
 		if text == "" {
 			return
 		}
@@ -243,6 +259,8 @@ func (s *state) handle(ev Event) {
 		s.askRecap(time.Now(), ev.Window)
 	case QuestionEvent:
 		s.askQuestion(ev.Text)
+	case FixEvent:
+		s.fix(ev.Fix)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -414,7 +432,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil)
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, s.unacceptedGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
 
@@ -423,7 +441,7 @@ func (s *state) call(now time.Time, upto int, recap bool, instructions, transcri
 	gen, think, results := s.gen, s.c.Think, s.results
 	s.thinking, s.recapping, s.thinkStart = true, recap, now
 	if !recap { // a recap does not delay the next update
-		s.lastStart = now
+		s.lastStart, s.lateFixes = now, nil
 	}
 	go func() {
 		answer, err := think(instructions, transcript)
@@ -458,7 +476,13 @@ func (s *state) finish(r result) {
 	s.failures = 0
 	s.analysed = r.upto
 	at := s.elapsed(time.Now())
+	fixReply(&parsed, s.lateFixes)
 	suggestions, decisions := s.mem.Apply(parsed, at, s.sources)
+	var guess proposal
+	guessed := false
+	if s.c.Input != nil && !s.ending { // else nothing could answer it
+		guess, guessed = s.takeGuess(parsed.Fixes, at)
+	}
 	s.board()
 	for _, sg := range suggestions {
 		l := suggestionLabels[sg.Type]
@@ -477,6 +501,9 @@ func (s *state) finish(r result) {
 	for _, d := range decisions {
 		s.show(Item{Kind: ItemAssist, At: at, Badge: "DECISION", Text: Clean(d),
 			Plain: fmt.Sprintf("✅ %s Decision: %s", clock(at), Clean(d))})
+	}
+	if guessed {
+		s.showGuess(guess)
 	}
 	_ = s.writeNotes(false) // a failure is shown in the feed
 	s.queueLookup(parsed, at)
@@ -694,7 +721,7 @@ func (s *state) end() error {
 }
 
 // await waits for a call's result, reading Input meanwhile so that a sender
-// never blocks (a question or recap is refused, a mute is dropped). It
+// never blocks (a question, recap or fix is refused, a mute is dropped). It
 // takes the answer of the question in flight, and refreshes the status on
 // each tick. With a nil res, it returns after that answer or the question
 // watchdog. false means Force was closed first.
@@ -724,8 +751,11 @@ func (s *state) await(res <-chan result) (result, bool) {
 				input = nil
 				continue
 			}
-			if ev.Kind == QuestionEvent || ev.Kind == RecapEvent {
+			switch ev.Kind {
+			case QuestionEvent, RecapEvent:
 				s.info("the meeting is over: nothing more is answered")
+			case FixEvent:
+				s.info("the meeting is over: fixes are closed")
 			}
 		}
 	}
@@ -773,6 +803,11 @@ func (s *state) appendTranscript(l Line) {
 	} else {
 		err = AppendTranscript(s.c.Transcript, l)
 	}
+	s.transcriptFailed(err)
+}
+
+// transcriptFailed shows the first transcript write error in the feed.
+func (s *state) transcriptFailed(err error) {
 	if err != nil && !s.transcriptErr {
 		s.transcriptErr = true
 		s.notice("⚠ cannot write the transcript: " + err.Error())
@@ -811,8 +846,17 @@ func (s *state) status(now time.Time) {
 // board sends the memory to the dashboard.
 func (s *state) board() {
 	m := s.mem
+	var fixes []string
+	for _, f := range m.Fixes {
+		fixes = append(fixes, fixLabel(f))
+	}
+	for _, p := range s.proposals {
+		if p.State == guessPending {
+			fixes = append(fixes, fmt.Sprintf("%s ? (/fix yes %d)", fixLabel(p.fix()), p.N))
+		}
+	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
-		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources)})
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes})
 }
 
 func (s *state) dim(text string) string {

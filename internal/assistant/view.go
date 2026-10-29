@@ -17,7 +17,7 @@ type Item struct {
 	Kind    ItemKind
 	At      time.Duration
 	Speaker string // ItemTranscript, and "you" for a typed question
-	Badge   string // "ASK","ANSWER","MISSED","RISK","DECISION","RECAP","LIBRARIAN","LOOKUP"
+	Badge   string // "ASK","ANSWER","MISSED","RISK","DECISION","RECAP","LIBRARIAN","LOOKUP","FIX"
 	Text    string // cleaned, without icon or time
 	Note    string // dim trailing note (source, why), may be ""
 	High    bool   // ‼: the moment will soon pass
@@ -41,6 +41,9 @@ type Board struct {
 	Summary                              string
 	NotCovered, Decisions, OpenQuestions []string
 	Sources                              []string
+	// Fixes are the corrections in force, "cash → cache"; a suggested one not
+	// answered yet ends with " ?".
+	Fixes []string
 }
 
 // View is everything Run shows. Calls come from the Run goroutine only.

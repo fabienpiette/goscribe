@@ -55,6 +55,7 @@ type Memory struct {
 	Research      []Finding // the librarian's results, oldest first
 	Asked         []string  // every lookup query accepted, for dedup and the limit
 	QA            []QA      // the user's typed questions and their answers, oldest first
+	Fixes         []Fix     // the corrections in force, in the order they were made
 }
 
 // QA is a question the user typed and the answer they got.
@@ -75,6 +76,23 @@ type Reply struct {
 	Suggestions   Suggestions `json:"suggestions"`
 	ActionItems   []string    `json:"action_items"`
 	Lookups       Lookups     `json:"lookups"`
+	Fixes         FixGuesses  `json:"fixes"`
+}
+
+// FixGuess is a fix the model proposes for a word it thinks was misheard. It
+// changes nothing until the user accepts it.
+type FixGuess struct {
+	Wrong string `json:"wrong"`
+	Right string `json:"right"`
+	Why   string `json:"why"`
+}
+
+// FixGuesses skips entries that aren't guess objects, like Suggestions.
+type FixGuesses []FixGuess
+
+func (g *FixGuesses) UnmarshalJSON(data []byte) error {
+	*g = lenientList[FixGuess](data)
+	return nil
 }
 
 // Suggestions skips entries that aren't suggestion objects (models sometimes

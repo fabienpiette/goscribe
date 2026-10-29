@@ -44,6 +44,8 @@ var badgeColors = map[string]lipgloss.TerminalColor{
 	"DECISION":  lipgloss.AdaptiveColor{Light: "#2BA8A0", Dark: "#5FD8CF"},
 	"RECAP":     lipgloss.AdaptiveColor{Light: "#9A6FD6", Dark: "#C49BFF"},
 	"LIBRARIAN": lipgloss.AdaptiveColor{Light: "#C77DB0", Dark: "#F0A6D8"},
+	"FIX":       lipgloss.AdaptiveColor{Light: "#D9822B", Dark: "#FFA657"},
+	"FIX?":      lipgloss.AdaptiveColor{Light: "#E0A261", Dark: "#FFC48A"},
 }
 
 var badgeDefault lipgloss.TerminalColor = lipgloss.AdaptiveColor{Light: "#9AA0AC", Dark: "#B8BECC"}

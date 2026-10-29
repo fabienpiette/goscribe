@@ -455,3 +455,62 @@ func TestModelDashboardClipsVisibly(t *testing.T) {
 		t.Errorf("short board cut:\n%s", v)
 	}
 }
+
+func TestModelFixDispatch(t *testing.T) {
+	r := &recorder{}
+	m := sized(t, r, 140, 30)
+	m = send(m, typed("/fix cash cache"), enter, typed("/fix yes 2"), enter, typed("/fix rm 1"), enter, typed("/fix"), enter)
+	want := []assistant.FixRequest{
+		{Op: "add", Wrong: "cash", Right: "cache"},
+		{Op: "yes", N: 2},
+		{Op: "rm", N: 1},
+		{Op: "list"},
+	}
+	if len(r.sent) != len(want) {
+		t.Fatalf("sent %d events, want %d: %+v", len(r.sent), len(want), r.sent)
+	}
+	for i, w := range want {
+		if r.sent[i].Kind != assistant.FixEvent || r.sent[i].Fix != w {
+			t.Errorf("event %d = %+v, want FixEvent %+v", i, r.sent[i], w)
+		}
+	}
+
+	r.sent = nil
+	m = send(m, typed(`/fix "dark mood"`), enter)
+	if len(r.sent) != 0 {
+		t.Errorf("a bad /fix was sent: %+v", r.sent)
+	}
+	if !strings.Contains(m.View(), "usage: /fix <wrong> <right>") {
+		t.Errorf("no usage error in the feed:\n%s", m.View())
+	}
+}
+
+func TestModelFixesSection(t *testing.T) {
+	m := send(sized(t, &recorder{}, 140, 30), BoardMsg{Summary: "Design tokens v2"})
+	if strings.Contains(m.View(), "FIXES") {
+		t.Errorf("FIXES shown with no fixes:\n%s", m.View())
+	}
+	m = send(m, BoardMsg{Summary: "Design tokens v2", Fixes: []string{"cash → cache", "dark mood → dark mode ?"}})
+	v := m.View()
+	for _, want := range []string{"FIXES", "cash → cache", "dark mood → dark mode ?"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("view lacks %q:\n%s", want, v)
+		}
+	}
+}
+
+// The /help summaries line up after the longest usage.
+func TestModelHelpAligned(t *testing.T) {
+	m := send(sized(t, &recorder{}, 400, 60), typed("/help"), enter)
+	longest := 0
+	for _, c := range assistant.Commands {
+		longest = max(longest, utf8.RuneCountInString(c.Usage))
+	}
+	v := m.View()
+	for _, c := range assistant.Commands {
+		want := fmt.Sprintf("%-*s %s", longest, c.Usage, strings.Fields(c.Summary)[0])
+		if !strings.Contains(v, want) {
+			t.Errorf("help lacks %q:\n%s", want, v)
+		}
+	}
+}

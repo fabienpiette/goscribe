@@ -347,10 +347,10 @@ goscribe assist -provider codex -model gpt-6-luna             # pick the model (
 goscribe assist -plain                                         # lines instead of the full-screen view
 ```
 
-In a terminal, `assist` takes the full screen: a top bar (meeting clock, what the model is doing, `me`/`others` live or muted), the feed of transcript lines and suggestions with colored badges (`ASK`, `ANSWER`, `MISSED`, `RISK`, `DECISION`, `RECAP`, `LIBRARIAN`), a dashboard of the meeting (summary, agenda items not covered yet, decisions, open questions) and a chat input at the bottom.
+In a terminal, `assist` takes the full screen: a top bar (meeting clock, what the model is doing, `me`/`others` live or muted), the feed of transcript lines and suggestions with colored badges (`ASK`, `ANSWER`, `MISSED`, `RISK`, `DECISION`, `RECAP`, `LIBRARIAN`, `FIX`, `FIX?`), a dashboard of the meeting (summary, agenda items not covered yet, decisions, open questions, sources, fixes) and a chat input at the bottom.
 
 - Type a question about the meeting and press Enter: `you` asks it, and the answer comes from the meeting so far and your context, without waiting for the next update. Plain text is always a question; an empty line does nothing.
-- Commands: `/help` lists the commands and keys, `/mute me` or `/mute others` mutes or unmutes a side (a side that is not captured only says so), `/recap` asks for a recap of the last minutes (`/recap 10m` to go further back).
+- Commands: `/help` lists the commands and keys, `/mute me` or `/mute others` mutes or unmutes a side (a side that is not captured only says so), `/recap` asks for a recap of the last minutes (`/recap 10m` to go further back), `/fix` corrects a misheard word (see Corrections below).
 - Keys: `Alt+m` mutes or unmutes your mic, `Alt+s` the computer sound, `Alt+w` asks for a recap. `Tab` shows or hides the dashboard when the window is narrower than 120 columns (it sits next to the feed on wider ones). `PgUp`/`PgDn` and the mouse wheel scroll the feed; new lines are counted while you read, and `End` goes back to live.
 - Copying: the mouse scrolls the feed, so hold `Shift` while you drag to select text the usual way.
 - Ctrl+C ends the meeting and writes the final notes (the screen stays until they are written); a second Ctrl+C quits at once and keeps the live notes. Once the screen is gone, the terminal shows the final summary, the action items and the paths of the notes and the transcript. A question already being answered at the first Ctrl+C is still answered, into the feed and the notes; questions still waiting are left unanswered, and a question or `/recap` typed after the first Ctrl+C is refused. When the final notes were not written (second Ctrl+C, a failed final call, too little said), the summary shown is the live one and is labelled so.
@@ -379,6 +379,16 @@ In a terminal, `assist` takes the full screen: a top bar (meeting clock, what th
 - Use headphones: with speakers, the mic also hears the others and their words are labelled `me`.
 - Press `Alt+m` (`m` with `-plain`) to mute or unmute your mic (`me`) and `Alt+s` (`s`) for the computer sound (`others`), or type `/mute me` / `/mute others`. A muted side is not transcribed: its live session gets silence and stays open, so nothing said on that side reaches the model, the suggestions or the notes until you unmute. Live transcription lags a second or two behind, so the words said just before you press are dropped too. The top bar (the status line with `-plain`) shows `me (muted)`, and each change is logged, e.g. `🔇 me muted at 00:12:41`. The keys only affect `assist`: when `goscribe record` runs in another terminal, mute it there too.
 - Press `Alt+w` (`w` with `-plain`, "what did I miss?") or type `/recap` for a short recap of the last minutes, e.g. after a distraction: `📝 00:42:10 Recap of the last 5 min:` and 2 to 6 points, in the language of the meeting. It goes back 5 minutes by default (`-recap 10m`, or `assist_recap: 10m` in the config); `/recap 15m` picks the window for one recap. It is one `-provider` call: when an update is running, the recap follows it, without waiting for the update interval.
+
+#### Corrections
+
+When the speech-to-text mishears a word, `/fix <wrong> <right>` corrects it, e.g. `/fix cash cache`.
+
+- It matches whole words, ignoring case, and writes the replacement exactly as you typed it. For a phrase, quote it: `/fix "dark mood" "dark mode"`.
+- It applies from now on, and also rewrites what was already said: the transcript file, the notes, the summary, decisions, open questions and agenda, and the lines the next updates see. The model is told about it at the next update. The feed shows a `FIX` line with how many past lines changed; lines already on screen keep the old word. Each fix is listed under `## Fixes` in the notes and under `FIXES` on the dashboard.
+- The model may suggest a fix itself when a word clashes with the meeting or your context: it shows as `FIX? dark mood → dark mode` and nothing changes until you answer `/fix yes` or `/fix no`. Add a number (`/fix yes 2`) to pick one; without it the latest is used. An accepted suggestion works like a typed fix, and a refused one is not proposed again.
+- `/fix` alone lists the fixes. `/fix rm n` stops fix n for new lines only: what was already rewritten stays as it is.
+- Live speech-to-text keyterms are fixed when the connection opens, so a fix does not update them mid-meeting. Add the right spelling to a `keyterms:` line in your context for the next meeting.
 
 #### Librarian
 

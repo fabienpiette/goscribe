@@ -1104,6 +1104,7 @@ func TestRunQuestionAfterEndRefused(t *testing.T) {
 	input <- Event{Kind: QuestionEvent, Text: "too late?"}
 	input <- Event{Kind: RecapEvent}
 	input <- Event{Kind: MuteEvent, Speaker: "me", Muted: true}
+	input <- Event{Kind: FixEvent, Fix: FixRequest{Op: "add", Wrong: "cash", Right: "cache"}}
 	close(release)
 	<-done
 	n := 0
@@ -1112,8 +1113,11 @@ func TestRunQuestionAfterEndRefused(t *testing.T) {
 			n++
 		}
 	}
-	if n != 2 {
-		t.Errorf("refusals = %d, want 2 (question and recap)", n)
+	if n != 3 {
+		t.Errorf("refusals = %d, want 3 (question, recap and fix)", n)
+	}
+	if !hasInfo(v, "the meeting is over: fixes are closed") || !hasInfo(v, "the meeting is over: nothing more is answered") {
+		t.Errorf("refusal wording:\n%+v", v.Items())
 	}
 	if f.count() != 1 {
 		t.Errorf("model calls = %d, want only the update", f.count())
@@ -1222,4 +1226,469 @@ func TestRunWritesTranscript(t *testing.T) {
 	if strings.Contains(s, "muted words") {
 		t.Errorf("muted line must not be saved:\n%s", s)
 	}
+}
+
+// startFixRun runs with a recording view, notes and a transcript file.
+func startFixRun(t *testing.T, f *fakeThink, v *recordingView) (events, input chan Event, done chan error, notes, transcript string) {
+	t.Helper()
+	fastTimers(t)
+	dir := t.TempDir()
+	notes, transcript = filepath.Join(dir, "notes.md"), filepath.Join(dir, "notes-transcript.md")
+	events, input = make(chan Event), make(chan Event)
+	done = make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 20 * time.Millisecond, Think: f.think, View: v, Input: input,
+			Notes: notes, Transcript: transcript}, events)
+	}()
+	return events, input, done, notes, transcript
+}
+
+func fixEvent(op, wrong, right string, n int) Event {
+	return Event{Kind: FixEvent, Fix: FixRequest{Op: op, Wrong: wrong, Right: right, N: n}}
+}
+
+func (v *recordingView) Boards() []Board {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]Board(nil), v.boards...)
+}
+
+func (v *recordingView) Statuses() []Status {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]Status(nil), v.statuses...)
+}
+
+func hasInfo(v *recordingView, text string) bool {
+	return hasItem(v, func(it Item) bool { return it.Kind == ItemInfo && it.Text == text })
+}
+
+func TestRunFixRewritesEverything(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"cash pass"}`), answer(`{"summary":"cache pass, more"}`)}}
+	v := &recordingView{}
+	events, input, done, notes, transcript := startFixRun(t, f, v)
+	events <- line("others", "the cash work")
+	events <- line("me", "cash again")
+	waitUntil(t, "first update", func() bool {
+		b := v.Boards()
+		return len(b) > 0 && b[len(b)-1].Summary == "cash pass"
+	})
+	input <- fixEvent("add", "cash", "cache", 0)
+	events <- line("me", "more cash")
+	events <- Event{Kind: PartialEvent, Speaker: "others", Text: "cash now"}
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	instr, tr := f.call(1)
+	if !strings.Contains(tr, "cache") || strings.Contains(tr, "cash") {
+		t.Errorf("the update must see the fixed transcript:\n%s", tr)
+	}
+	if !strings.Contains(instr, "- cash → cache") {
+		t.Errorf("the update must be told about the fix:\n%s", instr)
+	}
+	var fixed *Board
+	for _, b := range v.Boards() {
+		if len(b.Fixes) > 0 {
+			fixed = &b
+			break
+		}
+	}
+	if fixed == nil || !strings.Contains(fixed.Summary, "cache pass") || !slices.Equal(fixed.Fixes, []string{"cash → cache"}) {
+		t.Errorf("board after the fix = %+v", fixed)
+	}
+	if !hasItem(v, func(it Item) bool {
+		return it.Kind == ItemAssist && it.Badge == "FIX" && it.Text == "cash → cache" && it.Note == "2 lines" &&
+			strings.HasPrefix(it.Plain, "✏️ ") && strings.HasSuffix(it.Plain, " Fix: cash → cache (2 lines)")
+	}) {
+		t.Errorf("no FIX item:\n%+v", v.Items())
+	}
+	if !hasItem(v, func(it Item) bool { return it.Kind == ItemTranscript && it.Text == "more cache" }) {
+		t.Error("a new line must be fixed before it is shown")
+	}
+	waitUntil(t, "partial shown", func() bool {
+		st := v.Statuses()
+		return st[len(st)-1].Partial == "cache now"
+	})
+	for _, st := range v.Statuses() {
+		if strings.Contains(st.Partial, "cash") {
+			t.Errorf("partial shown unfixed: %q", st.Partial)
+		}
+	}
+	close(events)
+	<-done
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"cash → cache"}) || !strings.Contains(b.Summary, "cache pass") {
+		t.Errorf("last board = %+v", b)
+	}
+	tb, _ := os.ReadFile(transcript)
+	if strings.Contains(string(tb), "cash") || !strings.Contains(string(tb), "others: the cache work") || !strings.Contains(string(tb), "me: more cache") {
+		t.Errorf("transcript file:\n%s", tb)
+	}
+	nb, _ := os.ReadFile(notes)
+	if !strings.Contains(string(nb), "## Fixes\n\n- `cash` → `cache`") {
+		t.Errorf("notes:\n%s", nb)
+	}
+}
+
+// An update in flight when a fix arrives was asked without it: its reply is
+// fixed before it is applied, so the memory does not go back to the misheard
+// word, the fields it leaves out are not fixed twice, and a decision it
+// repeats with the old word is not shown again.
+func TestRunFixDuringUpdate(t *testing.T) {
+	rel1, rel2 := make(chan struct{}), make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"film plan","decisions":["ship the film"]}`),
+		func() (string, error) { <-rel1; return `{"summary":"film pass"}`, nil },
+		func() (string, error) {
+			<-rel2
+			return `{"summary":"short film done","decisions":["ship the short film"]}`, nil
+		},
+	}}
+	v := &recordingView{}
+	events, input, done, _, _ := startFixRun(t, f, v)
+	lastBoard := func() Board { b := v.Boards(); return b[len(b)-1] }
+	events <- line("others", "first part")
+	waitUntil(t, "first update", func() bool { return lastBoard().Summary == "film plan" })
+	events <- line("others", "second part")
+	waitUntil(t, "second update in flight", func() bool { return f.count() == 2 })
+	input <- fixEvent("add", "film", "short film", 0)
+	close(rel1)
+	waitUntil(t, "second update", func() bool { return lastBoard().Summary == "short film pass" })
+	if d := lastBoard().Decisions; !slices.Equal(d, []string{"ship the short film"}) {
+		t.Errorf("decisions after a summary-only reply = %q", d)
+	}
+	events <- line("others", "third part")
+	waitUntil(t, "third update in flight", func() bool { return f.count() == 3 })
+	input <- fixEvent("add", "ship", "send", 0)
+	close(rel2)
+	waitUntil(t, "third update", func() bool { return lastBoard().Summary == "short film done" })
+	if d := lastBoard().Decisions; !slices.Equal(d, []string{"send the short film"}) {
+		t.Errorf("decisions after a reply with the old word = %q", d)
+	}
+	n := 0
+	for _, it := range v.Items() {
+		if it.Badge == "DECISION" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("DECISION items = %d, want 1:\n%+v", n, v.Items())
+	}
+	close(events)
+	<-done
+}
+
+func TestRunFixReportsCountAndRm(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	v := &recordingView{}
+	events, input, done, _, _ := startFixRun(t, f, v)
+	for _, l := range []string{"it is done", "is it", "what is that", "nothing here"} {
+		events <- line("others", l)
+	}
+	input <- fixEvent("add", "is", "this", 0)
+	waitUntil(t, "fix", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "FIX" }) })
+	if !hasItem(v, func(it Item) bool { return it.Badge == "FIX" && it.Note == "3 lines" }) {
+		t.Errorf("the fix must count the lines it changed:\n%+v", v.Items())
+	}
+	input <- fixEvent("list", "", "", 0)
+	waitUntil(t, "list", func() bool { return hasInfo(v, "1. is → this") })
+	input <- fixEvent("rm", "", "", 1)
+	waitUntil(t, "rm", func() bool {
+		return hasItem(v, func(it Item) bool { return it.Kind == ItemInfo && strings.Contains(it.Text, "past lines keep it") })
+	})
+	if !hasInfo(v, "fix 1 removed: is → this (past lines keep it)") {
+		t.Errorf("rm info:\n%+v", v.Items())
+	}
+	events <- line("me", "it is late")
+	waitUntil(t, "new line", func() bool {
+		return hasItem(v, func(it Item) bool { return it.Kind == ItemTranscript && strings.HasSuffix(it.Text, " late") })
+	})
+	if !hasItem(v, func(it Item) bool { return it.Kind == ItemTranscript && it.Text == "it is late" }) {
+		t.Error("a removed fix must not apply to new lines")
+	}
+	input <- fixEvent("list", "", "", 0)
+	waitUntil(t, "empty list", func() bool { return hasInfo(v, "no fixes yet") })
+	close(events)
+	<-done
+}
+
+func TestRunFixAnswerWithoutPending(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	v := &recordingView{}
+	events, input, done, _, _ := startFixRun(t, f, v)
+	input <- fixEvent("yes", "", "", 0)
+	input <- fixEvent("no", "", "", 3)
+	input <- fixEvent("rm", "", "", 9)
+	input <- fixEvent("list", "", "", 0)
+	waitUntil(t, "list", func() bool { return hasInfo(v, "no fixes yet") })
+	for _, want := range []string{"no suggested fix to accept", "no suggested fix 3", "no fix 9: type /fix to list them"} {
+		if !hasInfo(v, want) {
+			t.Errorf("no info %q:\n%+v", want, v.Items())
+		}
+	}
+	for _, b := range v.Boards() {
+		if len(b.Fixes) > 0 {
+			t.Errorf("board changed: %+v", b)
+		}
+	}
+	close(events)
+	<-done
+}
+
+const guessCash = `{"summary":"cash pass","fixes":[{"wrong":"cash","right":"cache","why":"caching discussion"}]}`
+
+func isGuess(it Item) bool { return it.Kind == ItemAssist && it.Badge == "FIX?" }
+
+func countItems(v *recordingView, ok func(Item) bool) int {
+	n := 0
+	for _, it := range v.Items() {
+		if ok(it) {
+			n++
+		}
+	}
+	return n
+}
+
+// startGuess runs until the first update proposes cash → cache.
+func startGuess(t *testing.T, f *fakeThink, v *recordingView) (events, input chan Event, done chan error, notes, transcript string) {
+	t.Helper()
+	events, input, done, notes, transcript = startFixRun(t, f, v)
+	events <- line("others", "the cash work")
+	waitUntil(t, "guess", func() bool { return hasItem(v, isGuess) })
+	return events, input, done, notes, transcript
+}
+
+func TestGuessedFixShownNotApplied(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(guessCash), answer(`{"summary":"s2"}`)}}
+	v := &recordingView{}
+	events, input, done, _, _ := startGuess(t, f, v)
+	if !hasItem(v, func(it Item) bool {
+		return isGuess(it) && it.Text == "cash → cache" && it.Note == "caching discussion · /fix yes 1" &&
+			strings.HasPrefix(it.Plain, "✏️ ") && strings.HasSuffix(it.Plain, " Fix? cash → cache — caching discussion (/fix yes 1)")
+	}) {
+		t.Errorf("no FIX? item:\n%+v", v.Items())
+	}
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"cash → cache ? (/fix yes 1)"}) || b.Summary != "cash pass" {
+		t.Errorf("board = %+v", b)
+	}
+	input <- fixEvent("list", "", "", 0)
+	waitUntil(t, "list", func() bool { return hasInfo(v, "?1. cash → cache (suggested, /fix yes 1)") })
+	if hasInfo(v, "no fixes yet") {
+		t.Errorf("a pending guess is listed:\n%+v", v.Items())
+	}
+	events <- line("me", "more cash")
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	if _, tr := f.call(1); !strings.Contains(tr, "the cash work") || !strings.Contains(tr, "more cash") {
+		t.Errorf("a guess must not change the transcript:\n%s", tr)
+	}
+	close(events)
+	<-done
+}
+
+func TestGuessedFixAccepted(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(guessCash), answer(`{"summary":"cache pass, more"}`)}}
+	v := &recordingView{}
+	events, input, done, notes, transcript := startGuess(t, f, v)
+	input <- fixEvent("yes", "", "", 0)
+	waitUntil(t, "fix", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "FIX" }) })
+	if !hasItem(v, func(it Item) bool { return it.Badge == "FIX" && it.Text == "cash → cache" && it.Note == "1 line" }) {
+		t.Errorf("no FIX item:\n%+v", v.Items())
+	}
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"cash → cache"}) || b.Summary != "cache pass" {
+		t.Errorf("board = %+v", b)
+	}
+	events <- line("me", "more cash")
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	if _, tr := f.call(1); strings.Contains(tr, "cash") || !strings.Contains(tr, "the cache work") || !strings.Contains(tr, "more cache") {
+		t.Errorf("an accepted guess works like a typed fix:\n%s", tr)
+	}
+	input <- fixEvent("yes", "", "", 1)
+	waitUntil(t, "answered", func() bool { return hasInfo(v, "fix 1 is already answered") })
+	input <- fixEvent("yes", "", "", 0)
+	waitUntil(t, "none pending", func() bool { return hasInfo(v, "no suggested fix to accept") })
+	close(events)
+	<-done
+	tb, _ := os.ReadFile(transcript)
+	if strings.Contains(string(tb), "cash") || !strings.Contains(string(tb), "others: the cache work") {
+		t.Errorf("transcript file:\n%s", tb)
+	}
+	nb, _ := os.ReadFile(notes)
+	if !strings.Contains(string(nb), "## Fixes\n\n- `cash` → `cache` _(suggested)_") {
+		t.Errorf("notes:\n%s", nb)
+	}
+}
+
+func TestGuessedFixRejectedNotReproposed(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(guessCash)}}
+	v := &recordingView{}
+	events, input, done, _, _ := startGuess(t, f, v)
+	input <- fixEvent("no", "", "", 0)
+	waitUntil(t, "rejected", func() bool { return hasInfo(v, "fix 1 rejected") })
+	if b := v.Boards()[len(v.Boards())-1]; len(b.Fixes) != 0 {
+		t.Errorf("a rejected guess leaves the board: %+v", b)
+	}
+	events <- line("me", "more cash")
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	if instr, _ := f.call(1); !strings.Contains(instr, "Fixes you suggested earlier (your own suggestions, not the user's corrections; never propose these again):\n- cash → cache\n") {
+		t.Errorf("the update must be told about the rejected guess:\n%s", instr)
+	}
+	events <- line("me", "and cash")
+	waitUntil(t, "third update", func() bool { return f.count() == 3 })
+	input <- fixEvent("no", "", "", 1)
+	waitUntil(t, "answered", func() bool { return hasInfo(v, "fix 1 is already answered") })
+	if n := countItems(v, isGuess); n != 1 {
+		t.Errorf("FIX? items = %d, want 1:\n%+v", n, v.Items())
+	}
+	close(events)
+	<-done
+}
+
+// Guesses for a word not said, for a fix in force, and a second guess in one
+// reply are dropped; the reason is cleaned.
+func TestGuessedFixFiltered(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"one","fixes":[{"wrong":"cachet","right":"cache","why":"x"},{"wrong":"film","right":"short film","why":"x"}]}`),
+		answer(`{"summary":"two","fixes":[{"wrong":"cash","right":"cache","why":"x\u001b[2Jy"},{"wrong":"dark mood","right":"dark mode","why":"x"}]}`),
+	}}
+	v := &recordingView{}
+	events, input, done, _, _ := startFixRun(t, f, v)
+	lastBoard := func() Board { b := v.Boards(); return b[len(b)-1] }
+	input <- fixEvent("add", "film", "short film", 0)
+	events <- line("others", "the film and the cash work")
+	waitUntil(t, "first update", func() bool { return lastBoard().Summary == "one" })
+	if hasItem(v, isGuess) {
+		t.Errorf("filtered guesses shown:\n%+v", v.Items())
+	}
+	events <- line("others", "in dark mood")
+	waitUntil(t, "second update", func() bool { return lastBoard().Summary == "two" })
+	if n := countItems(v, isGuess); n != 1 {
+		t.Errorf("FIX? items = %d, want 1:\n%+v", n, v.Items())
+	}
+	if !hasItem(v, func(it Item) bool {
+		return isGuess(it) && it.Text == "cash → cache" && it.Note == "x[2Jy · /fix yes 1"
+	}) {
+		t.Errorf("the first guess, cleaned:\n%+v", v.Items())
+	}
+	if b := lastBoard(); !slices.Equal(b.Fixes, []string{"film → short film", "cash → cache ? (/fix yes 1)"}) {
+		t.Errorf("board = %+v", b)
+	}
+	close(events)
+	<-done
+}
+
+// A guess the user types meanwhile, in another case, is accepted by the typed
+// fix: it is in force once, and no longer waits for an answer.
+func TestGuessedFixAlreadyInForce(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"one","fixes":[{"wrong":"film","right":"short film","why":"x"}]}`),
+		answer(`{"summary":"two"}`),
+	}}
+	v := &recordingView{}
+	events, input, done, _, _ := startFixRun(t, f, v)
+	events <- line("others", "the film work")
+	waitUntil(t, "guess", func() bool { return hasItem(v, isGuess) })
+	input <- fixEvent("add", "Film", "short film", 0)
+	input <- fixEvent("yes", "", "", 0)
+	waitUntil(t, "none pending", func() bool { return hasInfo(v, "no suggested fix to accept") })
+	input <- fixEvent("yes", "", "", 1)
+	waitUntil(t, "answered", func() bool { return hasInfo(v, "fix 1 is already answered") })
+	if n := countItems(v, func(it Item) bool { return it.Badge == "FIX" }); n != 1 {
+		t.Errorf("FIX items = %d, want 1:\n%+v", n, v.Items())
+	}
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"Film → short film"}) {
+		t.Errorf("board = %+v", b)
+	}
+	events <- line("me", "a film now")
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	if _, tr := f.call(1); !strings.Contains(tr, "others: the short film work") || !strings.Contains(tr, "me: a short film now") ||
+		strings.Contains(tr, "short short") {
+		t.Errorf("the fix must apply once:\n%s", tr)
+	}
+	close(events)
+	<-done
+}
+
+// Typing a fix already in force is refused: new lines are fixed once.
+func TestRunFixTypedTwice(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	v := &recordingView{}
+	events, input, done, _, _ := startFixRun(t, f, v)
+	input <- fixEvent("add", "film", "short film", 0)
+	input <- fixEvent("add", "FILM", "Short Film", 0)
+	waitUntil(t, "refused", func() bool { return hasInfo(v, "fix 1 is already in force") })
+	events <- line("others", "the film work")
+	waitUntil(t, "line", func() bool {
+		return hasItem(v, func(it Item) bool { return it.Kind == ItemTranscript && strings.HasSuffix(it.Text, " work") })
+	})
+	if !hasItem(v, func(it Item) bool { return it.Kind == ItemTranscript && it.Text == "the short film work" }) {
+		t.Errorf("the new line must be fixed once:\n%+v", v.Items())
+	}
+	if n := countItems(v, func(it Item) bool { return it.Badge == "FIX" }); n != 1 {
+		t.Errorf("FIX items = %d, want 1", n)
+	}
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"film → short film"}) {
+		t.Errorf("board = %+v", b)
+	}
+	close(events)
+	<-done
+}
+
+// In plain mode nothing can answer a suggested fix: the model is not asked
+// for any, and one in a reply is never shown.
+func TestRunPlainNoGuess(t *testing.T) {
+	fastTimers(t)
+	f := &fakeThink{replies: []func() (string, error){answer(guessCash)}}
+	out := &syncBuffer{}
+	notes := filepath.Join(t.TempDir(), "notes.md")
+	events := make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: 20 * time.Millisecond, Think: f.think, Out: out, Notes: notes}, events)
+	}()
+	events <- line("others", "the cash work")
+	waitUntil(t, "update", func() bool { b, _ := os.ReadFile(notes); return strings.Contains(string(b), "cash pass") })
+	close(events)
+	<-done
+	if strings.Contains(out.String(), "Fix?") {
+		t.Errorf("plain output shows a guess:\n%s", out.String())
+	}
+	if instr, _ := f.call(0); strings.Contains(instr, `"fixes"`) {
+		t.Errorf("plain prompt asks for fixes:\n%s", instr)
+	}
+}
+
+// A guess in the reply that ends the meeting could never be answered.
+func TestRunNoGuessWhileEnding(t *testing.T) {
+	release := make(chan struct{})
+	f := &fakeThink{replies: []func() (string, error){func() (string, error) { <-release; return guessCash, nil }}}
+	v := &recordingView{}
+	events, _, done, _, _ := startFixRun(t, f, v)
+	events <- line("others", "the cash work")
+	waitUntil(t, "update in flight", func() bool { return f.count() == 1 })
+	close(events)
+	waitUntil(t, "ending", func() bool {
+		return hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "finishing the current update") })
+	})
+	close(release)
+	<-done
+	if hasItem(v, isGuess) {
+		t.Errorf("a guess shown after the end:\n%+v", v.Items())
+	}
+	if b := v.Boards()[len(v.Boards())-1]; b.Summary != "cash pass" || len(b.Fixes) != 0 {
+		t.Errorf("board = %+v", b)
+	}
+}
+
+// Typing the fix a guess suggests, in any case, answers the guess: the board
+// lists it once.
+func TestRunTypedFixAcceptsPendingGuess(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(guessCash)}}
+	v := &recordingView{}
+	events, input, done, _, _ := startGuess(t, f, v)
+	input <- fixEvent("add", "Cash", "Cache", 0)
+	waitUntil(t, "fix", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "FIX" }) })
+	if b := v.Boards()[len(v.Boards())-1]; !slices.Equal(b.Fixes, []string{"Cash → Cache"}) {
+		t.Errorf("board = %+v", b)
+	}
+	input <- fixEvent("no", "", "", 0)
+	waitUntil(t, "none pending", func() bool { return hasInfo(v, "no suggested fix to reject") })
+	close(events)
+	<-done
 }
