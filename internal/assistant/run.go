@@ -76,6 +76,10 @@ type Config struct {
 	LibrarianInstructions string   // the user's sources and how to search them
 	LibrarianTools        []string // the librarian's allowed tools, listed in its prompt
 	MaxLookups            int      // lookups per meeting; 0 or less means defaultMaxLookups
+	// Restore holds the briefs and fixes of an earlier meeting, put in force
+	// at the start; RestoreFrom is the file name shown in the feed.
+	Restore     *Restored
+	RestoreFrom string
 }
 
 // ResearchReply is the librarian's answer and the tool calls that its
@@ -120,6 +124,9 @@ func Run(c Config, events <-chan Event) error {
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
 	ticker := time.NewTicker(Tick)
 	defer ticker.Stop()
+	if c.Restore != nil {
+		s.restore(*c.Restore, c.RestoreFrom)
+	}
 	s.board()
 	s.status(time.Now())
 

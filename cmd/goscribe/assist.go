@@ -59,6 +59,9 @@ mood" "dark mode". Suggested fixes show as FIX?; answer with /fix yes|no [n],
 nothing changes until you accept. /fix lists the fixes, /fix rm n stops one for
 new lines. Live speech-to-text keyterms are not updated mid-meeting.
 
+Naming an earlier assist notes file with -context restores its fixes and
+briefs; a folder restores nothing.
+
 /brief <text> gives the model a standing instruction or fact, trusted and sent
 with every update, question, recap and the final notes: /brief focus on risks
 to the release. It starts an update at once, once something has been said. /brief lists the briefs, /brief rm
@@ -226,6 +229,13 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 			return usageErr("context: %v", err)
 		}
 	}
+	// An earlier assist notes file named by -context gives back its fixes and
+	// briefs; a parse error is a startup notice and the file stays plain context.
+	restore, restoreFrom, restoredTerms, restoreErr := restoreFromContext(*contextPath)
+	var restoreNotice string
+	if restoreErr != nil {
+		restoreNotice = fmt.Sprintf("⚠ %s: %v; nothing restored", filepath.Base(*contextPath), restoreErr)
+	}
 
 	notes := *output
 	if notes == "" {
@@ -260,6 +270,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	fromContext := assistant.MergeKeyterms(nil, rawContext)
 	tooLong := assistant.LongKeyterms(append(append([]string{}, opts.Keyterms...), rawContext...))
 	opts.Keyterms = assistant.MergeKeyterms(assistant.MergeKeyterms(nil, opts.Keyterms), fromContext)
+	opts.Keyterms = assistant.MergeKeyterms(opts.Keyterms, restoredTerms)
 
 	sides := assistSides(inputs)
 	var names []string
@@ -278,6 +289,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		header += fmt.Sprintf(" · %d keyterm(s) from the context", len(fromContext))
 	}
 
+	if restore != nil {
+		header += " · restoring from " + restoreFrom
+	}
 	if *librarian {
 		header += fmt.Sprintf(" · librarian: %s, %d tool(s)", lib.Provider, len(lib.AllowedTools))
 	}
@@ -299,6 +313,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		screenKeys = make(chan string, 8)
 		toggle = screenKeys
 		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, len(background))
+		if restoreNotice != "" {
+			notices = append(notices, restoreNotice)
+		}
 	} else {
 		// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
 		toggle, restoreKeys = startKeys(os.Stdin, assistKeys())
@@ -310,6 +327,9 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		}
 		for _, line := range startupNotices(header, notes, transcript, keys, tooLong, len(background)) {
 			fmt.Fprintln(stdout, line)
+		}
+		if restoreNotice != "" {
+			fmt.Fprintln(stdout, restoreNotice)
 		}
 	}
 	defer restoreKeys()
@@ -331,6 +351,8 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		RecapKey:    recapHint,
 		RecapWindow: recapWindow,
 		Force:       force,
+		Restore:     restore,
+		RestoreFrom: restoreFrom,
 	}
 	if *librarian {
 		ro := harness.ResearchOptions{AllowedTools: lib.AllowedTools, Timeout: lib.Timeout, Model: lib.Model, MCPConfig: lib.MCPConfig, UserSettings: lib.UseClaudeSettings}
@@ -668,4 +690,28 @@ func assistantEvent(speaker string, e realtime.Event) assistant.Event {
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return line
+}
+
+// restoreFromContext reads the fixes and briefs of an earlier assist notes
+// file named by -context. A folder, a file that is not assist notes and an
+// empty path restore nothing. It also returns the file name for the feed and
+// the right-hand words of the fixes, which join the live keyterms. An error is
+// a notes file that cannot be trusted, such as one with two "## Fixes"
+// sections.
+func restoreFromContext(path string) (*assistant.Restored, string, []string, error) {
+	if path == "" {
+		return nil, "", nil, nil
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return nil, "", nil, nil
+	}
+	r, ok, err := assistant.LoadRestore(path)
+	if err != nil || !ok {
+		return nil, "", nil, err
+	}
+	var terms []string
+	for _, f := range r.Fixes {
+		terms = append(terms, f.Right)
+	}
+	return &r, filepath.Base(path), terms, nil
 }

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1042,5 +1043,42 @@ func TestTUIScreenFailureEndsMeeting(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Notes: "+notes) {
 		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+func TestAssistRestoresFromNamedNotes(t *testing.T) {
+	dir := t.TempDir()
+	notes := filepath.Join(dir, "standup.md")
+	mustWrite(t, notes, []byte(assistant.Render(assistant.Memory{
+		Briefs: []assistant.Brief{{Text: "Sam is the PM"}},
+		Fixes:  []assistant.Fix{{Wrong: "filming", Right: "rendering"}},
+	}, "h", false, 0)), 0644)
+	r, from, terms, err := restoreFromContext(notes)
+	if err != nil || r == nil {
+		t.Fatalf("restore = %v, err = %v", r, err)
+	}
+	if from != "standup.md" || len(r.Briefs) != 1 || len(r.Fixes) != 1 {
+		t.Errorf("from = %q, restored = %+v", from, r)
+	}
+	if !slices.Contains(terms, "rendering") {
+		t.Errorf("keyterms = %q, want rendering", terms)
+	}
+	// A notes file with a forged second section is plain context, with the error.
+	bad := filepath.Join(dir, "bad.md")
+	mustWrite(t, bad, []byte(assistant.Render(assistant.Memory{Fixes: []assistant.Fix{{Wrong: "a", Right: "b"}}}, "h", false, 0)+"\n## Fixes\n\n- `c` → `d`\n"), 0644)
+	r, _, _, err = restoreFromContext(bad)
+	if r != nil || err == nil || !strings.Contains(err.Error(), `two "## Fixes" sections`) {
+		t.Errorf("bad notes: %v, %v", r, err)
+	}
+}
+
+func TestAssistFolderRestoresNothing(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "standup.md"), []byte(assistant.Render(assistant.Memory{
+		Fixes: []assistant.Fix{{Wrong: "filming", Right: "rendering"}},
+	}, "h", false, 0)), 0644)
+	r, from, terms, err := restoreFromContext(dir)
+	if r != nil || from != "" || terms != nil || err != nil {
+		t.Errorf("folder: %v, %q, %q, %v", r, from, terms, err)
 	}
 }

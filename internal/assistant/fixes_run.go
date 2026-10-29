@@ -55,36 +55,12 @@ func (s *state) typedFix(wrong, right string) {
 	s.addFix(wrong, right, false)
 }
 
-// addFix puts a fix in force: it rewrites the lines said so far, the words in
-// progress and the memory, then the transcript file and the notes. Lines that
-// arrive later are fixed in handle. guessed marks a suggested fix the user
-// accepted.
+// addFix puts a fix in force (putFix), then writes the notes and the board and
+// shows it. guessed marks a suggested fix the user accepted.
 func (s *state) addFix(wrong, right string, guessed bool) {
 	at := s.elapsed(time.Now())
 	f := Fix{Wrong: wrong, Right: right, Guessed: guessed, At: at}
-	s.mem.Fixes = append(s.mem.Fixes, f)
-	if s.thinking && !s.recapping { // a recap reply does not touch the memory
-		s.lateFixes = append(s.lateFixes, f)
-	}
-	changed := 0
-	for i, l := range s.lines {
-		// A case-only fix of a word already written right changes nothing.
-		if text, _ := ReplaceWord(l.Text, wrong, right); text != l.Text {
-			s.lines[i].Text = text
-			changed++
-		}
-	}
-	for side, p := range s.partials {
-		s.partials[side], _ = ReplaceWord(p, wrong, right)
-	}
-	s.mem.ApplyFix(f)
-	if changed > 0 && s.c.Transcript != "" {
-		err := WriteTranscript(s.c.Transcript, s.header, s.lines)
-		if err == nil {
-			s.transcriptOn = true
-		}
-		s.transcriptFailed(err)
-	}
+	changed := s.putFix(f)
 	_ = s.writeNotes(false) // a failure is shown in the feed
 	s.board()
 	note := fmt.Sprintf("%d lines", changed)
@@ -94,6 +70,35 @@ func (s *state) addFix(wrong, right string, guessed bool) {
 	label := fixLabel(f)
 	s.show(Item{Kind: ItemAssist, At: at, Badge: "FIX", Text: label, Note: note,
 		Plain: fmt.Sprintf("✏️ %s Fix: %s (%s)", clock(at), label, note)})
+}
+
+// putFix puts a fix in force: it rewrites the lines said so far, the words in
+// progress and the memory, then the transcript file, and returns how many
+// lines changed. Lines that arrive later are fixed in handle.
+func (s *state) putFix(f Fix) (changed int) {
+	s.mem.Fixes = append(s.mem.Fixes, f)
+	if s.thinking && !s.recapping { // a recap reply does not touch the memory
+		s.lateFixes = append(s.lateFixes, f)
+	}
+	for i, l := range s.lines {
+		// A case-only fix of a word already written right changes nothing.
+		if text, _ := ReplaceWord(l.Text, f.Wrong, f.Right); text != l.Text {
+			s.lines[i].Text = text
+			changed++
+		}
+	}
+	for side, p := range s.partials {
+		s.partials[side], _ = ReplaceWord(p, f.Wrong, f.Right)
+	}
+	s.mem.ApplyFix(f)
+	if changed > 0 && s.c.Transcript != "" {
+		err := WriteTranscript(s.c.Transcript, s.header, s.lines)
+		if err == nil {
+			s.transcriptOn = true
+		}
+		s.transcriptFailed(err)
+	}
+	return changed
 }
 
 // listFixes lists the fixes in force, then the suggested ones waiting for an
