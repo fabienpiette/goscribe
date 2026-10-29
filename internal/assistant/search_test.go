@@ -647,6 +647,49 @@ func TestSearchedWindowedInPromptNotInDedup(t *testing.T) {
 	}
 }
 
+// questionPromptOf returns the instructions of the first call that answers
+// a typed question.
+func questionPromptOf(f *fakeThink) string {
+	for i := 0; i < f.count(); i++ {
+		if ins, _ := f.call(i); strings.Contains(ins, "The user's question:") {
+			return ins
+		}
+	}
+	return ""
+}
+
+// With the limit reached the question prompt must not tell the model to say
+// the librarian is looking: the lookup would be refused. Below the limit
+// (same run, limit 5) the rule is there, so the check can fail.
+func TestQuestionPromptLookupRuleFollowsLimit(t *testing.T) {
+	const rule = "Then say in \"answer\" that the librarian is looking."
+	for _, tc := range []struct {
+		name  string
+		limit int
+		want  bool
+	}{{"below limit", 5, true}, {"at limit", 1, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeThink{replies: []func() (string, error){
+				lookupReply("When was the Globex contract signed?"),
+				answer(lookupAnswer),
+				answer(`{"summary":"s"}`)}}
+			r := &fakeResearch{reply: answer(foundT1)}
+			v := &recordingView{}
+			events, input, done := startSearchRun(t, f, v, r, tc.limit, nil)
+			events <- line("me", twelveWords)
+			waitUntil(t, "model lookup", func() bool { return r.count() == 1 })
+			input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+			waitUntil(t, "question prompt", func() bool { return questionPromptOf(f) != "" })
+			got := strings.Contains(questionPromptOf(f), rule)
+			close(events)
+			<-done
+			if got != tc.want {
+				t.Errorf("question prompt carries the lookup rule = %v, want %v (limit %d, Asked 1)", got, tc.want, tc.limit)
+			}
+		})
+	}
+}
+
 // A failed /search is not "already asked": typing it again retries it.
 func TestSearchRetriedAfterFailure(t *testing.T) {
 	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}

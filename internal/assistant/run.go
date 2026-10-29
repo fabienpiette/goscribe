@@ -418,7 +418,7 @@ func (s *state) maybeAsk(now time.Time) {
 	gen, think, answers := s.askGen, s.c.Think, s.answers
 	s.asking, s.askStart = true, now
 	at := s.elapsed(now)
-	instructions, transcript := QuestionPrompt(s.c.Context, s.mem, s.lines, at, q, s.c.Research != nil)
+	instructions, transcript := QuestionPrompt(s.c.Context, s.mem, s.lines, at, q, s.c.Research != nil && len(s.mem.Asked) < s.lookupLimit())
 	go func() {
 		answer, err := think(instructions, transcript)
 		select {
