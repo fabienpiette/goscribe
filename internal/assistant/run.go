@@ -84,6 +84,7 @@ type Config struct {
 	Research              func(prompt string) (ResearchReply, error)
 	LibrarianInstructions string   // the user's sources and how to search them
 	LibrarianTools        []string // the librarian's allowed tools, listed in its prompt
+	LibrarianOff          string   // why the librarian is off, for /search and login docs; "" when on
 	MaxLookups            int      // lookups per meeting; 0 or less means defaultMaxLookups
 	// Restore holds the briefs and fixes of an earlier meeting, put in force
 	// at the start; RestoreFrom is the file name shown in the feed.

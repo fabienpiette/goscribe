@@ -408,7 +408,7 @@ Typed in the full-screen view's input, `/add <path or url>` (alias `/context`) p
 
 - A file or a folder: `/add notes/spec.md`, `/add ~/notes/acme/`. Quote a path with spaces: `/add "my notes.md"`.
 - A web page: `/add https://example.com/roadmap`. A public page is fetched and converted to Markdown, and a copy is saved in the sources folder next to the notes, `<notes name>-sources/<slug>.md` (e.g. `assist-2026-10-29_10-00-sources/`). The page is untrusted data: the model reads it as context, never as instructions. Every saved copy starts with a marker line that flags it as an untrusted page copy, so naming one later with `-context` or `/add` keeps it untrusted and restores nothing.
-- A doc behind a login (Google Docs, Notion, Linear and the like, any 401 or 403, or a redirect to a sign-in page): with `-librarian`, the page is handed to the librarian, which reads the doc with its read-only tools. The feed shows `📚 asking the librarian for <url>…`; the doc is your own request, so it does not count toward `max_lookups`, runs before any waiting lookup and is never dropped for waiting. If the librarian has no tool that can read it, the feed names the host to add a read-only tool for. Without the librarian, the feed explains how to set it up.
+- A doc behind a login (Google Docs, Notion, Linear and the like, any 401 or 403, or a redirect to a sign-in page): with the librarian on, the page is handed to the librarian, which reads the doc with its read-only tools. The feed shows `📚 asking the librarian for <url>…`; the doc is your own request, so it does not count toward `max_lookups`, runs before any waiting lookup and is never dropped for waiting. If the librarian has no tool that can read it, the feed names the host to add a read-only tool for. Without the librarian, the feed explains how to set it up.
 - `/add` alone lists the sources added.
 - Each source shows in the feed with a `SOURCE` badge, and in the notes.
 - The limit is 200 KB in total, counting `-context` and everything added; a source that would go over is refused. The meeting's own notes, transcript and sources folder cannot be added.
@@ -417,15 +417,16 @@ Typed in the full-screen view's input, `/add <path or url>` (alias `/context`) p
 
 #### Librarian
 
-With `-librarian`, the model can look things up in your own sources while the meeting runs (a past decision, a ticket, a document, someone's earlier work). Each lookup is a short, read-only Claude Code session that gets a search question, why it helps now and the running meeting summary, never transcript lines. The answer shows in the feed (`🔎 Looking up: …`, then `📚 Librarian: … — titles`), feeds the next updates and is listed under `## Research` in the notes.
+The model can look things up in your own sources while the meeting runs (a past decision, a ticket, a document, someone's earlier work). Each lookup is a short, read-only Claude Code session that gets a search question, why it helps now and the running meeting summary, never transcript lines. The answer shows in the feed (`🔎 Looking up: …`, then `📚 Librarian: … — titles`), feeds the next updates and is listed under `## Research` in the notes.
 
 ```yaml
 librarian:
-  allowed_tools:                 # required; the only tools the librarian may use
+  allowed_tools:                 # the only tools the librarian may use; setting them turns it on
     - Bash(gh search:*)
     - Bash(gh pr view:*)
     - mcp__tracker__search_issues
     - mcp__tracker__get_issue
+  enabled: true                  # false: keep the tools listed but run without the librarian
   instructions: "Acme tickets are PROJ-<n> in the tracker; code and PRs are in GitHub (acme/*)."
   mcp_config: ~/.goscribe/librarian-mcp.json   # optional, see below
   use_claude_settings: false     # true: load your Claude Code connectors and plugins, see below
@@ -435,11 +436,14 @@ librarian:
 ```
 
 ```bash
-goscribe assist -librarian -context agenda.md -provider claude
+goscribe assist -context agenda.md -provider claude    # librarian on: allowed_tools is set
+goscribe assist -librarian=false -context agenda.md    # this meeting without it
 ```
 
-- The header ends with `librarian: claude, N tool(s)`. Without `librarian.allowed_tools`, `-librarian` is a usage error: it is off by default.
-- Read-only only. goscribe refuses an `allowed_tools` entry and does not start when it finds one of these:
+- The librarian is on by default when `librarian.allowed_tools` is set. `librarian.enabled: false` or `-librarian=false` turns it off, and without tools it stays off (the feed says how to set it up). The header ends with `librarian: claude, N tool(s)` when it is on.
+- If a startup check fails (a refused `allowed_tools` entry, a missing `claude` CLI, a bad `mcp_config` or unsafe Claude settings), assist prints `⚠ librarian off: <reason>` and runs without it. Passing `-librarian` explicitly keeps the strict behavior: the same failure is a usage error and assist does not start.
+- Docs the librarian reads (a doc behind a login) are also saved in `<notes>-sources/`, like public pages.
+- Read-only only. goscribe refuses an `allowed_tools` entry (a warning and no librarian, or with `-librarian` no start) when it finds one of these:
   - several rules in one entry. Claude Code splits its tool list on commas and spaces, so an entry must have no `,` or space outside its parentheses, and its arguments in a single `(...)` at the end.
   - a tool other than `Bash`, `Read`, `Grep`, `Glob`, `LS` and exact MCP tools (`mcp__<server>__<tool>`). `WebFetch`, `WebSearch`, `Task`, `Agent` and any other built-in are refused.
   - bare or wildcard `Bash` (`Bash`, `Bash(*)`), and `Bash` prefixes that start with a shell, an interpreter, a wrapper or a command that reaches the network or changes files: `sh`, `bash`, `zsh`, `dash`, `fish`, `ksh`, `python`, `python3`, `node`, `perl`, `ruby`, `php`, `awk`, `sed`, `find`, `rm`, `mv`, `cp`, `tee`, `dd`, `sudo`, `doas`, `timeout`, `nohup`, `nice`, `command`, `exec`, `eval`, `env`, `xargs`, `curl`, `wget`, `ssh`, `scp`, `docker`, `kubectl`; and `gh api`, `gh auth` and `gh config`.
