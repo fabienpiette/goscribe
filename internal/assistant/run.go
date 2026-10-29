@@ -753,6 +753,9 @@ func (s *state) finishLookup(r lookupResult) {
 		f, err = ParseFinding(r.reply.Answer)
 	}
 	if err != nil {
+		if r.lookup.Asker == "you" { // a failed /search can be typed again
+			s.mem.forgetSearched(r.lookup.Query)
+		}
 		s.notice("⚠ librarian failed: " + oneLine(err.Error(), 200))
 		return
 	}

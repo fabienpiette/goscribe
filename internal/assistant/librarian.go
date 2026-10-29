@@ -125,13 +125,24 @@ func (m *Memory) forgetAsked(q string) {
 	}
 }
 
+// forgetSearched removes the latest /search query equal to q from Searched:
+// a search that failed is not "already asked", so it can be retried.
+func (m *Memory) forgetSearched(q string) {
+	for i := len(m.Searched) - 1; i >= 0; i-- {
+		if m.Searched[i] == q {
+			m.Searched = slices.Delete(m.Searched, i, i+1)
+			return
+		}
+	}
+}
+
 // lookupsAsked is every query asked so far, the model's and the user's.
 func (m Memory) lookupsAsked() []string {
 	return append(slices.Clone(m.Asked), m.Searched...)
 }
 
 // lookupsShown is what the update prompt lists as already asked: every
-// model lookup and only the last maxSearchedShown /search queries, so the
+// counted lookup (model and question) and only the last maxSearchedShown /search queries, so the
 // prompt does not grow with a long meeting. Dedup (askedSimilar, the /search
 // repeat check) keeps using the full lists through lookupsAsked.
 func (m Memory) lookupsShown() []string {

@@ -1,9 +1,11 @@
 package assistant
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -642,5 +644,55 @@ func TestSearchedWindowedInPromptNotInDedup(t *testing.T) {
 	r := Reply{Lookups: Lookups{{Query: "topic01", Why: "x"}}}
 	if _, ok := m.TakeLookup(r, 0, 5); ok {
 		t.Error("a model lookup similar to a dropped search must still be rejected")
+	}
+}
+
+// A failed /search is not "already asked": typing it again retries it.
+func TestSearchRetriedAfterFailure(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	var mu sync.Mutex
+	calls := 0
+	r := &fakeResearch{}
+	r.reply = func() (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return "", errors.New("librarian timed out")
+		}
+		return foundT1, nil
+	}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "failure notice", func() bool { return hasNotice(v, "⚠ librarian failed: librarian timed out") })
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "retry answer", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "LIBRARIAN" }) })
+	close(events)
+	<-done
+	if n := r.count(); n != 2 {
+		t.Errorf("research calls = %d, want 2 (the retry must run)", n)
+	}
+	if hasInfo(v, "📚 not looking up \"when did the launch ship?\": already asked") {
+		t.Error("the retry was refused as already asked")
+	}
+}
+
+// Only the user's own /search is forgotten on failure: a failed question
+// lookup stays counted in Asked.
+func TestFailedQuestionLookupStaysCounted(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(lookupAnswer), answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: func() (string, error) { return "", errors.New("boom") }}
+	v := &recordingView{}
+	var mem Memory
+	events, input, done := startSearchRun(t, f, v, r, 5, func(c *Config) {
+		c.Final = func(m Memory, _ string, _ bool) { mem = m }
+	})
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "failure notice", func() bool { return hasNotice(v, "⚠ librarian failed: boom") })
+	close(events)
+	<-done
+	if len(mem.Asked) != 1 {
+		t.Errorf("Asked = %q, want the failed question lookup still counted", mem.Asked)
 	}
 }
