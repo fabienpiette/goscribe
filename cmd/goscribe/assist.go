@@ -89,7 +89,7 @@ The limit is 200 KB in total, counting -context and everything added.
 now. It is unlimited, runs before the model's own lookups and a second one
 waits its turn; the answer shows as a Librarian line, feeds the updates and
 goes to ## Research in the notes. An exact repeat of an earlier
-search is skipped.
+search is skipped, unless that search failed: type it again.
 Without the librarian, the feed says why.
 A question the context can't answer may start a lookup too, but that one
 counts toward max_lookups like the model's own.
