@@ -100,6 +100,22 @@ func TestFetchRedirectToSignIn(t *testing.T) {
 	}
 }
 
+func TestFetchAuthPathWithoutRedirect(t *testing.T) {
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<p>%s</p>", long())
+	})
+	for _, p := range []string{"/docs/auth", "/docs/sso"} {
+		page, err := Fetch(context.Background(), srv.URL+p)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if !strings.Contains(page.Markdown, "Acme builds") {
+			t.Errorf("%s: markdown = %q", p, page.Markdown)
+		}
+	}
+}
+
 func TestFetchPasswordForm(t *testing.T) {
 	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")

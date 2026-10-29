@@ -276,7 +276,8 @@ func Fetch(ctx context.Context, rawURL string) (Page, error) {
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return Page{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	if LoginHost(final.Hostname()) || signInPath(final.Path) {
+	// A sign-in path is only a login wall when a redirect led there.
+	if final.String() != u.String() && (LoginHost(final.Hostname()) || signInPath(final.Path)) {
 		return Page{}, &LoginError{Reason: "redirected to a sign-in page"}
 	}
 
