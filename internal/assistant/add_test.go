@@ -272,6 +272,18 @@ func startPageRun(t *testing.T, f *fakeThink, v *recordingView, p *fakePages, wi
 	return events, input, done, notes
 }
 
+// untrustedBlock splits instructions into what is inside <untrusted_sources>
+// and what is outside it, failing when a tag is missing or out of order.
+func untrustedBlock(t *testing.T, instr string) (inside, outside string) {
+	t.Helper()
+	const open, closing = "<untrusted_sources>", "</untrusted_sources>"
+	i, j := strings.Index(instr, open), strings.Index(instr, closing)
+	if i < 0 || j < i {
+		t.Fatalf("untrusted_sources tags missing or out of order (open %d, close %d):\n%s", i, j, instr)
+	}
+	return instr[i+len(open) : j], instr[:i] + instr[j+len(closing):]
+}
+
 func TestRunAddPage(t *testing.T) {
 	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`), answer(`{"summary":"s2"}`)}}
 	v := &recordingView{}
@@ -287,9 +299,12 @@ func TestRunAddPage(t *testing.T) {
 	})
 	waitUntil(t, "second update", func() bool { return f.count() == 2 })
 	instr, _ := f.call(1)
-	un := instr[strings.Index(instr, "<untrusted_sources>"):strings.Index(instr, "</untrusted_sources>")]
-	if !strings.Contains(un, "Pro costs 20 EUR.") {
+	un, rest := untrustedBlock(t, instr)
+	if !strings.Contains(un, "Pro costs 20 EUR.") || !strings.Contains(un, "### file: acme-pricing.md") {
 		t.Errorf("untrusted block:\n%s", un)
+	}
+	if strings.Contains(rest, "Pro costs 20 EUR.") || strings.Contains(rest, "Acme pricing") {
+		t.Errorf("the page must stay inside the untrusted block:\n%s", rest)
 	}
 	if !strings.Contains(instr, "The user added a source since the last update (https://example.com/pricing)") {
 		t.Errorf("change line missing:\n%s", instr)
@@ -396,4 +411,166 @@ func TestRunAddPageAfterEndDropped(t *testing.T) {
 		t.Fatal("Run waited for the fetch")
 	}
 	close(rel) // the goroutine finishes into the buffer and is dropped
+}
+
+// startLoginRun starts a run with the librarian and the login-walled pages
+// in p, for the librarian doc tests.
+func startLoginRun(t *testing.T, f *fakeThink, v *recordingView, p *fakePages, r *fakeResearch, maxLookups int) (events, input chan Event, done chan error, notes string) {
+	t.Helper()
+	fastTimers(t)
+	notes = filepath.Join(t.TempDir(), "notes.md")
+	events, input = make(chan Event), make(chan Event)
+	done = make(chan error, 1)
+	c := Config{Engine: "fake", Interval: 5 * time.Millisecond, Think: f.think, View: v, Input: input, Notes: notes,
+		Transcript: TranscriptPath(notes), Fetch: p.fetch, SourcesDir: SourcesDir(notes),
+		Research: r.research, LibrarianInstructions: "Search the wiki.", LibrarianTools: []string{"Read(~/notes/**)"}, MaxLookups: maxLookups}
+	go func() { done <- Run(c, events) }()
+	return events, input, done, notes
+}
+
+const loginDocURL = "https://docs.example.com/d/1"
+
+func loginPages() *fakePages {
+	return &fakePages{errs: map[string]error{loginDocURL: &webpage.LoginError{Reason: "redirected to a sign-in page"}}}
+}
+
+func TestRunAddLoginDocViaLibrarian(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"summary":"s"}`), answer(`{"summary":"s2"}`), lookupReply("What did Acme decide on PROJ-123 last week?"), answer(`{"summary":"s4"}`)}}
+	r := &fakeResearch{reply: func() (string, error) { return "", nil }}
+	docReply := `{"found":true,"title":"Acme roadmap","markdown":"Dark-mode ships in Q3."}`
+	r.reply = func() (string, error) {
+		if r.count() == 1 {
+			return docReply, nil
+		}
+		return foundT1, nil
+	}
+	v := &recordingView{}
+	events, input, done, notes := startLoginRun(t, f, v, loginPages(), r, 1)
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	input <- addEvent("add", loginDocURL)
+	waitUntil(t, "asking info", func() bool { return hasInfo(v, "📚 asking the librarian for "+loginDocURL+"…") })
+	waitUntil(t, "source item", func() bool {
+		return hasItem(v, func(it Item) bool { return it.Badge == "SOURCE" && it.Text == "Acme roadmap" })
+	})
+	if hasItem(v, func(it Item) bool { return it.Badge == "LOOKUP" }) {
+		t.Error("a doc fetch must not show a LOOKUP item")
+	}
+	if p := r.prompt(0); !strings.Contains(p, loginDocURL) || !strings.Contains(p, "Read(~/notes/**)") || !strings.Contains(p, "Search the wiki.") {
+		t.Errorf("doc prompt:\n%s", p)
+	}
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	instr, _ := f.call(1)
+	un, rest := untrustedBlock(t, instr)
+	if !strings.Contains(un, "Dark-mode ships in Q3.") || !strings.Contains(un, "### file: acme-roadmap.md") {
+		t.Errorf("untrusted block:\n%s", un)
+	}
+	if strings.Contains(rest, "Dark-mode ships in Q3.") || strings.Contains(rest, "Acme roadmap") {
+		t.Errorf("the doc must stay inside the untrusted block:\n%s", rest)
+	}
+	if !strings.Contains(instr, "The user added a source since the last update ("+loginDocURL+")") {
+		t.Errorf("change line missing:\n%s", instr)
+	}
+	copyText, err := os.ReadFile(filepath.Join(SourcesDir(notes), "acme-roadmap.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "# Acme roadmap\n\nSource: " + loginDocURL + "\n\nDark-mode ships in Q3.\n"; string(copyText) != want {
+		t.Errorf("copy = %q", copyText)
+	}
+	// The doc did not use MaxLookups: 1: a model lookup still runs.
+	events <- line("me", twelveWords)
+	waitUntil(t, "model lookup", func() bool { return r.count() == 2 })
+	if p := r.prompt(1); !strings.Contains(p, "Question: What did Acme decide on PROJ-123 last week?") {
+		t.Errorf("second research call:\n%s", p)
+	}
+	close(events)
+	<-done
+}
+
+func TestRunAddLoginDocNotFound(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(`{"found":false,"reason":"a Google Docs reader"}`)}
+	v := &recordingView{}
+	events, input, done, _ := startLoginRun(t, f, v, loginPages(), r, 3)
+	input <- addEvent("add", loginDocURL)
+	want := "📚 the librarian can't read " + loginDocURL + ": a Google Docs reader; add a read-only tool for docs.example.com to librarian.allowed_tools"
+	waitUntil(t, "not found message", func() bool { return hasInfo(v, want) })
+	if hasItem(v, func(it Item) bool { return it.Badge == "SOURCE" }) {
+		t.Error("nothing must be added")
+	}
+	close(events)
+	<-done
+}
+
+func TestRunAddLoginDocError(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: func() (string, error) { return "", errors.New("session crashed") }}
+	v := &recordingView{}
+	events, input, done, _ := startLoginRun(t, f, v, loginPages(), r, 3)
+	input <- addEvent("add", loginDocURL)
+	waitUntil(t, "failure notice", func() bool {
+		return hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "⚠ librarian failed: session crashed") })
+	})
+	close(events)
+	<-done
+}
+
+func TestRunAddLoginDocAlreadyFetching(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	release := make(chan struct{})
+	r := &fakeResearch{reply: func() (string, error) { <-release; return `{"found":false,"reason":"x"}`, nil }}
+	v := &recordingView{}
+	events, input, done, _ := startLoginRun(t, f, v, loginPages(), r, 3)
+	input <- addEvent("add", loginDocURL)
+	waitUntil(t, "doc in flight", func() bool { return r.count() == 1 })
+	input <- addEvent("add", loginDocURL)
+	waitUntil(t, "already fetching", func() bool { return hasInfo(v, "already fetching "+loginDocURL) })
+	close(release)
+	close(events)
+	<-done
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1", n)
+	}
+}
+
+// With a lookup in flight, a waiting model lookup and a queued doc, the doc
+// runs next, and the model lookup after it.
+func TestRunDocBeforeModelLookup(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		answer(`{"summary":"s","decisions":["second applied"],"lookups":[{"query":"Who owns the billing migration ticket?","why":"asked now"}]}`),
+		answer(`{"summary":"s"}`)}}
+	release := make(chan struct{})
+	r := &fakeResearch{reply: func() (string, error) { <-release; return foundT1, nil }}
+	v := &recordingView{}
+	events, input, done, _ := startLoginRun(t, f, v, loginPages(), r, 5)
+	for i := 1; i <= 2; i++ {
+		events <- line("me", twelveWords)
+		waitUntil(t, "cycle", func() bool { return f.count() == i })
+		if i == 1 {
+			waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+		}
+	}
+	// The decision shows while the second reply is applied; its lookup is
+	// queued in the same step.
+	waitUntil(t, "second reply applied", func() bool {
+		return hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "second applied") })
+	})
+	input <- addEvent("add", loginDocURL)
+	waitUntil(t, "doc queued", func() bool { return hasInfo(v, "📚 asking the librarian for "+loginDocURL+"…") })
+	close(release)
+	waitUntil(t, "three research calls", func() bool { return r.count() == 3 })
+	if p := r.prompt(0); !strings.Contains(p, "Question: When was the Globex contract signed?") {
+		t.Errorf("first call:\n%s", p)
+	}
+	if p := r.prompt(1); !strings.Contains(p, "URL: "+loginDocURL) {
+		t.Errorf("the doc must run before the waiting lookup:\n%s", p)
+	}
+	if p := r.prompt(2); !strings.Contains(p, "Question: Who owns the billing migration ticket?") {
+		t.Errorf("third call:\n%s", p)
+	}
+	close(events)
+	<-done
 }

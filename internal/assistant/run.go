@@ -202,6 +202,7 @@ type qaResult struct {
 
 type lookupResult struct {
 	lookup Lookup
+	doc    string // the URL of a document the librarian was asked to read; lookup is then empty
 	reply  ResearchReply
 	err    error
 }
@@ -233,8 +234,10 @@ type state struct {
 	looking       bool    // a librarian lookup is in flight
 	pending       *Lookup // the newest lookup waiting for it
 	pendingSince  time.Time
-	limitShown    bool // the lookup limit line was printed
-	ending        bool // the meeting is over: no new lookups
+	docQueue      []string // login-walled docs the user added, waiting for the librarian
+	docURL        string   // the doc the lookup in flight reads, if it is one
+	limitShown    bool     // the lookup limit line was printed
+	ending        bool     // the meeting is over: no new lookups
 	lookupResults chan lookupResult
 
 	// Typed questions have their own call, so they never delay the updates.
@@ -602,7 +605,15 @@ func (s *state) queueLookup(r Reply, at time.Duration) {
 // maybeLookup drops a waiting lookup once it is too old (silently, and out of
 // Asked: it never ran), and starts it when the librarian is idle.
 func (s *state) maybeLookup(now time.Time) {
-	if s.pending == nil || s.looking {
+	if s.looking {
+		return
+	}
+	if len(s.docQueue) > 0 { // the user's own request: first, never dropped, not in Asked
+		s.startDoc(s.docQueue[0], now)
+		s.docQueue = s.docQueue[1:]
+		return
+	}
+	if s.pending == nil {
 		return
 	}
 	l := *s.pending
@@ -620,6 +631,20 @@ func (s *state) maybeLookup(now time.Time) {
 		reply, err := research(prompt)
 		select {
 		case results <- lookupResult{lookup: l, reply: reply, err: err}:
+		default: // only after the end, when nobody reads results
+		}
+	}()
+}
+
+// startDoc asks the librarian to read one document in the background.
+func (s *state) startDoc(url string, now time.Time) {
+	s.looking, s.docURL = true, url
+	prompt := LibrarianDocPrompt(s.c.LibrarianInstructions, s.c.LibrarianTools, url, now)
+	research, results := s.c.Research, s.lookupResults
+	go func() {
+		reply, err := research(prompt)
+		select {
+		case results <- lookupResult{doc: url, reply: reply, err: err}:
 		default: // only after the end, when nobody reads results
 		}
 	}()
@@ -645,8 +670,12 @@ func (s *state) showRefused(calls []string) {
 // finishLookup merges a librarian answer into the memory, the feed and the
 // notes, then starts the waiting lookup, if any.
 func (s *state) finishLookup(r lookupResult) {
-	s.looking = false
+	s.looking, s.docURL = false, ""
 	defer s.maybeLookup(time.Now())
+	if r.doc != "" {
+		s.finishDoc(r)
+		return
+	}
 	s.showRefused(r.reply.Refused)
 	f, err := Finding{}, r.err
 	if err == nil {
@@ -719,6 +748,7 @@ func (s *state) end() error {
 		}
 	}()
 	s.ending = true
+	s.docQueue = nil          // like waiting lookups, queued docs are dropped
 	s.c.View.Status(Status{}) // clears the status line
 	if s.thinking {
 		s.notice(fmt.Sprintf("⏳ finishing the current update (%s)…", s.c.Engine))

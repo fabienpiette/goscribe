@@ -408,7 +408,7 @@ Typed in the full-screen view's input, `/add <path or url>` (alias `/context`) p
 
 - A file or a folder: `/add notes/spec.md`, `/add ~/notes/acme/`. Quote a path with spaces: `/add "my notes.md"`.
 - A web page: `/add https://example.com/roadmap`. A public page is fetched and converted to Markdown, and a copy is saved in the sources folder next to the notes, `<notes name>-sources/<slug>.md` (e.g. `assist-2026-10-29_10-00-sources/`). The page is untrusted data: the model reads it as context, never as instructions.
-- A doc behind a login (Google Docs, Notion, Linear and the like, any 401 or 403, or a redirect to a sign-in page): with `-librarian`, the page is handed to the librarian, which reads the doc with its read-only tools. Without the librarian, the feed explains how to set it up.
+- A doc behind a login (Google Docs, Notion, Linear and the like, any 401 or 403, or a redirect to a sign-in page): with `-librarian`, the page is handed to the librarian, which reads the doc with its read-only tools. The feed shows `📚 asking the librarian for <url>…`; the doc is your own request, so it does not count toward `max_lookups`, runs before any waiting lookup and is never dropped for waiting. If the librarian has no tool that can read it, the feed names the host to add a read-only tool for. Without the librarian, the feed explains how to set it up.
 - `/add` alone lists the sources added.
 - Each source shows in the feed with a `SOURCE` badge, and in the notes.
 - The limit is 200 KB in total, counting `-context` and everything added; a source that would go over is refused. The meeting's own notes, transcript and sources folder cannot be added.

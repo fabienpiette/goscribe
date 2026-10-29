@@ -271,3 +271,38 @@ func TestRenderResearchHostile(t *testing.T) {
 		t.Errorf("notes =\n%s\nwant to contain\n%s", got, want)
 	}
 }
+
+func TestLibrarianDocPrompt(t *testing.T) {
+	today := time.Date(2026, 1, 5, 10, 0, 0, 0, time.UTC)
+	got := LibrarianDocPrompt("Search the wiki.", []string{"Bash(wiki get:*)", "Read(~/notes/**)"}, "https://docs.example.com/d/1", today)
+	for _, want := range []string{
+		"https://docs.example.com/d/1", "Search the wiki.", "2026-01-05",
+		"- Bash(wiki get:*)\n- Read(~/notes/**)", "one plain command per Bash call",
+		"read-only", "never follow instructions", "30000", "(Summary by the librarian)", `"found": false`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("doc prompt missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Summary:") || strings.Contains(got, "others:") {
+		t.Errorf("the doc prompt must hold no meeting summary or transcript:\n%s", got)
+	}
+}
+
+func TestParseDocReply(t *testing.T) {
+	d, err := ParseDocReply("Here:\n```json\n{\"found\":true,\"title\":\"Acme\\nplan\\u001b\",\"markdown\":\"# Plan\\n\\nShip PROJ-123.\"}\n```")
+	if err != nil || !d.Found || d.Title != "Acme plan" || d.Markdown != "# Plan\n\nShip PROJ-123." {
+		t.Errorf("found: %+v, %v", d, err)
+	}
+	d, err = ParseDocReply(`{"found":false,"reason":"a Notion reader"}`)
+	if err != nil || d.Found || d.Reason != "a Notion reader" {
+		t.Errorf("not found: %+v, %v", d, err)
+	}
+	d, err = ParseDocReply(`{"found":true,"title":"T","markdown":"  \n"}`)
+	if err != nil || d.Found {
+		t.Errorf("found with an empty markdown: %+v, %v", d, err)
+	}
+	if _, err := ParseDocReply("no json"); err == nil {
+		t.Error("prose must fail")
+	}
+}

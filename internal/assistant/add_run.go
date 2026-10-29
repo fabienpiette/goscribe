@@ -288,22 +288,28 @@ func (s *state) finishFetch(r fetchResult) {
 		s.info(fmt.Sprintf("⚠ cannot add %s: %s", r.url, Clean(r.err.Error())))
 		return
 	}
-	host := hostOf(r.url)
-	title := cleanText(r.page.Title, maxItem)
+	final := r.page.URL
+	if final == "" {
+		final = r.url
+	}
+	s.addFetched("web", r.page.Title, r.url, final, r.page.Markdown)
+}
+
+// addFetched adds a doc read from a page, by a fetch or by the librarian, and
+// saves a copy in the sources folder. final is the address shown in the copy.
+func (s *state) addFetched(via, rawTitle, origin, final, markdown string) {
+	host := hostOf(origin)
+	title := cleanText(rawTitle, maxItem)
 	if title == "" {
 		title = cleanText(host, maxItem)
 	}
-	md := CleanDoc(r.page.Markdown)
-	d := Doc{Name: s.pageName(r.page.Title, host) + ".md", Title: title, Origin: r.url, Via: "web", Text: md}
+	md := CleanDoc(markdown)
+	d := Doc{Name: s.pageName(rawTitle, host) + ".md", Title: title, Origin: origin, Via: via, Text: md}
 	if !s.addDoc(d) {
 		return
 	}
 	if s.c.SourcesDir == "" {
 		return
-	}
-	final := r.page.URL
-	if final == "" {
-		final = r.url
 	}
 	body := fmt.Sprintf("# %s\n\nSource: %s\n\n%s\n", title, Clean(final), md)
 	err := os.MkdirAll(s.c.SourcesDir, 0o755)
@@ -316,11 +322,48 @@ func (s *state) finishFetch(r fetchResult) {
 	}
 }
 
-// askLibrarianDoc is a stub until the librarian reads login-walled pages: it
-// only shows the no-librarian message, even when Research is set.
+// askLibrarianDoc handles a page that needs a login. Without the librarian it
+// says how to set it up; with it, the URL joins the doc queue and maybeLookup
+// starts it before any model lookup. It is the user's own request: it is not
+// in Asked and does not count toward MaxLookups.
 func (s *state) askLibrarianDoc(target, reason string) {
-	s.info(fmt.Sprintf("%s needs a login (%s): goscribe can't read it. Start assist with -librarian and a read-only tool for %s in librarian.allowed_tools",
-		target, Clean(reason), hostOf(target)))
+	if s.c.Research == nil {
+		s.info(fmt.Sprintf("%s needs a login (%s): goscribe can't read it. Start assist with -librarian and a read-only tool for %s in librarian.allowed_tools",
+			target, Clean(reason), hostOf(target)))
+		return
+	}
+	if s.ending {
+		return
+	}
+	if s.docURL == target || slices.Contains(s.docQueue, target) {
+		s.info("already fetching " + target)
+		return
+	}
+	s.docQueue = append(s.docQueue, target)
+	s.info("📚 asking the librarian for " + target + "…")
+	s.maybeLookup(time.Now())
+}
+
+// finishDoc adds the document the librarian read, or says why it could not.
+func (s *state) finishDoc(r lookupResult) {
+	s.showRefused(r.reply.Refused)
+	d, err := DocReply{}, r.err
+	if err == nil {
+		d, err = ParseDocReply(r.reply.Answer)
+	}
+	if err != nil {
+		s.notice("⚠ librarian failed: " + oneLine(err.Error(), 200))
+		return
+	}
+	if !d.Found {
+		reason := d.Reason
+		if reason == "" {
+			reason = "no reason given"
+		}
+		s.info(fmt.Sprintf("📚 the librarian can't read %s: %s; add a read-only tool for %s to librarian.allowed_tools", r.doc, reason, hostOf(r.doc)))
+		return
+	}
+	s.addFetched("librarian", d.Title, r.doc, r.doc, d.Markdown)
 }
 
 func hostOf(target string) string {
