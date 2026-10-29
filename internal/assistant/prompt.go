@@ -128,6 +128,9 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian, fix
 		t.WriteString("\n")
 	}
 	t.WriteString("New since the last update:\n")
+	if len(fresh) == 0 { // a new brief asked for this update
+		t.WriteString("(nothing new: the user changed the brief)\n")
+	}
 	t.WriteString(lastBytes(fresh, freshWindow))
 	t.WriteString("</transcript>")
 	return b.String(), t.String()

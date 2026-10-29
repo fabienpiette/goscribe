@@ -44,6 +44,8 @@ type Board struct {
 	// Fixes are the corrections in force, "cash → cache"; a suggested one not
 	// answered yet ends with " ?".
 	Fixes []string
+	// Briefs are the user's brief texts in order; the TUI numbers them.
+	Briefs []string
 }
 
 // View is everything Run shows. Calls come from the Run goroutine only.

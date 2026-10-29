@@ -228,6 +228,8 @@ type state struct {
 
 	proposals []proposal // fixes the model suggested, numbered from 1
 
+	briefAsked bool // a brief waits for the next update to start at once
+
 	finalWritten bool // the final notes were written
 
 	notesErr      bool
@@ -270,6 +272,8 @@ func (s *state) handle(ev Event) {
 		s.askQuestion(ev.Text)
 	case FixEvent:
 		s.fix(ev.Fix)
+	case BriefEvent:
+		s.brief(ev.Brief)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -433,7 +437,14 @@ func (s *state) maybeStart(now time.Time) {
 		s.startRecap(now)
 		return
 	}
-	if s.thinking || s.analysed == len(s.lines) || now.Sub(s.lastStart) < s.interval() {
+	if s.thinking {
+		return
+	}
+	if s.briefAsked && len(s.lines) > 0 {
+		s.startBriefUpdate(now)
+		return
+	}
+	if s.analysed == len(s.lines) || now.Sub(s.lastStart) < s.interval() {
 		return
 	}
 	fresh := s.lines[s.analysed:]
@@ -730,7 +741,7 @@ func (s *state) end() error {
 }
 
 // await waits for a call's result, reading Input meanwhile so that a sender
-// never blocks (a question, recap or fix is refused, a mute is dropped). It
+// never blocks (a question, recap, fix or brief is refused, a mute is dropped). It
 // takes the answer of the question in flight, and refreshes the status on
 // each tick. With a nil res, it returns after that answer or the question
 // watchdog. false means Force was closed first.
@@ -765,6 +776,8 @@ func (s *state) await(res <-chan result) (result, bool) {
 				s.info("the meeting is over: nothing more is answered")
 			case FixEvent:
 				s.info("the meeting is over: fixes are closed")
+			case BriefEvent:
+				s.info("the meeting is over: briefs are closed")
 			}
 		}
 	}
@@ -864,8 +877,12 @@ func (s *state) board() {
 			fixes = append(fixes, fmt.Sprintf("%s ? (/fix yes %d)", fixLabel(p.fix()), p.N))
 		}
 	}
+	var briefs []string
+	for _, b := range m.Briefs {
+		briefs = append(briefs, b.Text)
+	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
-		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes})
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes, Briefs: briefs})
 }
 
 func (s *state) dim(text string) string {
