@@ -13,10 +13,12 @@ type userAsk struct {
 }
 
 // librarianOff says why the librarian is off. Callers of Run that never set
-// Config.LibrarianOff get generic advice, naming the tool a page's host needs
-// when there is one.
+// Config.LibrarianOff get generic advice. For a page, both name the tool its
+// host needs.
 func (s *state) librarianOff(host string) string {
 	switch {
+	case s.c.LibrarianOff != "" && host != "":
+		return fmt.Sprintf("%s; to read it, the librarian also needs a read-only tool for %s in librarian.allowed_tools", s.c.LibrarianOff, host)
 	case s.c.LibrarianOff != "":
 		return s.c.LibrarianOff
 	case host != "":

@@ -206,7 +206,8 @@ func TestSearchWithoutLibrarian(t *testing.T) {
 	input <- searchEvent("q")
 	waitUntil(t, "search refusal", func() bool { return hasInfo(v, "/search needs the librarian: "+off) })
 	input <- addEvent("add", loginDocURL)
-	want := loginDocURL + " needs a login (redirected to a sign-in page): goscribe can't read it. " + off
+	want := loginDocURL + " needs a login (redirected to a sign-in page): goscribe can't read it. " + off +
+		"; to read it, the librarian also needs a read-only tool for docs.example.com in librarian.allowed_tools"
 	waitUntil(t, "doc refusal", func() bool { return hasInfo(v, want) })
 	if hasItem(v, func(it Item) bool { return it.Badge == "LOOKUP" }) {
 		t.Error("nothing may be looked up")

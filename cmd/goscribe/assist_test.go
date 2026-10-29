@@ -1000,7 +1000,12 @@ func TestAssistTUIStartupNoticesGoToFeed(t *testing.T) {
 	p := &fakeProgram{onExit: func() { atExit = stdout.String() }}
 	events := make(chan assistant.Event)
 	close(events)
-	notices := startupNotices("me · fake", notes, assistant.TranscriptPath(notes), "k", []string{"Acme rollback runbook review"}, 0)
+	libOff := "⚠ librarian off: librarian.allowed_tools entry 'WebFetch' is refused: web tools can exfiltrate data"
+	notices := withNotices(startupNotices("me · fake", notes, assistant.TranscriptPath(notes), "k", []string{"Acme rollback runbook review"}, 0),
+		"", "", libOff)
+	if notices[len(notices)-1] != libOff || slices.Contains(notices, "") {
+		t.Fatalf("notices = %q, want the librarian notice last and no empty ones", notices)
+	}
 	s := tuiSession{
 		cfg:       assistant.Config{Notes: notes, Transcript: assistant.TranscriptPath(notes), Engine: "fake", Interval: time.Second, Think: func(_, _ string) (string, error) { return "", nil }},
 		notices:   notices,

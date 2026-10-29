@@ -331,16 +331,8 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		// Bubble Tea reads the keys: Alt+m/s/w come back on screenKeys.
 		screenKeys = make(chan string, 8)
 		toggle = screenKeys
-		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, ctxBytes)
-		if restoreNotice != "" {
-			notices = append(notices, restoreNotice)
-		}
-		if skippedNotice != "" {
-			notices = append(notices, skippedNotice)
-		}
-		if librarianNotice != "" {
-			notices = append(notices, librarianNotice)
-		}
+		notices = withNotices(startupNotices(header, notes, transcript, tuiHint, tooLong, ctxBytes),
+			restoreNotice, skippedNotice, librarianNotice)
 	} else {
 		// Mute keys as in record, and the recap key: only on a terminal (and on Linux).
 		toggle, restoreKeys = startKeys(os.Stdin, assistKeys())
