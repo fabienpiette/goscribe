@@ -19,7 +19,15 @@ const (
 	RecapEvent                     // the user asked for a recap of the last minutes
 	QuestionEvent                  // the user typed a question (Text)
 	FixEvent                       // the user typed a /fix command (Fix)
+	BriefEvent                     // the user typed a /brief command (Brief)
 )
+
+// BriefRequest is a parsed /brief command: Op is "add", "list" or "rm".
+type BriefRequest struct {
+	Op   string // "add", "list" or "rm"
+	Text string // add: the brief
+	N    int    // rm: the brief number, from 1
+}
 
 // FixRequest is a parsed /fix command: Op is "add", "list", "rm", "yes" or
 // "no"; N is 0 for the latest or none given.
@@ -33,8 +41,9 @@ type Event struct {
 	Kind    EventKind
 	Speaker string // "me" or "others"
 	Text    string
-	Muted   bool       // MuteEvent: the side is now muted
-	Fix     FixRequest // FixEvent: what the user asked
+	Muted   bool         // MuteEvent: the side is now muted
+	Fix     FixRequest   // FixEvent: what the user asked
+	Brief   BriefRequest // BriefEvent: what the user asked
 	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
 	Window time.Duration
 }

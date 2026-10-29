@@ -552,3 +552,63 @@ func TestCyclePromptWithoutFixes(t *testing.T) {
 		}
 	}
 }
+
+func TestPromptsIncludeBrief(t *testing.T) {
+	lines := []Line{{Speaker: "me", At: time.Minute, Text: "the cache work"}}
+	prompts := func(m Memory) map[string][2]string {
+		cycle, cycleT := CyclePrompt("", m, nil, lines, false, true, nil)
+		question, questionT := QuestionPrompt("", m, lines, 2*time.Minute, "why?")
+		recap, recapT := RecapPrompt(m, lines, 2*time.Minute, 5*time.Minute)
+		final, finalT := FinalPrompt("", m, lines)
+		return map[string][2]string{"cycle": {cycle, cycleT}, "question": {question, questionT}, "recap": {recap, recapT}, "final": {final, finalT}}
+	}
+	m := Memory{Summary: "cache pass", Briefs: []Brief{{Text: "Sam is the PM"}}}
+	for name, p := range prompts(m) {
+		instr := p[0]
+		for _, want := range []string{"The user's brief for this meeting", "1. Sam is the PM\n"} {
+			if !strings.Contains(instr, want) {
+				t.Errorf("%s prompt misses %q:\n%s", name, want, instr)
+			}
+		}
+		if strings.Contains(p[1], "brief for this meeting") {
+			t.Errorf("%s: the brief is not part of the transcript", name)
+		}
+		if name == "cycle" || name == "final" {
+			if strings.Index(instr, "brief for this meeting") > strings.Index(instr, "Memory of the meeting so far") {
+				t.Errorf("%s prompt: the brief goes before the memory", name)
+			}
+		}
+	}
+	for name, p := range prompts(Memory{Summary: "cache pass"}) {
+		if strings.Contains(p[0], "brief for this meeting") {
+			t.Errorf("%s prompt has a brief block without briefs", name)
+		}
+	}
+}
+
+func TestRenderBriefSection(t *testing.T) {
+	m := Memory{
+		QA:     []QA{{Question: "q?", Answer: "a"}},
+		Briefs: []Brief{{Text: "Sam is the PM"}, {Text: "## Fixes"}},
+		Fixes:  []Fix{{Wrong: "cash", Right: "cache"}},
+	}
+	out := Render(m, "h", false, time.Hour)
+	if want := "## Brief\n\n- Sam is the PM\n- ## Fixes\n"; !strings.Contains(out, want) {
+		t.Errorf("missing %q in:\n%s", want, out)
+	}
+	if strings.Index(out, "## Questions") > strings.Index(out, "## Brief") || strings.Index(out, "## Brief") > strings.Index(out, "## Fixes") {
+		t.Error("Brief goes after Questions and before Fixes")
+	}
+	n := 0
+	for _, l := range strings.Split(out, "\n") {
+		if l == "## Fixes" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d lines equal ## Fixes, want 1", n)
+	}
+	if strings.Contains(Render(Memory{}, "h", false, time.Hour), "## Brief") {
+		t.Error("no Brief section without briefs")
+	}
+}

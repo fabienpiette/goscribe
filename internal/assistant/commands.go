@@ -11,7 +11,7 @@ import (
 
 // Command is one parsed line of the chat input.
 type Command struct {
-	Name   string        // "help", "mute", "recap", "fix" or "question"
+	Name   string        // "help", "mute", "recap", "fix", "brief" or "question"
 	Arg    string        // "me" or "others" for mute
 	Window time.Duration // recap window, 0 means the default
 	Text   string        // the question
@@ -19,6 +19,7 @@ type Command struct {
 	Op           string
 	Wrong, Right string // /fix add: what was misheard and what it should read
 	N            int    // /fix rm, yes, no: the fix number; 0 means the latest or none given
+	// /brief reuses Op ("add", "list" or "rm"), Text and N.
 }
 
 // ErrEmpty means the input was blank; callers ignore it.
@@ -35,6 +36,8 @@ var Commands = []CommandHelp{
 	{"/fix <wrong> <right>", `correct a misheard word from now on and in what was said; quote phrases: /fix "dark mood" "dark mode"`},
 	{"/fix yes|no [n]", "accept or reject a suggested fix (FIX?), the latest by default"},
 	{"/fix [rm n]", "list the fixes, or stop fix n for new lines"},
+	{"/brief <text>", "add a standing instruction or fact for the assistant, e.g. /brief Sam is the PM"},
+	{"/brief [rm n]", "list the briefs, or remove brief n"},
 	{"<text>", "ask a question about the meeting"},
 }
 
@@ -44,6 +47,9 @@ const (
 	fixUsage    = "usage: /fix <wrong> <right>"
 	fixRmUsage  = "usage: /fix rm <n>"
 	fixAnsUsage = "usage: /fix yes|no [n]"
+
+	briefRmUsage = "usage: /brief rm <n>"
+	maxBriefLen  = 300
 )
 
 // ParseCommand reads a chat line: plain text is a question, a leading / starts a command.
@@ -76,6 +82,8 @@ func ParseCommand(input string) (Command, error) {
 		return Command{Name: "recap", Window: d}, nil
 	case "fix":
 		return parseFix(input[len(fields[0]):])
+	case "brief":
+		return parseBrief(strings.TrimSpace(input[len(fields[0]):]))
 	}
 	return Command{}, fmt.Errorf("unknown command /%s: type /help", name)
 }
@@ -162,4 +170,38 @@ func argText(args []fixArg, i int) string {
 		return args[i].text
 	}
 	return ""
+}
+
+// ValidateBrief checks the text a user typed for /brief.
+func ValidateBrief(text string) error {
+	if strings.TrimSpace(text) == "" {
+		return errors.New("usage: /brief <instruction or fact>")
+	}
+	if len([]rune(text)) > maxBriefLen {
+		return fmt.Errorf("a brief is at most %d characters", maxBriefLen)
+	}
+	return nil
+}
+
+// parseBrief reads what follows /brief: nothing lists the briefs, "rm n"
+// removes one, anything else is a new brief.
+func parseBrief(rest string) (Command, error) {
+	if rest == "" {
+		return Command{Name: "brief", Op: "list"}, nil
+	}
+	if f := strings.Fields(rest); f[0] == "rm" {
+		if len(f) != 2 {
+			return Command{}, errors.New(briefRmUsage)
+		}
+		n, err := strconv.Atoi(f[1])
+		if err != nil || n <= 0 {
+			return Command{}, errors.New(briefRmUsage)
+		}
+		return Command{Name: "brief", Op: "rm", N: n}, nil
+	}
+	text := strings.TrimSpace(Clean(rest))
+	if err := ValidateBrief(text); err != nil {
+		return Command{}, err
+	}
+	return Command{Name: "brief", Op: "add", Text: text}, nil
 }

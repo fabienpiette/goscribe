@@ -45,6 +45,14 @@ func TestParseCommand(t *testing.T) {
 		{in: "/fix a b c", wantErr: "usage: /fix <wrong> <right>"},
 		{in: "/fix a a", wantErr: "the fix changes nothing"},
 		{in: `/fix cash ""`, wantErr: "usage: /fix <wrong> <right>"},
+		{in: "/brief", want: Command{Name: "brief", Op: "list"}},
+		{in: "/brief Sam is the PM", want: Command{Name: "brief", Op: "add", Text: "Sam is the PM"}},
+		{in: "/brief   focus  on risks ", want: Command{Name: "brief", Op: "add", Text: "focus  on risks"}},
+		{in: "/brief rm 2", want: Command{Name: "brief", Op: "rm", N: 2}},
+		{in: "/brief rm", wantErr: "usage: /brief rm <n>"},
+		{in: "/brief rm x", wantErr: "usage: /brief rm <n>"},
+		{in: "/brief rm 0", wantErr: "usage: /brief rm <n>"},
+		{in: "/brief " + strings.Repeat("é", 301), wantErr: "a brief is at most 300 characters"},
 		{in: "/frobnicate", wantErr: "unknown command /frobnicate: type /help"},
 		{in: "/ what", wantErr: "unknown command /: type /help"},
 		{in: "", isEmpty: true},
@@ -75,7 +83,7 @@ func TestParseCommand(t *testing.T) {
 }
 
 func TestCommandsHelpListsEveryCommand(t *testing.T) {
-	for _, in := range []string{"/help", "/mute me", "/recap", "/fix cash cache", "/fix", "/fix yes", "/fix rm 1", "hello"} {
+	for _, in := range []string{"/help", "/mute me", "/recap", "/fix cash cache", "/fix", "/fix yes", "/fix rm 1", "/brief x", "/brief", "hello"} {
 		cmd, err := ParseCommand(in)
 		if err != nil {
 			t.Fatalf("%q: %v", in, err)

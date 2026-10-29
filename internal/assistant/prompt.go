@@ -93,6 +93,7 @@ func CyclePrompt(context string, m Memory, earlier, fresh []Line, librarian, fix
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
+	writeBrief(&b, m.Briefs)
 	var asked []string
 	if librarian {
 		asked = m.Asked
@@ -139,6 +140,7 @@ func FinalPrompt(context string, m Memory, all []Line) (instructions, transcript
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
+	writeBrief(&b, m.Briefs)
 	writeMemory(&b, m, nil)
 	writeFixes(&b, m.Fixes)
 	writeQA(&b, m.QA, "The user asked during the meeting:")
@@ -154,6 +156,19 @@ func writeContext(b *strings.Builder, context string) {
 	b.WriteString("Background the user provided for this meeting (trusted):\n<context>\n")
 	b.WriteString(context)
 	b.WriteString("\n</context>\n\n")
+}
+
+// writeBrief lists what the user typed with /brief. It is trusted, and wins
+// over the context and the transcript.
+func writeBrief(b *strings.Builder, briefs []Brief) {
+	if len(briefs) == 0 {
+		return
+	}
+	b.WriteString("The user's brief for this meeting: instructions and facts they typed themselves (trusted, unlike the transcript). Follow the instructions, and take the facts as true, also over the context or the transcript:\n")
+	for i, br := range briefs {
+		fmt.Fprintf(b, "%d. %s\n", i+1, br.Text)
+	}
+	b.WriteString("\n")
 }
 
 // writeMemory adds the memory and, after it, the research findings and the
@@ -262,6 +277,7 @@ Rules:
 func RecapPrompt(m Memory, lines []Line, now, window time.Duration) (instructions, transcript string) {
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
+	writeBrief(&b, m.Briefs)
 	writeMemory(&b, m, nil)
 	writeFixes(&b, m.Fixes)
 	fmt.Fprintf(&b, recapTask, WindowLabel(window))
@@ -307,6 +323,7 @@ func QuestionPrompt(context string, m Memory, lines []Line, now time.Duration, q
 	var b strings.Builder
 	b.WriteString(roleAndRules + "\n\n")
 	writeContext(&b, context)
+	writeBrief(&b, m.Briefs)
 	writeMemory(&b, m, nil)
 	writeFixes(&b, m.Fixes)
 	writeQA(&b, m.QA, "The user asked earlier in the meeting (the new question may follow up on these):")
