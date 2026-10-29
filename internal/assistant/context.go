@@ -28,14 +28,20 @@ func IsPageCopy(text string) bool {
 
 // LeftOutMessage tells the user that a folder scan skipped n untrusted files.
 func LeftOutMessage(n int) string {
-	return fmt.Sprintf("left out %d file(s): earlier notes and page copies are not trusted background; /add one directly to use it as reference", n)
+	return LeftOutShort(n) + "; /add one directly to use it as reference"
+}
+
+// LeftOutShort is LeftOutMessage without the /add advice, for when nothing can
+// be typed.
+func LeftOutShort(n int) string {
+	return fmt.Sprintf("left out %d file(s): earlier notes, transcripts and page copies are not trusted background", n)
 }
 
 // LoadContext reads the meeting background: one .md file, or every .md file
 // under a folder (recursively, sorted). Each file starts with a
 // "### file: <path>" header, relative to the folder. It returns the text, the
 // files read and, for a folder, the files left out because they are page
-// copies or earlier assist notes: untrusted text never joins the trusted
+// copies, transcripts or earlier assist notes: untrusted text never joins the trusted
 // background through a folder scan.
 func LoadContext(path string) (text string, files, skipped []string, err error) {
 	info, err := os.Stat(path)
@@ -70,7 +76,7 @@ func LoadContext(path string) (text string, files, skipped []string, err error) 
 			if err != nil {
 				return "", nil, nil, err
 			}
-			if IsPageCopy(string(data)) || isNotesText(string(data)) {
+			if IsPageCopy(string(data)) || isNotesText(string(data)) || isTranscriptText(string(data)) {
 				skipped = append(skipped, f)
 			} else {
 				trusted = append(trusted, f)

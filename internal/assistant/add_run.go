@@ -83,11 +83,17 @@ func (s *state) addLocal(target string) {
 	var restored Restored
 	notes, restoreErr := false, error(nil)
 	if !info.IsDir() {
-		if data, err := os.ReadFile(path); err == nil && IsPageCopy(string(data)) {
+		data, rerr := os.ReadFile(path)
+		switch {
+		case rerr == nil && IsPageCopy(string(data)):
 			// A saved page or document: reference data, never restored from.
 			d.Via, d.Name = "web", Clean(base)
 			names = []string{d.Name}
-		} else {
+		case rerr == nil && isTranscriptText(string(data)):
+			// Raw speech: reference data, nothing to restore.
+			d.Via, d.Name = "transcript", Clean(base)
+			names = []string{d.Name}
+		default:
 			restored, notes, restoreErr = LoadRestore(path)
 		}
 	}

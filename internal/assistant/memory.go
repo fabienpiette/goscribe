@@ -66,7 +66,7 @@ type Doc struct {
 	Name   string // as the model cites it: the "### file:" names for files
 	Title  string // what the user sees
 	Origin string // the path or URL it came from
-	Via    string // "file", "web", "librarian" or "notes" (an earlier assist notes file)
+	Via    string // "file", "web", "librarian", "notes" (an earlier assist notes file) or "transcript"
 	Text   string
 	At     time.Duration
 }

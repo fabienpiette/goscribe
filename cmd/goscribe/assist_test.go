@@ -1125,7 +1125,21 @@ func TestLoadContextArgPageCopyAndFolder(t *testing.T) {
 	if err != nil || strings.Contains(bg, "Hostile") || !strings.Contains(bg, "Acme kickoff") || len(docs) != 0 || len(skipped) != 1 {
 		t.Errorf("folder: bg = %q, docs = %d, skipped = %q, err = %v", bg, len(docs), skipped, err)
 	}
-	if n := assistant.LeftOutMessage(len(skipped)); !strings.HasPrefix(n, "left out 1 file(s): earlier notes and page copies are not trusted background") {
+	if n := assistant.LeftOutMessage(len(skipped)); !strings.HasPrefix(n, "left out 1 file(s): earlier notes, transcripts and page copies are not trusted background") {
 		t.Errorf("notice = %q", n)
+	}
+}
+
+func TestLoadContextArgTranscriptIsADoc(t *testing.T) {
+	tr := filepath.Join(t.TempDir(), "standup-transcript.md")
+	if err := assistant.WriteTranscript(tr, "HDR", []assistant.Line{{Speaker: "others", Text: "Hostile spoken text"}}); err != nil {
+		t.Fatal(err)
+	}
+	bg, files, docs, skipped, err := loadContextArg(tr)
+	if err != nil || bg != "" || len(files) != 0 || len(skipped) != 0 || len(docs) != 1 {
+		t.Fatalf("bg = %q, files = %q, docs = %d, err = %v", bg, files, len(docs), err)
+	}
+	if d := docs[0]; d.Via != "transcript" || d.Trusted() || d.Origin != tr || !strings.Contains(d.Text, "Hostile spoken text") {
+		t.Errorf("doc = %+v", d)
 	}
 }

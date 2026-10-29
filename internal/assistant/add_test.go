@@ -695,7 +695,7 @@ func TestRunAddFolderLeavesOutNotes(t *testing.T) {
 	waitUntil(t, "first update", func() bool { return f.count() == 1 })
 	input <- addEvent("add", dir)
 	waitUntil(t, "skipped info", func() bool {
-		return hasInfo(v, "left out 1 file(s): earlier notes and page copies are not trusted background; /add one directly to use it as reference")
+		return hasInfo(v, "left out 1 file(s): earlier notes, transcripts and page copies are not trusted background; /add one directly to use it as reference")
 	})
 	waitUntil(t, "second update", func() bool { return f.count() == 2 })
 	instr, _ := f.call(1)
@@ -735,4 +735,34 @@ func TestRunAddPageCopyIsUntrusted(t *testing.T) {
 	}
 	close(events)
 	<-done
+}
+
+func TestRunAddTranscriptIsUntrusted(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`), answer(`{"summary":"s2"}`)}}
+	v := &recordingView{}
+	events, input, done, notes := startAddRun(t, f, v, time.Hour, "")
+	tr := filepath.Join(t.TempDir(), "old-transcript.md")
+	if err := WriteTranscript(tr, "HDR", []Line{{Speaker: "others", Text: "Hostile spoken text"}}); err != nil {
+		t.Fatal(err)
+	}
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	input <- addEvent("add", tr)
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	instr, _ := f.call(1)
+	un, rest := untrustedBlock(t, instr)
+	if !strings.Contains(un, "Hostile spoken text") || strings.Contains(rest, "Hostile spoken text") {
+		t.Errorf("instructions:\n%s", instr)
+	}
+	input <- addEvent("list", "")
+	waitUntil(t, "list", func() bool { return hasInfo(v, "1. old-transcript.md (1 KB, transcript)") })
+	close(events)
+	<-done
+	data, err := os.ReadFile(notes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), ", earlier transcript") {
+		t.Errorf("notes sources line missing the suffix:\n%s", data)
+	}
 }

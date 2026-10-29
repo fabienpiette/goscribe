@@ -252,6 +252,8 @@ func docLine(d Doc) string {
 		line += ", via the librarian"
 	case "notes":
 		line += ", earlier notes"
+	case "transcript":
+		line += ", earlier transcript"
 	}
 	return line
 }
