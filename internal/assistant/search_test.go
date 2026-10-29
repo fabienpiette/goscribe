@@ -1,10 +1,12 @@
 package assistant
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"goscribe/internal/webpage"
 )
@@ -543,7 +545,7 @@ func TestQuestionLookupSimilarSkipped(t *testing.T) {
 }
 
 func TestQuestionLookupCleanedAndCapped(t *testing.T) {
-	long := strings.Repeat("word ", 200)
+	long := strings.Repeat("wörd ", 200)
 	f := &fakeThink{replies: []func() (string, error){
 		answer(`{"answer":"a","lookup":"  \n "}`),
 		answer(`{"answer":"a","lookup":"` + long + `"}`),
@@ -558,8 +560,8 @@ func TestQuestionLookupCleanedAndCapped(t *testing.T) {
 	close(events)
 	<-done
 	q := strings.TrimSpace(strings.SplitN(strings.SplitN(r.prompt(0), "Question: ", 2)[1], "\n", 2)[0])
-	if len(q) > maxQuery+3 {
-		t.Errorf("the lookup must be capped: %d bytes", len(q))
+	if n := utf8.RuneCountInString(q); n != maxQuery {
+		t.Errorf("the lookup must be capped at %d runes: %d runes, %d bytes", maxQuery, n, len(q))
 	}
 	if r.count() != 1 {
 		t.Errorf("a blank lookup must be ignored, research calls = %d", r.count())
@@ -603,5 +605,42 @@ func TestSearchRepeatSkipped(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("already asked notices = %d, want 2", n)
+	}
+}
+
+func TestQuestionLookupWhyCapped(t *testing.T) {
+	long := strings.Repeat("wörd ", 300)
+	f := &fakeThink{replies: []func() (string, error){answer(lookupAnswer), answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- Event{Kind: QuestionEvent, Text: long}
+	waitUntil(t, "research", func() bool { return r.count() == 1 })
+	close(events)
+	<-done
+	why := strings.SplitN(strings.SplitN(r.prompt(0), "Why it helps now: ", 2)[1], "\n", 2)[0]
+	if n := utf8.RuneCountInString(why); n != maxItem {
+		t.Errorf("the why must be capped at %d runes: got %d", maxItem, n)
+	}
+	if !strings.HasPrefix(why, "to answer the user's question: ") {
+		t.Errorf("the fixed prefix must stay readable: %q", why)
+	}
+}
+
+func TestSearchedWindowedInPromptNotInDedup(t *testing.T) {
+	var m Memory
+	for i := 1; i <= maxSearchedShown+5; i++ {
+		m.Searched = append(m.Searched, fmt.Sprintf("topic%02d", i))
+	}
+	instr, _ := CyclePrompt("", m, nil, nil, true, false, nil, nil)
+	if strings.Contains(instr, "- topic01\n") || strings.Contains(instr, "- topic05\n") {
+		t.Errorf("the oldest searches must be left out of the prompt:\n%s", instr)
+	}
+	if !strings.Contains(instr, "- topic06\n") || !strings.Contains(instr, fmt.Sprintf("- topic%02d\n", maxSearchedShown+5)) {
+		t.Errorf("the last %d searches must be listed:\n%s", maxSearchedShown, instr)
+	}
+	r := Reply{Lookups: Lookups{{Query: "topic01", Why: "x"}}}
+	if _, ok := m.TakeLookup(r, 0, 5); ok {
+		t.Error("a model lookup similar to a dropped search must still be rejected")
 	}
 }

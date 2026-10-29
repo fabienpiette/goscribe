@@ -130,6 +130,15 @@ func (m Memory) lookupsAsked() []string {
 	return append(slices.Clone(m.Asked), m.Searched...)
 }
 
+// lookupsShown is what the update prompt lists as already asked: every
+// model lookup and only the last maxSearchedShown /search queries, so the
+// prompt does not grow with a long meeting. Dedup (askedSimilar, the /search
+// repeat check) keeps using the full lists through lookupsAsked.
+func (m Memory) lookupsShown() []string {
+	searched := m.Searched[max(0, len(m.Searched)-maxSearchedShown):]
+	return append(slices.Clone(m.Asked), searched...)
+}
+
 func (m *Memory) askedSimilar(query string) bool {
 	for _, a := range m.lookupsAsked() {
 		if jaccard(a, query) >= similarQuery {

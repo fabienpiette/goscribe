@@ -502,7 +502,7 @@ func (s *state) questionLookup(text, question string) {
 		return
 	}
 	s.mem.Asked = append(s.mem.Asked, q)
-	s.queueUser(userAsk{Search: Lookup{Query: q, Why: "to answer the user's question: " + question, At: s.elapsed(time.Now()), Asker: "question"}})
+	s.queueUser(userAsk{Search: Lookup{Query: q, Why: cleanText("to answer the user's question: "+question, maxItem), At: s.elapsed(time.Now()), Asker: "question"}})
 }
 
 // interval is the wait between updates, doubled after each failure.

@@ -147,13 +147,16 @@ func lenientList[T any](data []byte) []T {
 
 // Caps keep the memory, and so every prompt, bounded over a long meeting.
 const (
-	maxSummary        = 2000
-	maxFinalSummary   = 6000
-	maxDecisions      = 20
-	maxOpenQuestions  = 15
-	maxNotCovered     = 15
-	maxActionItems    = 30
-	maxItem           = 300
+	maxSummary       = 2000
+	maxFinalSummary  = 6000
+	maxDecisions     = 20
+	maxOpenQuestions = 15
+	maxNotCovered    = 15
+	maxActionItems   = 30
+	maxItem          = 300
+	// maxSearchedShown is how many of the user's latest /search queries the
+	// update prompt lists; the full list stays for dedup.
+	maxSearchedShown  = 20
 	maxSuggestionsPer = 2 // fewer, sharper: a live feed is read at a glance
 	// Two suggestions sharing this share of their words are the same idea. A
 	// rephrasing keeps nearly all words; "who owns the rollback" and "who owns
