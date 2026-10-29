@@ -42,8 +42,6 @@ func AppendTranscript(path string, l Line) error {
 	return f.Close()
 }
 
-// WriteTranscript rewrites the whole transcript atomically: the header, then
-// every line. It starts the file and fixes lines already appended.
 // isTranscriptText says whether text is a transcript file: raw speech, so
 // never trusted background.
 func isTranscriptText(text string) bool {
@@ -51,6 +49,8 @@ func isTranscriptText(text string) bool {
 	return strings.TrimSuffix(first, "\r") == "# Transcript"
 }
 
+// WriteTranscript rewrites the whole transcript atomically: the header, then
+// every line. It starts the file and fixes lines already appended.
 func WriteTranscript(path, header string, lines []Line) error {
 	var b strings.Builder
 	b.WriteString("# Transcript\n\n" + header + "\n\n")
