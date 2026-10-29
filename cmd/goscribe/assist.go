@@ -88,8 +88,11 @@ The limit is 200 KB in total, counting -context and everything added.
 /search <question> asks the librarian to look something up in your sources
 now. It is unlimited, runs before the model's own lookups and a second one
 waits its turn; the answer shows as a Librarian line, feeds the updates and
-goes to ## Research in the notes. Without the librarian, the feed says why.
-A question the context can't answer may start a lookup the same way.
+goes to ## Research in the notes. An exact repeat of an earlier
+search is skipped, unless that search failed: type it again.
+Without the librarian, the feed says why.
+A question the context can't answer may start a lookup too, but that one
+counts toward max_lookups like the model's own.
 
 A muted side is not transcribed (its live session gets silence), so nothing
 from it reaches the model or the notes. Muting affects only assist; mute
@@ -428,9 +431,10 @@ func resolveLibrarian(explicit, flagOn bool, l config.Librarian, check func(conf
 	case explicit:
 		lib, err = check(l)
 		return lib, err == nil, "", false, err
-	case len(l.AllowedTools) == 0:
-		return l, false, "add read-only tools to librarian.allowed_tools in the config to use the librarian (see goscribe assist -h)", false, nil
-	case l.Enabled != nil && !*l.Enabled:
+	case !l.Wanted():
+		if len(l.AllowedTools) == 0 {
+			return l, false, "add read-only tools to librarian.allowed_tools in the config to use the librarian (see goscribe assist -h)", false, nil
+		}
 		return l, false, "the librarian is off (librarian.enabled: false in the config)", false, nil
 	}
 	lib, err = check(l)

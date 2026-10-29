@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,12 @@ func (s *state) search(text string) {
 	if s.c.Research == nil {
 		s.info(fmt.Sprintf("/search needs the librarian: %s", s.librarianOff("")))
 		return
+	}
+	for _, prev := range s.mem.Searched {
+		if strings.EqualFold(prev, q) {
+			s.info(fmt.Sprintf("📚 not looking up %q: already asked", q))
+			return
+		}
 	}
 	s.mem.Searched = append(s.mem.Searched, q)
 	s.queueUser(userAsk{Search: Lookup{Query: q, Why: "asked by the user during the meeting", At: at, Asker: "you"}})

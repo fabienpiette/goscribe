@@ -1,10 +1,14 @@
 package assistant
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"goscribe/internal/webpage"
 )
@@ -382,11 +386,11 @@ func TestQuestionStartsLookup(t *testing.T) {
 	}
 	close(events)
 	<-done
-	if len(mem.Searched) != 1 || mem.Searched[0] != "when did PROJ-123 ship" {
-		t.Errorf("Searched = %q", mem.Searched)
+	if len(mem.Asked) != 1 || mem.Asked[0] != "when did PROJ-123 ship" {
+		t.Errorf("Asked = %q, want the question's lookup (it counts)", mem.Asked)
 	}
-	if len(mem.Asked) != 0 {
-		t.Errorf("Asked = %q, want none", mem.Asked)
+	if len(mem.Searched) != 0 {
+		t.Errorf("Searched = %q, want only the user's /search", mem.Searched)
 	}
 }
 
@@ -423,7 +427,10 @@ func TestQuestionLookupQueuesBeforeModelLookup(t *testing.T) {
 	<-done
 }
 
-func TestQuestionLookupIgnoresLimit(t *testing.T) {
+// A question's lookup is model-written, so it counts toward the limit: with
+// the limit used by a model lookup it is skipped, with the notice, and the
+// librarian is not called for it.
+func TestQuestionLookupSkippedAtLimit(t *testing.T) {
 	f := &fakeThink{replies: []func() (string, error){
 		lookupReply("When was the Globex contract signed?"),
 		answer(lookupAnswer),
@@ -434,11 +441,31 @@ func TestQuestionLookupIgnoresLimit(t *testing.T) {
 	events <- line("me", twelveWords)
 	waitUntil(t, "limit used", func() bool { return r.count() == 1 })
 	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
-	waitUntil(t, "question lookup ran", func() bool { return r.count() == 2 })
+	waitUntil(t, "limit notice", func() bool { return hasInfo(v, "📚 lookup limit reached (1)") })
 	close(events)
 	<-done
-	if hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "lookup limit reached") }) {
-		t.Error("a question's lookup must not hit the lookup limit")
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1 (the question lookup must be skipped)", n)
+	}
+}
+
+// A question's lookup that ran takes a slot: a later model lookup is blocked.
+func TestQuestionLookupBlocksModelLookup(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		answer(lookupAnswer),
+		lookupReply("When was the Globex contract signed?"),
+		answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 1, nil)
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "question lookup ran", func() bool { return r.count() == 1 })
+	events <- line("me", twelveWords)
+	waitUntil(t, "limit notice", func() bool { return hasInfo(v, "📚 lookup limit reached (1)") })
+	close(events)
+	<-done
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1 (the model lookup must be blocked)", n)
 	}
 }
 
@@ -520,7 +547,7 @@ func TestQuestionLookupSimilarSkipped(t *testing.T) {
 }
 
 func TestQuestionLookupCleanedAndCapped(t *testing.T) {
-	long := strings.Repeat("word ", 200)
+	long := strings.Repeat("wörd ", 200)
 	f := &fakeThink{replies: []func() (string, error){
 		answer(`{"answer":"a","lookup":"  \n "}`),
 		answer(`{"answer":"a","lookup":"` + long + `"}`),
@@ -535,8 +562,8 @@ func TestQuestionLookupCleanedAndCapped(t *testing.T) {
 	close(events)
 	<-done
 	q := strings.TrimSpace(strings.SplitN(strings.SplitN(r.prompt(0), "Question: ", 2)[1], "\n", 2)[0])
-	if len(q) > maxQuery+3 {
-		t.Errorf("the lookup must be capped: %d bytes", len(q))
+	if n := utf8.RuneCountInString(q); n != maxQuery {
+		t.Errorf("the lookup must be capped at %d runes: %d runes, %d bytes", maxQuery, n, len(q))
 	}
 	if r.count() != 1 {
 		t.Errorf("a blank lookup must be ignored, research calls = %d", r.count())
@@ -551,4 +578,240 @@ func items(v *recordingView, badge string) []Item {
 		}
 	}
 	return out
+}
+
+func TestSearchRepeatSkipped(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+	input <- searchEvent("when did the launch ship?")
+	input <- searchEvent("  WHEN did  the launch SHIP?  ")
+	const notice = "📚 not looking up \"when did the launch ship?\": already asked"
+	waitUntil(t, "repeat notice", func() bool { return hasInfo(v, notice) })
+	// A different search still runs.
+	input <- searchEvent("who owns the launch?")
+	waitUntil(t, "second lookup", func() bool { return r.count() == 2 })
+	close(events)
+	<-done
+	if r.count() != 2 {
+		t.Errorf("research calls = %d, want 2", r.count())
+	}
+	n := 0
+	for _, it := range v.Items() {
+		if it.Kind == ItemInfo && strings.Contains(it.Text, "already asked") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("already asked notices = %d, want 2", n)
+	}
+}
+
+func TestQuestionLookupWhyCapped(t *testing.T) {
+	long := strings.Repeat("wörd ", 300)
+	f := &fakeThink{replies: []func() (string, error){answer(lookupAnswer), answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- Event{Kind: QuestionEvent, Text: long}
+	waitUntil(t, "research", func() bool { return r.count() == 1 })
+	close(events)
+	<-done
+	why := strings.SplitN(strings.SplitN(r.prompt(0), "Why it helps now: ", 2)[1], "\n", 2)[0]
+	if n := utf8.RuneCountInString(why); n != maxItem {
+		t.Errorf("the why must be capped at %d runes: got %d", maxItem, n)
+	}
+	if !strings.HasPrefix(why, "to answer the user's question: ") {
+		t.Errorf("the fixed prefix must stay readable: %q", why)
+	}
+}
+
+func TestSearchedWindowedInPromptNotInDedup(t *testing.T) {
+	var m Memory
+	for i := 1; i <= maxSearchedShown+5; i++ {
+		m.Searched = append(m.Searched, fmt.Sprintf("topic%02d", i))
+	}
+	instr, _ := CyclePrompt("", m, nil, nil, true, false, nil, nil)
+	if strings.Contains(instr, "- topic01\n") || strings.Contains(instr, "- topic05\n") {
+		t.Errorf("the oldest searches must be left out of the prompt:\n%s", instr)
+	}
+	if !strings.Contains(instr, "- topic06\n") || !strings.Contains(instr, fmt.Sprintf("- topic%02d\n", maxSearchedShown+5)) {
+		t.Errorf("the last %d searches must be listed:\n%s", maxSearchedShown, instr)
+	}
+	r := Reply{Lookups: Lookups{{Query: "topic01", Why: "x"}}}
+	if _, ok := m.TakeLookup(r, 0, 5); ok {
+		t.Error("a model lookup similar to a dropped search must still be rejected")
+	}
+}
+
+// questionPromptOf returns the instructions of the first call that answers
+// a typed question.
+func questionPromptOf(f *fakeThink) string {
+	for i := 0; i < f.count(); i++ {
+		if ins, _ := f.call(i); strings.Contains(ins, "The user's question:") {
+			return ins
+		}
+	}
+	return ""
+}
+
+// With the limit reached the question prompt must not tell the model to say
+// the librarian is looking: the lookup would be refused. Below the limit
+// (same run, limit 5) the rule is there, so the check can fail.
+func TestQuestionPromptLookupRuleFollowsLimit(t *testing.T) {
+	const rule = "Then say in \"answer\" that the librarian is looking."
+	for _, tc := range []struct {
+		name  string
+		limit int
+		want  bool
+	}{{"below limit", 5, true}, {"at limit", 1, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeThink{replies: []func() (string, error){
+				lookupReply("When was the Globex contract signed?"),
+				answer(lookupAnswer),
+				answer(`{"summary":"s"}`)}}
+			r := &fakeResearch{reply: answer(foundT1)}
+			v := &recordingView{}
+			events, input, done := startSearchRun(t, f, v, r, tc.limit, nil)
+			events <- line("me", twelveWords)
+			waitUntil(t, "model lookup", func() bool { return r.count() == 1 })
+			input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+			waitUntil(t, "question prompt", func() bool { return questionPromptOf(f) != "" })
+			got := strings.Contains(questionPromptOf(f), rule)
+			close(events)
+			<-done
+			if got != tc.want {
+				t.Errorf("question prompt carries the lookup rule = %v, want %v (limit %d, Asked 1)", got, tc.want, tc.limit)
+			}
+		})
+	}
+}
+
+// A failed /search is not "already asked": typing it again retries it.
+func TestSearchRetriedAfterFailure(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	var mu sync.Mutex
+	calls := 0
+	r := &fakeResearch{}
+	r.reply = func() (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return "", errors.New("librarian timed out")
+		}
+		return foundT1, nil
+	}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "failure notice", func() bool { return hasNotice(v, "⚠ librarian failed: librarian timed out") })
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "retry answer", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "LIBRARIAN" }) })
+	close(events)
+	<-done
+	if n := r.count(); n != 2 {
+		t.Errorf("research calls = %d, want 2 (the retry must run)", n)
+	}
+	if hasInfo(v, "📚 not looking up \"when did the launch ship?\": already asked") {
+		t.Error("the retry was refused as already asked")
+	}
+}
+
+// Only the user's own /search is forgotten on failure: a failed question
+// lookup stays counted in Asked.
+func TestFailedQuestionLookupStaysCounted(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(lookupAnswer), answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: func() (string, error) { return "", errors.New("boom") }}
+	v := &recordingView{}
+	var mem Memory
+	events, input, done := startSearchRun(t, f, v, r, 5, func(c *Config) {
+		c.Final = func(m Memory, _ string, _ bool) { mem = m }
+	})
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "failure notice", func() bool { return hasNotice(v, "⚠ librarian failed: boom") })
+	close(events)
+	<-done
+	if len(mem.Asked) != 1 {
+		t.Errorf("Asked = %q, want the failed question lookup still counted", mem.Asked)
+	}
+}
+
+// A question lookup skipped for the limit says so every time: unlike the
+// model's lookups, the notice is not shown once.
+func TestQuestionLookupLimitNoticeEveryTime(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		answer(lookupAnswer),
+		answer(`{"answer":"Not in the notes.","source":"general","lookup":"who approved the budget"}`),
+		answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 1, nil)
+	events <- line("me", twelveWords)
+	waitUntil(t, "limit used", func() bool { return r.count() == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "when did the first release ship?"}
+	input <- Event{Kind: QuestionEvent, Text: "who approved the budget?"}
+	const notice = "📚 lookup limit reached (1)"
+	waitUntil(t, "two notices", func() bool {
+		n := 0
+		for _, it := range v.Items() {
+			if it.Kind == ItemInfo && it.Text == notice {
+				n++
+			}
+		}
+		return n == 2
+	})
+	close(events)
+	<-done
+	if n := r.count(); n != 1 {
+		t.Errorf("research calls = %d, want 1", n)
+	}
+}
+
+// An exact repeat is matched against every search typed, not only the last
+// maxSearchedShown that the prompt lists.
+func TestSearchRepeatMatchesFullList(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	total := maxSearchedShown + 3
+	for i := 1; i <= total; i++ {
+		input <- searchEvent(fmt.Sprintf("topic%02d", i))
+	}
+	waitUntil(t, "all lookups", func() bool { return r.count() == total })
+	input <- searchEvent("topic01")
+	waitUntil(t, "repeat notice", func() bool { return hasInfo(v, "📚 not looking up \"topic01\": already asked") })
+	close(events)
+	<-done
+	if n := r.count(); n != total {
+		t.Errorf("research calls = %d, want %d (the repeat must not run)", n, total)
+	}
+}
+
+// Only an exact repeat is refused: a search that is merely similar to an
+// earlier one (askedSimilar would drop it as a model lookup) still runs.
+func TestSearchSimilarStillRuns(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+	var m Memory
+	m.Searched = []string{"when did the launch ship?"}
+	if !m.askedSimilar("when did the launch ship late") {
+		t.Fatal("the second search must be similar enough to trip askedSimilar")
+	}
+	input <- searchEvent("when did the launch ship late")
+	waitUntil(t, "second lookup", func() bool { return r.count() == 2 })
+	close(events)
+	<-done
+	if hasItem(v, func(it Item) bool { return strings.Contains(it.Text, "already asked") }) {
+		t.Error("a similar search must not be reported as already asked")
+	}
 }
