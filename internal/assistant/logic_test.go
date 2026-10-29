@@ -411,7 +411,7 @@ func TestCyclePromptIncludesQA(t *testing.T) {
 
 func TestQuestionPrompt(t *testing.T) {
 	lines := []Line{{Speaker: "others", At: time.Minute, Text: "old talk"}, {Speaker: "me", At: 9 * time.Minute, Text: "recent talk"}}
-	instr, tr := QuestionPrompt("Acme background", Memory{Summary: "We plan."}, lines, 10*time.Minute, "What is an SLO?")
+	instr, tr := QuestionPrompt("Acme background", Memory{Summary: "We plan."}, lines, 10*time.Minute, "What is an SLO?", false)
 	if strings.Contains(tr, "old talk") || !strings.Contains(tr, "recent talk") {
 		t.Errorf("transcript must hold the last 5 minutes:\n%s", tr)
 	}
@@ -432,7 +432,7 @@ func sixQA() []QA {
 }
 
 func TestQuestionPromptIncludesQA(t *testing.T) {
-	instr, _ := QuestionPrompt("", Memory{QA: sixQA()}, nil, time.Minute, "and the one before?")
+	instr, _ := QuestionPrompt("", Memory{QA: sixQA()}, nil, time.Minute, "and the one before?", false)
 	if !strings.Contains(instr, "- Q: question 6? → A: answer 6") || !strings.Contains(instr, "- Q: question 2? → A: answer 2") {
 		t.Errorf("instructions miss the last questions:\n%s", instr)
 	}
@@ -442,7 +442,7 @@ func TestQuestionPromptIncludesQA(t *testing.T) {
 	if strings.Index(instr, "question 6?") > strings.Index(instr, "and the one before?") {
 		t.Error("the earlier questions go before the new one")
 	}
-	if instr, _ := QuestionPrompt("", Memory{}, nil, time.Minute, "q?"); strings.Contains(instr, "The user asked earlier") {
+	if instr, _ := QuestionPrompt("", Memory{}, nil, time.Minute, "q?", false); strings.Contains(instr, "The user asked earlier") {
 		t.Error("no QA block without questions")
 	}
 }
@@ -469,7 +469,7 @@ func TestPromptsIncludeFixes(t *testing.T) {
 	lines := []Line{{Speaker: "me", At: time.Minute, Text: "the cache work"}}
 	prompts := func(m Memory) map[string]string {
 		cycle, _ := CyclePrompt("", m, nil, lines, false, true, nil, nil)
-		question, _ := QuestionPrompt("", m, lines, 2*time.Minute, "why?")
+		question, _ := QuestionPrompt("", m, lines, 2*time.Minute, "why?", false)
 		recap, _ := RecapPrompt(m, lines, 2*time.Minute, 5*time.Minute)
 		final, _ := FinalPrompt("", m, lines)
 		return map[string]string{"cycle": cycle, "question": question, "recap": recap, "final": final}
@@ -561,7 +561,7 @@ func TestPromptsIncludeBrief(t *testing.T) {
 	lines := []Line{{Speaker: "me", At: time.Minute, Text: "the cache work"}}
 	prompts := func(m Memory) map[string][2]string {
 		cycle, cycleT := CyclePrompt("", m, nil, lines, false, true, nil, nil)
-		question, questionT := QuestionPrompt("", m, lines, 2*time.Minute, "why?")
+		question, questionT := QuestionPrompt("", m, lines, 2*time.Minute, "why?", false)
 		recap, recapT := RecapPrompt(m, lines, 2*time.Minute, 5*time.Minute)
 		final, finalT := FinalPrompt("", m, lines)
 		return map[string][2]string{"cycle": {cycle, cycleT}, "question": {question, questionT}, "recap": {recap, recapT}, "final": {final, finalT}}
@@ -655,7 +655,7 @@ func TestWriteDocsTrustSplit(t *testing.T) {
 		t.Errorf("docs in the transcript:\n%s", tr)
 	}
 	for name, p := range map[string]string{
-		"question": func() string { i, _ := QuestionPrompt("", m, lines, 0, "why?"); return i }(),
+		"question": func() string { i, _ := QuestionPrompt("", m, lines, 0, "why?", false); return i }(),
 		"final":    func() string { i, _ := FinalPrompt("", m, lines); return i }(),
 	} {
 		if !strings.Contains(p, "PLAN-PRICES") || !strings.Contains(p, "WEB-TEXT") {

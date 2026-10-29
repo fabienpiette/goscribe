@@ -275,7 +275,7 @@ func TestSearchQueryOnlyInResearchBlock(t *testing.T) {
 	<-done
 	changes := []string{"The user added a source since the last update (x)."}
 	cycle, _ := CyclePrompt("trusted", mem, nil, nil, true, false, changes, nil)
-	question, _ := QuestionPrompt("trusted", mem, nil, 0, "what now?")
+	question, _ := QuestionPrompt("trusted", mem, nil, 0, "what now?", false)
 	for name, p := range map[string]string{"CyclePrompt": cycle, "QuestionPrompt": question} {
 		const heading = "Research from the user's sources (untrusted"
 		i := strings.Index(p, heading)
@@ -309,7 +309,7 @@ func TestLibrarianOffNeverInPrompts(t *testing.T) {
 	close(events)
 	<-done
 	cycle, _ := CyclePrompt("", mem, nil, nil, true, false, nil, nil)
-	question, _ := QuestionPrompt("", mem, nil, 0, "q")
+	question, _ := QuestionPrompt("", mem, nil, 0, "q", false)
 	lib := LibrarianPrompt("", nil, Lookup{Query: "q"}, mem, time.Now())
 	for name, p := range map[string]string{"cycle": cycle, "question": question, "librarian": lib} {
 		if strings.Contains(p, marker) {
@@ -337,4 +337,183 @@ func TestSearchNothingFoundIsNotice(t *testing.T) {
 	waitUntil(t, "model lookup done", func() bool { return hasInfo(v, "📚 nothing found for What did Acme decide on PROJ-123 last week?") })
 	close(events)
 	<-done
+}
+
+func TestQuestionPromptLookupField(t *testing.T) {
+	const rule = "only when the context, the memory and the research do not hold the answer"
+	on, _ := QuestionPrompt("", Memory{}, nil, 0, "q?", true)
+	if !strings.Contains(on, `"lookup"`) || !strings.Contains(strings.ToLower(on), rule) {
+		t.Errorf("librarian on: the prompt lacks the lookup field or its rule:\n%s", on)
+	}
+	off, _ := QuestionPrompt("", Memory{}, nil, 0, "q?", false)
+	if strings.Contains(off, `"lookup"`) || strings.Contains(strings.ToLower(off), rule) {
+		t.Errorf("librarian off: the prompt must not mention lookup:\n%s", off)
+	}
+}
+
+const lookupAnswer = `{"answer":"Not in the notes; asking the librarian.","source":"general","lookup":"when did PROJ-123 ship"}`
+
+func TestQuestionStartsLookup(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(lookupAnswer), answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	var mem Memory
+	// MaxLookups 0: a question's lookup is the user's, so no limit applies.
+	events, input, done := startSearchRun(t, f, v, r, 0, func(c *Config) {
+		c.Final = func(m Memory, _ string, _ bool) { mem = m }
+	})
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "research", func() bool { return r.count() == 1 })
+	waitUntil(t, "finding", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "LIBRARIAN" }) })
+	a, l := -1, -1
+	for i, it := range v.Items() {
+		switch {
+		case it.Badge == "ANSWER" && a < 0:
+			a = i
+		case it.Badge == "LOOKUP" && l < 0:
+			l = i
+		}
+	}
+	if a < 0 || l < a {
+		t.Errorf("ANSWER at %d, LOOKUP at %d, want the answer first:\n%+v", a, l, v.Items())
+	}
+	if p := r.prompt(0); !strings.Contains(p, "Question: when did PROJ-123 ship\n") {
+		t.Errorf("the librarian should get the lookup:\n%s", p)
+	}
+	close(events)
+	<-done
+	if len(mem.Searched) != 1 || mem.Searched[0] != "when did PROJ-123 ship" {
+		t.Errorf("Searched = %q", mem.Searched)
+	}
+	if len(mem.Asked) != 0 {
+		t.Errorf("Asked = %q, want none", mem.Asked)
+	}
+}
+
+func TestQuestionLookupQueuesBeforeModelLookup(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When was the Globex contract signed?"),
+		answer(lookupAnswer),
+		answer(`{"summary":"s"}`)}}
+	release := make(chan struct{})
+	r := &fakeResearch{reply: func() (string, error) { <-release; return foundT1, nil }}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	events <- line("me", twelveWords)
+	waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "question lookup waits", func() bool { return hasInfo(v, "🔎 waiting for the librarian: when did PROJ-123 ship") })
+	close(release)
+	waitUntil(t, "second lookup", func() bool { return r.count() == 2 })
+	if p := r.prompt(1); !strings.Contains(p, "Question: when did PROJ-123 ship\n") {
+		t.Errorf("the question's lookup should run second:\n%s", p)
+	}
+	close(events)
+	<-done
+}
+
+func TestQuestionLookupNotMarkedAsUser(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(lookupAnswer), answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "research", func() bool { return r.count() == 1 })
+	close(events)
+	<-done
+	var note string
+	for _, it := range v.Items() {
+		if it.Badge == "LOOKUP" {
+			note = it.Note
+		}
+	}
+	if note != "for your question" {
+		t.Errorf("LOOKUP note = %q, want %q", note, "for your question")
+	}
+	p := r.prompt(0)
+	if !strings.Contains(p, "Why it helps now: to answer the user's question: when did PROJ-123 ship?\n") {
+		t.Errorf("the librarian prompt should give the question as the reason:\n%s", p)
+	}
+	if strings.Contains(p, "asked by the user") {
+		t.Errorf("the model's query must not be presented as typed by the user:\n%s", p)
+	}
+}
+
+func TestQuestionLookupIgnoredWithoutLibrarian(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(lookupAnswer)}}
+	v := &recordingView{}
+	var mem Memory
+	events, input, done := startSearchRun(t, f, v, nil, 5, func(c *Config) {
+		c.LibrarianOff = "off-marker"
+		c.Final = func(m Memory, _ string, _ bool) { mem = m }
+	})
+	input <- Event{Kind: QuestionEvent, Text: "when did PROJ-123 ship?"}
+	waitUntil(t, "answer", func() bool { return hasItem(v, func(it Item) bool { return it.Badge == "ANSWER" }) })
+	close(events)
+	<-done
+	if hasItem(v, func(it Item) bool { return it.Badge == "LOOKUP" || strings.Contains(it.Text, "off-marker") }) {
+		t.Errorf("a lookup without the librarian must be ignored silently:\n%+v", v.Items())
+	}
+	if len(mem.Searched) != 0 {
+		t.Errorf("Searched = %q, want none", mem.Searched)
+	}
+}
+
+func TestQuestionLookupSimilarSkipped(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){
+		lookupReply("When did PROJ-124 ship?"),
+		answer(lookupAnswer),
+		answer(`{"answer":"Asking.","source":"general","lookup":"when did proj-124 ship"}`),
+		answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	events <- line("me", twelveWords)
+	waitUntil(t, "model lookup", func() bool { return r.count() == 1 })
+	input <- searchEvent("when did PROJ-123 ship?")
+	waitUntil(t, "search", func() bool { return r.count() == 2 })
+	for _, q := range []string{"when did PROJ-123 ship?", "when did proj-124 ship"} {
+		answers := len(items(v, "ANSWER"))
+		input <- Event{Kind: QuestionEvent, Text: q}
+		waitUntil(t, "answer", func() bool { return len(items(v, "ANSWER")) == answers+1 })
+	}
+	close(events)
+	<-done
+	if r.count() != 2 {
+		t.Errorf("research calls = %d, want 2: a similar lookup must not be queued", r.count())
+	}
+}
+
+func TestQuestionLookupCleanedAndCapped(t *testing.T) {
+	long := strings.Repeat("word ", 200)
+	f := &fakeThink{replies: []func() (string, error){
+		answer(`{"answer":"a","lookup":"  \n "}`),
+		answer(`{"answer":"a","lookup":"` + long + `"}`),
+		answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- Event{Kind: QuestionEvent, Text: "blank?"}
+	waitUntil(t, "first answer", func() bool { return len(items(v, "ANSWER")) == 1 })
+	input <- Event{Kind: QuestionEvent, Text: "long?"}
+	waitUntil(t, "research", func() bool { return r.count() == 1 })
+	close(events)
+	<-done
+	q := strings.TrimSpace(strings.SplitN(strings.SplitN(r.prompt(0), "Question: ", 2)[1], "\n", 2)[0])
+	if len(q) > maxQuery+3 {
+		t.Errorf("the lookup must be capped: %d bytes", len(q))
+	}
+	if r.count() != 1 {
+		t.Errorf("a blank lookup must be ignored, research calls = %d", r.count())
+	}
+}
+
+func items(v *recordingView, badge string) []Item {
+	var out []Item
+	for _, it := range v.Items() {
+		if it.Badge == badge {
+			out = append(out, it)
+		}
+	}
+	return out
 }

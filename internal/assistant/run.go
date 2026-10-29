@@ -418,7 +418,7 @@ func (s *state) maybeAsk(now time.Time) {
 	gen, think, answers := s.askGen, s.c.Think, s.answers
 	s.asking, s.askStart = true, now
 	at := s.elapsed(now)
-	instructions, transcript := QuestionPrompt(s.c.Context, s.mem, s.lines, at, q)
+	instructions, transcript := QuestionPrompt(s.c.Context, s.mem, s.lines, at, q, s.c.Research != nil)
 	go func() {
 		answer, err := think(instructions, transcript)
 		select {
@@ -437,6 +437,7 @@ func (s *state) finishQuestion(r qaResult) {
 	var reply struct {
 		Answer string `json:"answer"`
 		Source string `json:"source"`
+		Lookup string `json:"lookup"`
 	}
 	err := r.err
 	if err == nil {
@@ -467,6 +468,20 @@ func (s *state) finishQuestion(r qaResult) {
 	it.Plain = line
 	s.show(it)
 	_ = s.writeNotes(false) // a failure is shown in the feed
+	s.questionLookup(reply.Lookup, r.question)
+}
+
+// questionLookup queues the librarian search an answer asked for. The text is
+// the model's, written from the transcript: it is cleaned like a /search and
+// never shown as typed by the user. Without the librarian it is ignored
+// silently, since the user did not ask for a search.
+func (s *state) questionLookup(text, question string) {
+	q := cleanText(text, maxQuery)
+	if q == "" || s.c.Research == nil || s.ending || s.mem.askedSimilar(q) {
+		return
+	}
+	s.mem.Searched = append(s.mem.Searched, q)
+	s.queueUser(userAsk{Search: Lookup{Query: q, Why: "to answer the user's question: " + question, At: s.elapsed(time.Now()), Asker: "question"}})
 }
 
 // interval is the wait between updates, doubled after each failure.
