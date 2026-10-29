@@ -62,7 +62,8 @@ nothing changes until you accept. /fix lists the fixes, /fix rm n stops one for
 new lines. Live speech-to-text keyterms are not updated mid-meeting.
 
 Naming an earlier assist notes file with -context restores its fixes and
-briefs; a folder restores nothing.
+briefs and keeps the file as untrusted reference data, not trusted context; a
+folder restores nothing.
 
 /brief <text> gives the model a standing instruction or fact, trusted and sent
 with every update, question, recap and the final notes: /brief focus on risks
@@ -78,7 +79,8 @@ fetched, converted to Markdown and saved in <notes name>-sources/<slug>.md
 login (Google Docs, Notion, Linear and the like, any 401 or 403, a sign-in
 redirect) go to the librarian when -librarian is on, which reads them with its
 read-only tools; without it, the feed explains how to set it up. Naming an
-earlier notes file restores its fixes and briefs, a folder restores nothing.
+earlier notes file restores its fixes and briefs and is kept as untrusted
+reference data; a folder restores nothing.
 The limit is 200 KB in total, counting -context and everything added.
 
 A muted side is not transcribed (its live session gets silence), so nothing
@@ -234,13 +236,13 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	var background string
-	var contextFiles []string
-	if *contextPath != "" {
-		background, contextFiles, err = assistant.LoadContext(*contextPath)
-		if err != nil {
-			return usageErr("context: %v", err)
-		}
+	background, contextFiles, contextDocs, err := loadContextArg(*contextPath)
+	if err != nil {
+		return usageErr("context: %v", err)
+	}
+	ctxBytes := len(background)
+	for _, d := range contextDocs {
+		ctxBytes += len(d.Text)
 	}
 	// An earlier assist notes file named by -context gives back its fixes and
 	// briefs; a parse error is a startup notice and the file stays plain context.
@@ -325,7 +327,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 		// Bubble Tea reads the keys: Alt+m/s/w come back on screenKeys.
 		screenKeys = make(chan string, 8)
 		toggle = screenKeys
-		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, len(background))
+		notices = startupNotices(header, notes, transcript, tuiHint, tooLong, ctxBytes)
 		if restoreNotice != "" {
 			notices = append(notices, restoreNotice)
 		}
@@ -338,7 +340,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 			keys = fmt.Sprintf("%s to mute or unmute, %s for a recap of the last %s, Ctrl+C to stop",
 				muteHint, recapHint, assistant.WindowLabel(recapWindow))
 		}
-		for _, line := range startupNotices(header, notes, transcript, keys, tooLong, len(background)) {
+		for _, line := range startupNotices(header, notes, transcript, keys, tooLong, ctxBytes) {
 			fmt.Fprintln(stdout, line)
 		}
 		if restoreNotice != "" {
@@ -352,6 +354,7 @@ func runAssist(args []string, stdout, stderr io.Writer) int {
 	events := streamSides(ctx, force, sides, opts, local, toggle)
 	acfg := assistant.Config{
 		Context:     background,
+		Docs:        contextDocs,
 		Notes:       notes,
 		Transcript:  transcript,
 		Header:      header,
@@ -705,6 +708,28 @@ func assistantEvent(speaker string, e realtime.Event) assistant.Event {
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return line
+}
+
+// loadContextArg reads what -context names. An earlier assist notes file is
+// not trusted background: its text comes back as a doc (Via "notes"), a
+// source the model may cite but that stays in the untrusted block, and the
+// background is empty. A folder, or a file that is not assist notes, is the
+// trusted background as before. An empty path loads nothing.
+func loadContextArg(path string) (background string, files []string, docs []assistant.Doc, err error) {
+	if path == "" {
+		return "", nil, nil, nil
+	}
+	text, files, err := assistant.LoadContext(path)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if info, serr := os.Stat(path); serr == nil && !info.IsDir() {
+		if _, ok, _ := assistant.LoadRestore(path); ok {
+			base := filepath.Base(path)
+			return "", nil, []assistant.Doc{{Name: base, Title: base, Origin: path, Via: "notes", Text: text}}, nil
+		}
+	}
+	return text, files, nil, nil
 }
 
 // restoreFromContext reads the fixes and briefs of an earlier assist notes

@@ -596,3 +596,64 @@ func TestRunAnswerCitesAddedPage(t *testing.T) {
 	close(events)
 	<-done
 }
+
+func TestRunAddNotesIsUntrusted(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`), answer(`{"summary":"s2"}`)}}
+	v := &recordingView{}
+	events, input, done, notes := startAddRun(t, f, v, time.Hour, "")
+	old := filepath.Join(t.TempDir(), "standup.md")
+	mustWrite(t, old, []byte(Render(Memory{
+		Summary: "Globex wants a refund.",
+		Briefs:  []Brief{{Text: "Sam is the PM"}},
+	}, "h", false, 0)), 0644)
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	input <- addEvent("add", old)
+	waitUntil(t, "restore", func() bool { return hasInfo(v, "↺ restored 1 brief from standup.md") })
+	waitUntil(t, "second update", func() bool { return f.count() == 2 })
+	instr, _ := f.call(1)
+	un, rest := untrustedBlock(t, instr)
+	if !strings.Contains(un, "Globex wants a refund.") || !strings.Contains(un, "### file: standup.md") {
+		t.Errorf("untrusted block:\n%s", un)
+	}
+	if strings.Contains(rest, "Globex wants a refund.") {
+		t.Errorf("notes text leaked outside the untrusted block:\n%s", rest)
+	}
+	if !strings.Contains(rest, "Sam is the PM") {
+		t.Errorf("the restored brief must stay trusted:\n%s", rest)
+	}
+	input <- addEvent("list", "")
+	waitUntil(t, "list", func() bool { return hasInfo(v, "1. standup.md (1 KB, notes)") })
+	close(events)
+	<-done
+	data, err := os.ReadFile(notes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), ", earlier notes") {
+		t.Errorf("notes sources line missing the suffix:\n%s", data)
+	}
+}
+
+func TestRunConfigDocsSeeded(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	v := &recordingView{}
+	fastTimers(t)
+	notes := filepath.Join(t.TempDir(), "notes.md")
+	events, input := make(chan Event), make(chan Event)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(Config{Engine: "fake", Interval: time.Hour, Think: f.think, View: v, Input: input, Notes: notes,
+			Transcript: TranscriptPath(notes), Docs: []Doc{{Name: "old.md", Title: "old.md", Origin: "/x/old.md", Via: "notes",
+				Text: "Globex wants a refund."}}}, events)
+	}()
+	events <- line("others", twelveWords)
+	waitUntil(t, "first update", func() bool { return f.count() == 1 })
+	instr, _ := f.call(0)
+	un, rest := untrustedBlock(t, instr)
+	if !strings.Contains(un, "Globex wants a refund.") || strings.Contains(rest, "Globex wants a refund.") {
+		t.Errorf("seeded doc:\n%s", instr)
+	}
+	close(events)
+	<-done
+}

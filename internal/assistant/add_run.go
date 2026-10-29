@@ -31,7 +31,8 @@ func (s *state) add(r AddRequest) {
 }
 
 // addLocal adds a local file or folder as a trusted doc. A file that is an
-// assist notes file also puts its briefs and fixes back in force.
+// assist notes file is added as untrusted reference data instead, and its
+// briefs and fixes are put back in force.
 func (s *state) addLocal(target string) {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -79,19 +80,29 @@ func (s *state) addLocal(target string) {
 		names = append(names, filepath.ToSlash(rel))
 	}
 	d := Doc{Name: strings.Join(names, ", "), Title: Clean(base), Origin: path, Via: "file", Text: CleanDoc(text)}
+	var restored Restored
+	notes, restoreErr := false, error(nil)
+	if !info.IsDir() {
+		restored, notes, restoreErr = LoadRestore(path)
+	}
+	if notes {
+		// Model-written text and answers from documents written by others:
+		// reference data, like a web page. Only its briefs and fixes, which the
+		// user typed, come back as trusted.
+		d.Via, d.Name = "notes", Clean(base)
+		names = []string{d.Name}
+	}
 	if !s.addDoc(d) {
 		return
 	}
 	for _, n := range names {
 		s.addSource(n)
 	}
-	if info.IsDir() {
-		return
-	}
-	if r, ok, err := LoadRestore(path); err != nil {
-		s.info(fmt.Sprintf("⚠ %s: %s; nothing restored", base, err))
-	} else if ok {
-		s.restore(r, base)
+	switch {
+	case restoreErr != nil:
+		s.info(fmt.Sprintf("⚠ %s: %s; nothing restored", base, restoreErr))
+	case notes:
+		s.restore(restored, base)
 	}
 }
 

@@ -89,6 +89,9 @@ type Config struct {
 	// at the start; RestoreFrom is the file name shown in the feed.
 	Restore     *Restored
 	RestoreFrom string
+	// Docs are sources that are there from the start and are not trusted, such
+	// as an earlier notes file named by -context. They count toward the limit.
+	Docs []Doc
 	// Fetch reads a public web page for /add; nil means pages can't be added.
 	Fetch func(ctx context.Context, url string) (webpage.Page, error)
 	// SourcesDir is where /add saves a copy of each page ("" = no copy).
@@ -137,6 +140,11 @@ func Run(c Config, events <-chan Event) error {
 	s.header = c.Header + " · started " + s.start.Format("2006-01-02 15:04:05")
 	ticker := time.NewTicker(Tick)
 	defer ticker.Stop()
+	for _, d := range c.Docs {
+		d.Text = CleanDoc(d.Text)
+		s.mem.Docs = append(s.mem.Docs, d)
+		s.addSource(d.Name)
+	}
 	if c.Restore != nil {
 		s.restore(*c.Restore, c.RestoreFrom)
 	}

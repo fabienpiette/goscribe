@@ -250,6 +250,8 @@ func docLine(d Doc) string {
 		line += ", web page"
 	case "librarian":
 		line += ", via the librarian"
+	case "notes":
+		line += ", earlier notes"
 	}
 	return line
 }

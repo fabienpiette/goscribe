@@ -1082,3 +1082,29 @@ func TestAssistFolderRestoresNothing(t *testing.T) {
 		t.Errorf("folder: %v, %q, %q, %v", r, from, terms, err)
 	}
 }
+
+func TestLoadContextArgNotesIsADoc(t *testing.T) {
+	dir := t.TempDir()
+	notes := filepath.Join(dir, "standup.md")
+	mustWrite(t, notes, []byte(assistant.Render(assistant.Memory{Summary: "Globex wants a refund."}, "h", false, 0)), 0644)
+	bg, files, docs, err := loadContextArg(notes)
+	if err != nil || bg != "" || len(files) != 0 || len(docs) != 1 {
+		t.Fatalf("bg = %q, files = %q, docs = %d, err = %v", bg, files, len(docs), err)
+	}
+	d := docs[0]
+	if d.Via != "notes" || d.Trusted() || d.Name != "standup.md" || d.Origin != notes || !strings.Contains(d.Text, "Globex wants a refund.") {
+		t.Errorf("doc = %+v", d)
+	}
+	// A plain file and a folder stay trusted background.
+	plain := filepath.Join(dir, "plain.md")
+	mustWrite(t, plain, []byte("Acme kickoff notes"), 0644)
+	for _, p := range []string{plain, dir} {
+		bg, _, docs, err = loadContextArg(p)
+		if err != nil || bg == "" || len(docs) != 0 {
+			t.Errorf("%s: bg = %q, docs = %d, err = %v", p, bg, len(docs), err)
+		}
+	}
+	if bg, _, docs, err = loadContextArg(""); bg != "" || docs != nil || err != nil {
+		t.Errorf("empty path: %q, %v, %v", bg, docs, err)
+	}
+}
