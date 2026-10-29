@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -242,5 +244,160 @@ func TestFetchNoTextCountsRunes(t *testing.T) {
 	})
 	if _, err := Fetch(context.Background(), srv.URL); !errors.Is(err, ErrNoText) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// serverOn starts a server on a specific loopback address.
+func serverOn(t *testing.T, addr string, h http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skip("cannot listen on", addr, err)
+	}
+	srv := httptest.NewUnstartedServer(h)
+	srv.Listener = l
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func onlyPrivate(addrs ...string) func(net.IP) bool {
+	return func(ip net.IP) bool {
+		for _, a := range addrs {
+			if ip.Equal(net.ParseIP(a)) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func swapIsPrivate(t *testing.T, f func(net.IP) bool) {
+	old := isPrivate
+	isPrivate = f
+	t.Cleanup(func() { isPrivate = old })
+}
+
+func plainText(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprint(w, long())
+}
+
+func TestFetchPooledConnectionNoBypass(t *testing.T) {
+	hits := 0
+	target := serverOn(t, "127.0.0.2:0", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		plainText(w)
+	})
+	origin := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/x", http.StatusFound)
+	})
+	swapIsPrivate(t, onlyPrivate("127.0.0.2"))
+
+	if _, err := Fetch(context.Background(), target.URL); err != nil {
+		t.Fatalf("typed private URL should work: %v", err)
+	}
+	_, err := Fetch(context.Background(), origin.URL)
+	if err == nil || err.Error() != "redirected to a private address" {
+		t.Errorf("second fetch err = %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("target hit %d times, want 1", hits)
+	}
+}
+
+func forwardProxy(t *testing.T) *url.URL {
+	t.Helper()
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		out, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), nil)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		resp, err := (&http.Client{
+			Transport:     &http.Transport{Proxy: nil},
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}).Do(out)
+		if err != nil {
+			http.Error(w, err.Error(), 502)
+			return
+		}
+		defer resp.Body.Close()
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	})
+	u, _ := url.Parse(srv.URL)
+	return u
+}
+
+func TestFetchRedirectThroughProxy(t *testing.T) {
+	proxyURL := forwardProxy(t)
+	oldProxy := transport.Proxy
+	transport.Proxy = http.ProxyURL(proxyURL)
+	t.Cleanup(func() { transport.Proxy = oldProxy })
+	swapIsPrivate(t, onlyPrivate("127.0.0.2"))
+
+	public := serve(t, func(w http.ResponseWriter, r *http.Request) { plainText(w) })
+	private := serverOn(t, "127.0.0.2:0", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("private target must not be reached")
+	})
+	redirectTo := func(target string) string {
+		return serve(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target, http.StatusFound)
+		}).URL
+	}
+
+	if _, err := Fetch(context.Background(), redirectTo(public.URL+"/ok")); err != nil {
+		t.Errorf("redirect to a public host through a proxy: %v", err)
+	}
+	_, err := Fetch(context.Background(), redirectTo(private.URL+"/no"))
+	if err == nil || err.Error() != "redirected to a private address" {
+		t.Errorf("redirect to a private host through a proxy: err = %v", err)
+	}
+}
+
+func TestFetchOriginPrivateFromDialedIP(t *testing.T) {
+	private := serverOn(t, "127.0.0.2:0", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("private target must not be reached")
+	})
+	origin := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, private.URL+"/x", http.StatusFound)
+	})
+	swapIsPrivate(t, onlyPrivate("127.0.0.2", "10.0.0.1"))
+	old := lookupIP
+	lookupIP = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host == "origin.example.com" {
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}, {IP: net.ParseIP("10.0.0.1")}}, nil
+		}
+		return nil, fmt.Errorf("unexpected lookup of %s", host)
+	}
+	t.Cleanup(func() { lookupIP = old })
+
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(origin.URL, "http://"))
+	_, err := Fetch(context.Background(), "http://origin.example.com:"+port+"/")
+	if err == nil || err.Error() != "redirected to a private address" {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestIsPrivate(t *testing.T) {
+	yes := []string{"127.0.0.1", "::1", "10.1.2.3", "172.16.0.1", "192.168.0.1", "fc00::1", "fd12::1",
+		"169.254.1.1", "fe80::1", "224.0.0.1", "ff02::1", "0.0.0.0", "::", "0.1.2.3", "100.64.0.1", "100.127.255.254",
+		"198.18.0.1", "198.19.255.255", "240.0.0.1", "255.255.255.255",
+		"::ffff:127.0.0.1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "64:ff9b::7f00:1", "2002:c0a8:0001::", "2002:7f00:1::"}
+	no := []string{"8.8.8.8", "93.184.216.34", "2606:4700::1111", "100.63.255.255", "198.17.0.1", "198.20.0.1",
+		"::ffff:8.8.8.8", "64:ff9b::808:808", "2002:0808:0808::"}
+	for _, s := range yes {
+		if !defaultIsPrivate(net.ParseIP(s)) {
+			t.Errorf("%s should be private", s)
+		}
+	}
+	for _, s := range no {
+		if defaultIsPrivate(net.ParseIP(s)) {
+			t.Errorf("%s should be public", s)
+		}
 	}
 }
