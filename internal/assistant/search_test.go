@@ -575,3 +575,33 @@ func items(v *recordingView, badge string) []Item {
 	}
 	return out
 }
+
+func TestSearchRepeatSkipped(t *testing.T) {
+	f := &fakeThink{replies: []func() (string, error){answer(`{"summary":"s"}`)}}
+	r := &fakeResearch{reply: answer(foundT1)}
+	v := &recordingView{}
+	events, input, done := startSearchRun(t, f, v, r, 5, nil)
+	input <- searchEvent("when did the launch ship?")
+	waitUntil(t, "first lookup", func() bool { return r.count() == 1 })
+	input <- searchEvent("when did the launch ship?")
+	input <- searchEvent("  WHEN did  the launch SHIP?  ")
+	const notice = "📚 not looking up \"when did the launch ship?\": already asked"
+	waitUntil(t, "repeat notice", func() bool { return hasInfo(v, notice) })
+	// A different search still runs.
+	input <- searchEvent("who owns the launch?")
+	waitUntil(t, "second lookup", func() bool { return r.count() == 2 })
+	close(events)
+	<-done
+	if r.count() != 2 {
+		t.Errorf("research calls = %d, want 2", r.count())
+	}
+	n := 0
+	for _, it := range v.Items() {
+		if it.Kind == ItemInfo && strings.Contains(it.Text, "already asked") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("already asked notices = %d, want 2", n)
+	}
+}
