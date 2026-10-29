@@ -21,7 +21,7 @@ const draftNote = "_Live draft from realtime speech-to-text: a summary made from
 
 // Render writes the notes file: the final summary and action items first when
 // the meeting is over, then the live summary, agenda items not covered,
-// decisions, open questions, the librarian's research, the typed questions,
+// decisions, open questions, the librarian's research, the sources added, the typed questions,
 // the brief, the fixes and every suggestion made.
 func Render(m Memory, header string, final bool, updated time.Duration) string {
 	var b strings.Builder
@@ -42,6 +42,13 @@ func Render(m Memory, header string, final bool, updated time.Duration) string {
 		b.WriteString("## Research\n\n")
 		for _, f := range m.Research {
 			b.WriteString(researchLine(f) + "\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(m.Docs) > 0 {
+		b.WriteString("## Sources\n\n")
+		for _, d := range m.Docs {
+			b.WriteString(docLine(d) + "\n")
 		}
 		b.WriteString("\n")
 	}
@@ -228,6 +235,39 @@ func Clean(s string) string {
 			return ' '
 		}
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// docLine is "- [hh:mm:ss] title (`origin`), N KB", with where an untrusted
+// one comes from after it.
+func docLine(d Doc) string {
+	line := fmt.Sprintf("- [%s] %s (%s), %d KB", clock(d.At), escapeMarkdown(Clean(d.Title)), codeSpan(Clean(d.Origin)), docKB(d))
+	switch d.Via {
+	case "web":
+		line += ", web page"
+	case "librarian":
+		line += ", via the librarian"
+	}
+	return line
+}
+
+// docKB is the size of a doc's text in KB, rounded up.
+func docKB(d Doc) int { return (len(d.Text) + 1023) >> 10 }
+
+// CleanDoc cleans the text of a document: it keeps line breaks and tabs,
+// turns the Unicode line and paragraph separators into line breaks, and drops
+// carriage returns and the other control and format characters.
+func CleanDoc(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r):
+			return '\n'
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
 			return -1
 		}
 		return r

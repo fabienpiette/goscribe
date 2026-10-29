@@ -20,6 +20,7 @@ const (
 	QuestionEvent                  // the user typed a question (Text)
 	FixEvent                       // the user typed a /fix command (Fix)
 	BriefEvent                     // the user typed a /brief command (Brief)
+	AddEvent                       // the user typed an /add command (Add)
 )
 
 // BriefRequest is a parsed /brief command: Op is "add", "list" or "rm".
@@ -28,6 +29,10 @@ type BriefRequest struct {
 	Text string // add: the brief
 	N    int    // rm: the brief number, from 1
 }
+
+// AddRequest is a parsed /add command: Op is "add" (Target is a path) or
+// "list".
+type AddRequest struct{ Op, Target string }
 
 // FixRequest is a parsed /fix command: Op is "add", "list", "rm", "yes" or
 // "no"; N is 0 for the latest or none given.
@@ -44,6 +49,7 @@ type Event struct {
 	Muted   bool         // MuteEvent: the side is now muted
 	Fix     FixRequest   // FixEvent: what the user asked
 	Brief   BriefRequest // BriefEvent: what the user asked
+	Add     AddRequest   // AddEvent: what the user asked
 	// Window is how far back a RecapEvent goes; 0 means Config.RecapWindow.
 	Window time.Duration
 }
@@ -235,7 +241,8 @@ type state struct {
 
 	proposals []proposal // fixes the model suggested, numbered from 1
 
-	briefAsked bool // a brief waits for the next update to start at once
+	updateAsked bool     // a brief or a source waits for the next update to start at once
+	changes     []string // trusted lines for the next update: what the user changed
 
 	finalWritten bool // the final notes were written
 
@@ -281,6 +288,8 @@ func (s *state) handle(ev Event) {
 		s.fix(ev.Fix)
 	case BriefEvent:
 		s.brief(ev.Brief)
+	case AddEvent:
+		s.add(ev.Add)
 	case MuteEvent:
 		s.muted[ev.Speaker] = ev.Muted
 		icon, word := "🔊", "unmuted"
@@ -447,8 +456,8 @@ func (s *state) maybeStart(now time.Time) {
 	if s.thinking {
 		return
 	}
-	if s.briefAsked && len(s.lines) > 0 {
-		s.startBriefUpdate(now)
+	if s.updateAsked && len(s.lines) > 0 {
+		s.startAskedUpdate(now)
 		return
 	}
 	if s.analysed == len(s.lines) || now.Sub(s.lastStart) < s.interval() {
@@ -459,7 +468,7 @@ func (s *state) maybeStart(now time.Time) {
 		return
 	}
 	upto := len(s.lines)
-	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, false, s.unacceptedGuesses())
+	instructions, transcript := CyclePrompt(s.c.Context, s.mem, s.lines[:s.analysed], s.lines[s.analysed:upto], s.c.Research != nil, s.c.Input != nil, s.takeChanges(), s.unacceptedGuesses())
 	s.call(now, upto, false, instructions, transcript)
 }
 
@@ -785,6 +794,8 @@ func (s *state) await(res <-chan result) (result, bool) {
 				s.info("the meeting is over: fixes are closed")
 			case BriefEvent:
 				s.info("the meeting is over: briefs are closed")
+			case AddEvent:
+				s.info("the meeting is over: sources are closed")
 			}
 		}
 	}
@@ -889,7 +900,16 @@ func (s *state) board() {
 		briefs = append(briefs, b.Text)
 	}
 	s.c.View.Board(Board{Summary: m.Summary, NotCovered: slices.Clone(m.NotCovered), Decisions: slices.Clone(m.Decisions),
-		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: slices.Clone(s.sources), Fixes: fixes, Briefs: briefs})
+		OpenQuestions: slices.Clone(m.OpenQuestions), Sources: s.boardSources(), Fixes: fixes, Briefs: briefs})
+}
+
+// boardSources is the context file names, then the title of each doc added.
+func (s *state) boardSources() []string {
+	names := Sources(s.c.Context)
+	for _, d := range s.mem.Docs {
+		names = append(names, d.Title)
+	}
+	return names
 }
 
 func (s *state) dim(text string) string {

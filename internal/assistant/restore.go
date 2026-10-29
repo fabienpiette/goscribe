@@ -159,7 +159,8 @@ func (s *state) restore(r Restored, from string) {
 		fixes++
 	}
 	if briefs > 0 {
-		s.briefAsked = len(s.lines) > 0
+		s.updateAsked = len(s.lines) > 0
+		s.addChange(briefChangedLine)
 	}
 	if briefs+fixes > 0 {
 		_ = s.writeNotes(false) // a failure is shown in the feed

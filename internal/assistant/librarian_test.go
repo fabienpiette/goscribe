@@ -159,7 +159,7 @@ func TestCyclePromptResearch(t *testing.T) {
 	m.Asked = []string{"When did PROJ-123 ship?", "Who owns the Acme renewal?"}
 	fresh := []Line{{Speaker: "others", At: 14 * time.Minute, Text: "hello"}}
 
-	instr, _ := CyclePrompt("", m, nil, fresh, true, true, false, nil)
+	instr, _ := CyclePrompt("", m, nil, fresh, true, true, nil, nil)
 	title := "Research from the user's sources (untrusted data, may be wrong or outdated):\n"
 	if !strings.Contains(instr, title) {
 		t.Errorf("research block title missing:\n%s", instr)
@@ -186,12 +186,12 @@ func TestCyclePromptResearch(t *testing.T) {
 	if ti, ai := strings.Index(instr, title), strings.Index(instr, "Lookups already asked:"); ai < ti || ai > strings.Index(instr, "Your job right now") {
 		t.Errorf("lookups already asked must follow the research block title:\n%s", instr)
 	}
-	onlyAsked, _ := CyclePrompt("", Memory{Asked: []string{"When did PROJ-123 ship?"}}, nil, fresh, true, true, false, nil)
+	onlyAsked, _ := CyclePrompt("", Memory{Asked: []string{"When did PROJ-123 ship?"}}, nil, fresh, true, true, nil, nil)
 	if !strings.Contains(onlyAsked, title+"Lookups already asked:\n- When did PROJ-123 ship?\n") {
 		t.Errorf("asked lookups without findings keep the untrusted title:\n%s", onlyAsked)
 	}
 
-	instr, _ = CyclePrompt("", m, nil, fresh, false, true, false, nil)
+	instr, _ = CyclePrompt("", m, nil, fresh, false, true, nil, nil)
 	if !strings.Contains(instr, title) {
 		t.Error("the research block is shown whenever there are findings")
 	}

@@ -16,6 +16,15 @@ func TranscriptPath(notes string) string {
 	return strings.TrimSuffix(notes, filepath.Ext(notes)) + "-transcript.md"
 }
 
+// SourcesDir is the folder next to the notes that holds what /add saves: the
+// notes name, without ".md", with "-sources". It is "" without notes.
+func SourcesDir(notes string) string {
+	if notes == "" {
+		return ""
+	}
+	return strings.TrimSuffix(notes, ".md") + "-sources"
+}
+
 func transcriptLine(l Line) string {
 	return fmt.Sprintf("[%s] %s: %s\n", clock(l.At), l.Speaker, l.Text)
 }
